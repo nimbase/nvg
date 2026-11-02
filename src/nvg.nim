@@ -14,7 +14,9 @@ import ./nvg/raster
 import ./nvg/dash
 import ./nvg/pathmeasure
 import ./nvg/layer
-import ./nvg/jit
+import ./nvg/jitctx
+when defined(nvgJit):
+  import ./nvg/jit
 import ./nvg/backend
 import ./nvg/canvas
 
@@ -28,6 +30,8 @@ export raster
 export dash
 export pathmeasure
 export layer
-export jit
+export jitctx
+when defined(nvgJit):
+  export jit
 export backend
 export canvas

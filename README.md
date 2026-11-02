@@ -39,9 +39,12 @@ c.fill()
 c.savePng("out.png")
 ```
 
-Faster rendering with the JIT backend (same pixels, guaranteed):
+Faster rendering with the JIT backend (same pixels, guaranteed).
+Compile with `-d:nvgJit` (this keeps the kernel builders out of normal
+builds, so everyday compiles stay fast):
 
 ```nim
+# nim c -d:nvgJit myapp.nim
 let c = newCanvas(800, 600, newJitBackend())
 # ... draw as usual ...
 destroyJitBackend(c.backend.JitBackend)
