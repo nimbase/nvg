@@ -24,7 +24,6 @@
 ## memory operands fault on misaligned pools cross-platform).
 
 import dynasm
-import std/math
 import ./jitctx
 
 export jitctx
