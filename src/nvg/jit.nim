@@ -25,6 +25,8 @@
 
 import dynasm
 import ./jitctx
+import ./blend_x64
+import ./blend_a64
 
 export jitctx
 
@@ -128,12 +130,12 @@ proc buildSolidRowX64*(): ExecutableBuffer =
     ret()
   a.finalize()
 
-proc buildSolidRowGenX64*(op: static CompOp): ExecutableBuffer =
+proc buildSolidRowGenX64*(op: CompOp): ExecutableBuffer =
   ## Solid source-over head with the generic-op blend tail for any
   ## non-sourceOver `op` (see `blend_x64` for the entry contract).
   ## Paint channels clamp like the scalar generic path; no transparent
-  ## early-out (clearing ops must run). Compile-time `op`: getters
-  ## dispatch per value (see `getSolid`).
+  ## early-out (clearing ops must run). The tail is a shared emitter
+  ## dispatched on the runtime `op` (one tail expansion per op total).
   var a = newAssembler(akX64)
   dynasm a:
     arch x64
@@ -170,11 +172,7 @@ proc buildSolidRowGenX64*(op: static CompOp): ExecutableBuffer =
     movsd xmm2, [r8 + 16]
     maxpd xmm2, xmm5
     minpd xmm2, xmm6
-  # NB: `include` must nest in `when` here (compiler quirk: includes at
-  # the direct body level of a generic proc fail to resolve). Getters
-  # only instantiate these builders with non-sourceOver ops.
-  when op != coSourceOver:
-    include blend_x64
+  emitBlendTailX64(op, a)
   dynasm a:
     arch x64
     add r10, 4
@@ -272,7 +270,7 @@ proc buildSolidRowAarch64*(): ExecutableBuffer =
     ret()
   a.finalize()
 
-proc buildSolidRowGenAarch64*(op: static CompOp): ExecutableBuffer =
+proc buildSolidRowGenAarch64*(op: CompOp): ExecutableBuffer =
   ## Solid head with the generic-op tail (`blend_a64`, same contract as
   ## x64). Assemble-verified only, like the kernel above.
   var a = newAssembler(akAarch64)
@@ -307,9 +305,7 @@ proc buildSolidRowGenAarch64*(op: static CompOp): ExecutableBuffer =
     ldr d2, [x12, 16]
     fmax d2, d2, d17
     fmin d2, d2, d18
-  # NB: `include` must nest in `when` here (same quirk as above).
-  when op != coSourceOver:
-    include blend_a64
+  emitBlendTailAarch64(op, a)
   dynasm a:
     arch aarch64
     add x9, x9, 4
@@ -478,7 +474,7 @@ proc buildLinearRowX64*(): ExecutableBuffer =
     ret()
   a.finalize()
 
-proc buildLinearRowGenX64*(op: static CompOp): ExecutableBuffer =
+proc buildLinearRowGenX64*(op: CompOp): ExecutableBuffer =
   ## Linear-gradient head with the generic-op blend tail for any
   ## non-sourceOver `op` (entry contract in `blend_x64`). Paint eval
   ## mirrors `paint.sample` exactly like the sourceOver kernel; channels
@@ -561,9 +557,7 @@ proc buildLinearRowGenX64*(op: static CompOp): ExecutableBuffer =
     addsd xmm2, xmm3
     maxpd xmm2, xmm5
     minpd xmm2, xmm6
-  # NB: `include` must nest in `when` here (same quirk as above).
-  when op != coSourceOver:
-    include blend_x64
+  emitBlendTailX64(op, a)
   dynasm a:
     arch x64
     addsd xmm8, xmm6 # x += 1.0
@@ -712,7 +706,7 @@ proc buildLinearRowAarch64*(): ExecutableBuffer =
     ret()
   a.finalize()
 
-proc buildLinearRowGenAarch64*(op: static CompOp): ExecutableBuffer =
+proc buildLinearRowGenAarch64*(op: CompOp): ExecutableBuffer =
   ## Linear head with the generic-op tail (`blend_a64`, same contract
   ## as x64). Assemble-verified only, like the kernel above.
   var a = newAssembler(akAarch64)
@@ -795,9 +789,7 @@ proc buildLinearRowGenAarch64*(op: static CompOp): ExecutableBuffer =
     fadd d2, d2, d3
     fmax d2, d2, d17
     fmin d2, d2, d18
-  # NB: `include` must nest in `when` here (same quirk as above).
-  when op != coSourceOver:
-    include blend_a64
+  emitBlendTailAarch64(op, a)
   dynasm a:
     arch aarch64
     fadd d20, d20, d18 # x += 1.0
@@ -959,7 +951,7 @@ proc buildRadialRowX64*(): ExecutableBuffer =
     ret()
   a.finalize()
 
-proc buildRadialRowGenX64*(op: static CompOp): ExecutableBuffer =
+proc buildRadialRowGenX64*(op: CompOp): ExecutableBuffer =
   ## Radial-gradient head with the generic-op blend tail (entry
   ## contract in `blend_x64`). `sqrtsd`/`divsd` mirror the scalar;
   ## channels clamp and clearing ops run.
@@ -1045,9 +1037,7 @@ proc buildRadialRowGenX64*(op: static CompOp): ExecutableBuffer =
     addsd xmm2, xmm3
     maxpd xmm2, xmm5
     minpd xmm2, xmm6
-  # NB: `include` must nest in `when` here (same quirk as above).
-  when op != coSourceOver:
-    include blend_x64
+  emitBlendTailX64(op, a)
   dynasm a:
     arch x64
     addsd xmm8, xmm6 # x += 1.0
@@ -1197,7 +1187,7 @@ proc buildRadialRowAarch64*(): ExecutableBuffer =
     ret()
   a.finalize()
 
-proc buildRadialRowGenAarch64*(op: static CompOp): ExecutableBuffer =
+proc buildRadialRowGenAarch64*(op: CompOp): ExecutableBuffer =
   ## Radial head with the generic-op tail (`blend_a64`, same contract
   ## as x64). Assemble-verified only, like the kernel above.
   var a = newAssembler(akAarch64)
@@ -1282,9 +1272,7 @@ proc buildRadialRowGenAarch64*(op: static CompOp): ExecutableBuffer =
     fadd d2, d2, d3
     fmax d2, d2, d17
     fmin d2, d2, d18
-  # NB: `include` must nest in `when` here (same quirk as above).
-  when op != coSourceOver:
-    include blend_a64
+  emitBlendTailAarch64(op, a)
   dynasm a:
     arch aarch64
     fadd d20, d20, d18 # x += 1.0
@@ -1467,7 +1455,7 @@ proc buildBoxRowX64*(): ExecutableBuffer =
     ret()
   a.finalize()
 
-proc buildBoxRowGenX64*(op: static CompOp): ExecutableBuffer =
+proc buildBoxRowGenX64*(op: CompOp): ExecutableBuffer =
   ## Box-gradient head with the generic-op blend tail (entry contract
   ## in `blend_x64`). `abs`/`min`/`max` replicate via sub+maxpd like the
   ## sourceOver kernel; channels clamp and clearing ops run.
@@ -1567,9 +1555,7 @@ proc buildBoxRowGenX64*(op: static CompOp): ExecutableBuffer =
     addsd xmm2, xmm3
     maxpd xmm2, xmm5
     minpd xmm2, xmm6
-  # NB: `include` must nest in `when` here (same quirk as above).
-  when op != coSourceOver:
-    include blend_x64
+  emitBlendTailX64(op, a)
   dynasm a:
     arch x64
     addsd xmm8, xmm6 # x += 1.0
@@ -1738,7 +1724,7 @@ proc buildBoxRowAarch64*(): ExecutableBuffer =
     ret()
   a.finalize()
 
-proc buildBoxRowGenAarch64*(op: static CompOp): ExecutableBuffer =
+proc buildBoxRowGenAarch64*(op: CompOp): ExecutableBuffer =
   ## Box head with the generic-op tail (`blend_a64`, same contract as
   ## x64). Assemble-verified only, like the kernel above.
   var a = newAssembler(akAarch64)
@@ -1838,9 +1824,7 @@ proc buildBoxRowGenAarch64*(op: static CompOp): ExecutableBuffer =
     fadd d2, d2, d3
     fmax d2, d2, d17
     fmin d2, d2, d18
-  # NB: `include` must nest in `when` here (same quirk as above).
-  when op != coSourceOver:
-    include blend_a64
+  emitBlendTailAarch64(op, a)
   dynasm a:
     arch aarch64
     fadd d20, d20, d18 # x += 1.0
@@ -2105,7 +2089,7 @@ proc buildPatternRowX64*(): ExecutableBuffer =
     ret()
   a.finalize()
 
-proc buildPatternRowGenX64*(op: static CompOp): ExecutableBuffer =
+proc buildPatternRowGenX64*(op: CompOp): ExecutableBuffer =
   ## Nearest-pattern head with the generic-op blend tail (entry
   ## contract in `blend_x64`). Index math mirrors `sampleImage` exactly
   ## like the sourceOver kernel; texel channels clamp and clearing ops
@@ -2285,9 +2269,7 @@ proc buildPatternRowGenX64*(op: static CompOp): ExecutableBuffer =
     minpd xmm3, xmm6
     mulsd xmm3, [r11] # cov -> sa (no early-out: clearing ops run)
     movsd xmm10, xmm3 # sa
-  # NB: `include` must nest in `when` here (same quirk as above).
-  when op != coSourceOver:
-    include blend_x64
+  emitBlendTailX64(op, a)
   dynasm a:
     arch x64
     addsd xmm8, xmm6 # x += 1.0
@@ -2527,7 +2509,7 @@ proc buildPatternRowAarch64*(): ExecutableBuffer =
     ret()
   a.finalize()
 
-proc buildPatternRowGenAarch64*(op: static CompOp): ExecutableBuffer =
+proc buildPatternRowGenAarch64*(op: CompOp): ExecutableBuffer =
   ## Nearest-pattern head with the generic-op tail (`blend_a64`, same
   ## contract as x64). Assemble-verified only, like the kernel above.
   var a = newAssembler(akAarch64)
@@ -2698,9 +2680,7 @@ proc buildPatternRowGenAarch64*(op: static CompOp): ExecutableBuffer =
     fmin d3, d3, d18
     ldr d4, [x10]
     fmul d22, d3, d4 # sa
-  # NB: `include` must nest in `when` here (same quirk as above).
-  when op != coSourceOver:
-    include blend_a64
+  emitBlendTailAarch64(op, a)
   dynasm a:
     arch aarch64
     fadd d20, d20, d18 # x += 1.0
@@ -3037,7 +3017,7 @@ proc buildMultiLinearRowX64*(): ExecutableBuffer =
     ret()
   a.finalize()
 
-proc buildMultiLinearRowGenX64*(op: static CompOp): ExecutableBuffer =
+proc buildMultiLinearRowGenX64*(op: CompOp): ExecutableBuffer =
   ## Multi-stop linear-gradient head with the generic-op blend tail. Same ABI as solid.
   ## `t`/`tc` replicate `paint.sample` (linear branch) + `sampleStops`
   ## exactly: clamp01, below-first (last author at min pos), past-last
@@ -3299,9 +3279,7 @@ proc buildMultiLinearRowGenX64*(op: static CompOp): ExecutableBuffer =
     minpd xmm3, xmm6
     mulsd xmm3, [r11] # cov
     movsd xmm10, xmm3 # sa
-  # NB: `include` must nest in `when` here (same quirk as above).
-  when op != coSourceOver:
-    include blend_x64
+  emitBlendTailX64(op, a)
   dynasm a:
     arch x64
     addsd xmm8, xmm6 # x += 1.0
@@ -3656,7 +3634,7 @@ proc buildMultiRadialRowX64*(): ExecutableBuffer =
 
 
 
-proc buildMultiRadialRowGenX64*(op: static CompOp): ExecutableBuffer =
+proc buildMultiRadialRowGenX64*(op: CompOp): ExecutableBuffer =
   ## Multi-stop radial-gradient head with the generic-op blend tail. Same ABI as solid.
   ## `t`/`tc` replicate `paint.sample` (radial branch) + `sampleStops`
   ## exactly: clamp01, below-first (last author at min pos), past-last
@@ -3923,9 +3901,7 @@ proc buildMultiRadialRowGenX64*(op: static CompOp): ExecutableBuffer =
     minpd xmm3, xmm6
     mulsd xmm3, [r11] # cov
     movsd xmm10, xmm3 # sa
-  # NB: `include` must nest in `when` here (same quirk as above).
-  when op != coSourceOver:
-    include blend_x64
+  emitBlendTailX64(op, a)
   dynasm a:
     arch x64
     addsd xmm8, xmm6 # x += 1.0
@@ -4504,7 +4480,7 @@ proc buildPatternBilinearRowX64*(): ExecutableBuffer =
   a.finalize()
 
 
-proc buildPatternBilinearRowGenX64*(op: static CompOp): ExecutableBuffer =
+proc buildPatternBilinearRowGenX64*(op: CompOp): ExecutableBuffer =
   ## Bilinear-filter pattern head with the generic-op blend tail, same ABI and same
   ## `PatternCtx` layout as nearest. Per-pixel op order replicates
   ## `paint.sample` (pattern branch) + `sampleImage` (bilinear) +
@@ -4935,9 +4911,7 @@ proc buildPatternBilinearRowGenX64*(op: static CompOp): ExecutableBuffer =
     minpd xmm3, xmm6
     mulsd xmm3, [r11] # cov
     movsd xmm10, xmm3 # sa
-  # NB: `include` must nest in `when` here (same quirk as above).
-  when op != coSourceOver:
-    include blend_x64
+  emitBlendTailX64(op, a)
   dynasm a:
     arch x64
     label pixdone
