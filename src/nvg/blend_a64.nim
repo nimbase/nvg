@@ -108,6 +108,70 @@ proc emitBlendTailAarch64Static*(op: static CompOp, a: var Assembler) =
       fsub d26, d18, d22
       fmul d26, d26, d24
       fadd d23, d22, d26
+  elif op == coDarken:
+    dynasm a:
+      arch aarch64
+      ldrb w4, [x9, 3]
+      ldr d24, [x13, x4, lsl, 3]
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      fadd d23, d22, d26 # sa + da*(1-sa)
+  elif op == coLighten:
+    dynasm a:
+      arch aarch64
+      ldrb w4, [x9, 3]
+      ldr d24, [x13, x4, lsl, 3]
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      fadd d23, d22, d26 # sa + da*(1-sa)
+  elif op == coColorDodge:
+    dynasm a:
+      arch aarch64
+      ldrb w4, [x9, 3]
+      ldr d24, [x13, x4, lsl, 3]
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      fadd d23, d22, d26 # sa + da*(1-sa)
+  elif op == coColorBurn:
+    dynasm a:
+      arch aarch64
+      ldrb w4, [x9, 3]
+      ldr d24, [x13, x4, lsl, 3]
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      fadd d23, d22, d26 # sa + da*(1-sa)
+  elif op == coHardLight:
+    dynasm a:
+      arch aarch64
+      ldrb w4, [x9, 3]
+      ldr d24, [x13, x4, lsl, 3]
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      fadd d23, d22, d26 # sa + da*(1-sa)
+  elif op == coSoftLight:
+    dynasm a:
+      arch aarch64
+      ldrb w4, [x9, 3]
+      ldr d24, [x13, x4, lsl, 3]
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      fadd d23, d22, d26 # sa + da*(1-sa)
+  elif op == coDifference:
+    dynasm a:
+      arch aarch64
+      ldrb w4, [x9, 3]
+      ldr d24, [x13, x4, lsl, 3]
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      fadd d23, d22, d26 # sa + da*(1-sa)
+  elif op == coExclusion:
+    dynasm a:
+      arch aarch64
+      ldrb w4, [x9, 3]
+      ldr d24, [x13, x4, lsl, 3]
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      fadd d23, d22, d26 # sa + da*(1-sa)
   else:
     {.error: "blend tail: sourceOver uses the dedicated fast path".}
 
@@ -284,6 +348,244 @@ proc emitBlendTailAarch64Static*(op: static CompOp, a: var Assembler) =
       fmul d2, d22, d24
       fmul d1, d1, d2
       fadd d0, d0, d1
+  elif op == coDarken:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24 # 1-da
+      fmul d26, d26, d22
+      ldr d0, [sp, 32]
+      fmul d0, d0, d26 # t1
+      fsub d26, d18, d22 # 1-sa
+      fmul d26, d26, d24
+      ldrb w4, [x9]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26 # t2
+      fadd d0, d0, d1
+      fmul d1, d22, d24 # sa*da
+      ldr d2, [sp, 32]
+      ldrb w4, [x9]
+      ldr d26, [x13, x4, lsl, 3]
+      fmin d2, d2, d26 # Bout = min(cs,cb)
+      fmul d1, d1, d2 # t3
+      fadd d0, d0, d1
+  elif op == coLighten:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 32]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24
+      ldr d2, [sp, 32]
+      ldrb w4, [x9]
+      ldr d26, [x13, x4, lsl, 3]
+      fmax d2, d2, d26 # Bout = max(cs,cb)
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+  elif op == coColorDodge:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 32]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24 # sa*da
+      ldr d2, [sp, 32] # cs
+      ldrb w4, [x9]
+      ldr d26, [x13, x4, lsl, 3] # cb
+      fcmp d2, d17 # cs <= 0?
+      b.ls fwd("ddgRz")
+      fcmp d26, d18 # cb >= 1?
+      b.hs fwd("ddgRo")
+      fsub d26, d18, d26 # 1-cb
+      fdiv d26, d2, d26 # cs/(1-cb)
+      fmin d26, d26, d18 # Bout
+      b fwd("ddgRdone")
+      label ddgRz
+      fmov d26, d17 # Bout = 0
+      b fwd("ddgRdone")
+      label ddgRo
+      fmov d26, d18 # Bout = 1
+      label ddgRdone
+      fmul d1, d1, d26 # t3
+      fadd d0, d0, d1
+  elif op == coColorBurn:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 32]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24 # sa*da
+      ldr d2, [sp, 32] # cs
+      ldrb w4, [x9]
+      ldr d26, [x13, x4, lsl, 3] # cb
+      fcmp d2, d18 # cs >= 1?
+      b.hs fwd("dbrRo")
+      fcmp d26, d17 # cb <= 0?
+      b.ls fwd("dbrRz")
+      fsub d26, d18, d2 # 1-cs
+      ldrb w4, [x9]
+      ldr d2, [x13, x4, lsl, 3] # cb
+      fdiv d26, d26, d2 # (1-cs)/cb
+      fmin d26, d26, d18
+      fsub d26, d18, d26 # Bout
+      b fwd("dbrRdone")
+      label dbrRz
+      fmov d26, d17 # Bout = 0
+      b fwd("dbrRdone")
+      label dbrRo
+      fmov d26, d18 # Bout = 1
+      label dbrRdone
+      fmul d1, d1, d26 # t3
+      fadd d0, d0, d1
+  elif op == coHardLight:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 32]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      ldr d1, [sp, 32] # cs
+      ldrb w4, [x9]
+      ldr d2, [x13, x4, lsl, 3] # cb
+      fcmp d1, d19 # cs <= 0.5?
+      b.ls fwd("hltRlo")
+      fsub d26, d18, d1 # 1-cs
+      fadd d26, d26, d26
+      fsub d1, d18, d2 # 1-cb
+      fmul d26, d26, d1
+      fsub d1, d18, d26 # Bout = 1-2*(1-cs)*(1-cb)
+      b fwd("hltRdone")
+      label hltRlo
+      fmul d1, d1, d2
+      fadd d1, d1, d1 # Bout = 2*cs*cb
+      label hltRdone
+      fmul d2, d22, d24
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+  elif op == coSoftLight:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 32]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      ldr d1, [sp, 32] # cs
+      ldrb w4, [x9]
+      ldr d2, [x13, x4, lsl, 3] # cb
+      fcmp d1, d19 # cs <= 0.5?
+      b.ls fwd("sftRlo")
+      fmul d26, d19, d19 # 0.25
+      fcmp d2, d26 # cb <= 0.25?
+      b.ls fwd("sftRpoly")
+      fsqrt d26, d2 # d = sqrt(cb)
+      b fwd("sftRd")
+      label sftRpoly
+      fadd d26, d2, d2 # 2cb
+      fadd d26, d26, d26 # 4cb
+      fadd d27, d18, d18 # 2
+      fadd d27, d27, d18 # 3
+      fsub d26, d26, d27 # 4cb-3
+      fadd d26, d26, d26 # 8cb-6
+      fadd d26, d26, d26 # 16cb-12
+      fmul d26, d26, d2 # (16cb-12)*cb
+      fadd d27, d18, d18 # 2
+      fadd d27, d27, d27 # 4
+      fadd d26, d26, d27 # +4
+      fmul d26, d26, d2 # d
+      label sftRd
+      fadd d27, d1, d1 # 2cs
+      fsub d27, d27, d18 # 2cs-1
+      fsub d26, d26, d2 # d-cb
+      fmul d27, d27, d26
+      fadd d1, d2, d27 # Bout = cb+(2cs-1)*(d-cb)
+      b fwd("sftRdone")
+      label sftRlo
+      fsub d26, d18, d1
+      fsub d26, d26, d1 # 1-2cs
+      fmul d26, d26, d2 # *cb
+      fsub d27, d18, d2 # 1-cb
+      fmul d26, d26, d27
+      fsub d1, d2, d26 # Bout = cb-(1-2cs)*cb*(1-cb)
+      label sftRdone
+      fmul d2, d22, d24
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+  elif op == coDifference:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 32]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24 # sa*da
+      ldr d2, [sp, 32] # cs
+      ldrb w4, [x9]
+      ldr d26, [x13, x4, lsl, 3] # cb
+      fsub d2, d2, d26 # cs-cb
+      fabs d2, d2 # Bout = |cs-cb|
+      fmul d1, d1, d2 # t3
+      fadd d0, d0, d1
+  elif op == coExclusion:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 32]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24 # sa*da
+      ldr d2, [sp, 32] # cs
+      ldrb w4, [x9]
+      ldr d26, [x13, x4, lsl, 3] # cb
+      fmul d27, d2, d26 # cs*cb
+      fadd d2, d2, d26 # cs+cb
+      fadd d27, d27, d27 # 2*cs*cb
+      fsub d2, d2, d27 # Bout
+      fmul d1, d1, d2 # t3
+      fadd d0, d0, d1
   dynasm a:
     arch aarch64
     fdiv d0, d0, d23
@@ -457,6 +759,244 @@ proc emitBlendTailAarch64Static*(op: static CompOp, a: var Assembler) =
       label ovlGdone
       fmul d2, d22, d24
       fmul d1, d1, d2
+      fadd d0, d0, d1
+  elif op == coDarken:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 40]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9, 1]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24
+      ldr d2, [sp, 40]
+      ldrb w4, [x9, 1]
+      ldr d26, [x13, x4, lsl, 3]
+      fmin d2, d2, d26 # Bout = min(cs,cb)
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+  elif op == coLighten:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 40]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9, 1]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24
+      ldr d2, [sp, 40]
+      ldrb w4, [x9, 1]
+      ldr d26, [x13, x4, lsl, 3]
+      fmax d2, d2, d26 # Bout = max(cs,cb)
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+  elif op == coColorDodge:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 40]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9, 1]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24 # sa*da
+      ldr d2, [sp, 40] # cs
+      ldrb w4, [x9, 1]
+      ldr d26, [x13, x4, lsl, 3] # cb
+      fcmp d2, d17 # cs <= 0?
+      b.ls fwd("ddgGz")
+      fcmp d26, d18 # cb >= 1?
+      b.hs fwd("ddgGo")
+      fsub d26, d18, d26 # 1-cb
+      fdiv d26, d2, d26 # cs/(1-cb)
+      fmin d26, d26, d18 # Bout
+      b fwd("ddgGdone")
+      label ddgGz
+      fmov d26, d17 # Bout = 0
+      b fwd("ddgGdone")
+      label ddgGo
+      fmov d26, d18 # Bout = 1
+      label ddgGdone
+      fmul d1, d1, d26 # t3
+      fadd d0, d0, d1
+  elif op == coColorBurn:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 40]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9, 1]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24 # sa*da
+      ldr d2, [sp, 40] # cs
+      ldrb w4, [x9, 1]
+      ldr d26, [x13, x4, lsl, 3] # cb
+      fcmp d2, d18 # cs >= 1?
+      b.hs fwd("dbrGo")
+      fcmp d26, d17 # cb <= 0?
+      b.ls fwd("dbrGz")
+      fsub d26, d18, d2 # 1-cs
+      ldrb w4, [x9, 1]
+      ldr d2, [x13, x4, lsl, 3] # cb
+      fdiv d26, d26, d2 # (1-cs)/cb
+      fmin d26, d26, d18
+      fsub d26, d18, d26 # Bout
+      b fwd("dbrGdone")
+      label dbrGz
+      fmov d26, d17 # Bout = 0
+      b fwd("dbrGdone")
+      label dbrGo
+      fmov d26, d18 # Bout = 1
+      label dbrGdone
+      fmul d1, d1, d26 # t3
+      fadd d0, d0, d1
+  elif op == coHardLight:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 40]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9, 1]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      ldr d1, [sp, 40] # cs
+      ldrb w4, [x9, 1]
+      ldr d2, [x13, x4, lsl, 3] # cb
+      fcmp d1, d19 # cs <= 0.5?
+      b.ls fwd("hltGlo")
+      fsub d26, d18, d1 # 1-cs
+      fadd d26, d26, d26
+      fsub d1, d18, d2 # 1-cb
+      fmul d26, d26, d1
+      fsub d1, d18, d26 # Bout = 1-2*(1-cs)*(1-cb)
+      b fwd("hltGdone")
+      label hltGlo
+      fmul d1, d1, d2
+      fadd d1, d1, d1 # Bout = 2*cs*cb
+      label hltGdone
+      fmul d2, d22, d24
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+  elif op == coSoftLight:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 40]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9, 1]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      ldr d1, [sp, 40] # cs
+      ldrb w4, [x9, 1]
+      ldr d2, [x13, x4, lsl, 3] # cb
+      fcmp d1, d19 # cs <= 0.5?
+      b.ls fwd("sftGlo")
+      fmul d26, d19, d19 # 0.25
+      fcmp d2, d26 # cb <= 0.25?
+      b.ls fwd("sftGpoly")
+      fsqrt d26, d2 # d = sqrt(cb)
+      b fwd("sftGd")
+      label sftGpoly
+      fadd d26, d2, d2 # 2cb
+      fadd d26, d26, d26 # 4cb
+      fadd d27, d18, d18 # 2
+      fadd d27, d27, d18 # 3
+      fsub d26, d26, d27 # 4cb-3
+      fadd d26, d26, d26 # 8cb-6
+      fadd d26, d26, d26 # 16cb-12
+      fmul d26, d26, d2 # (16cb-12)*cb
+      fadd d27, d18, d18 # 2
+      fadd d27, d27, d27 # 4
+      fadd d26, d26, d27 # +4
+      fmul d26, d26, d2 # d
+      label sftGd
+      fadd d27, d1, d1 # 2cs
+      fsub d27, d27, d18 # 2cs-1
+      fsub d26, d26, d2 # d-cb
+      fmul d27, d27, d26
+      fadd d1, d2, d27 # Bout = cb+(2cs-1)*(d-cb)
+      b fwd("sftGdone")
+      label sftGlo
+      fsub d26, d18, d1
+      fsub d26, d26, d1 # 1-2cs
+      fmul d26, d26, d2 # *cb
+      fsub d27, d18, d2 # 1-cb
+      fmul d26, d26, d27
+      fsub d1, d2, d26 # Bout = cb-(1-2cs)*cb*(1-cb)
+      label sftGdone
+      fmul d2, d22, d24
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+  elif op == coDifference:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 40]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9, 1]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24 # sa*da
+      ldr d2, [sp, 40] # cs
+      ldrb w4, [x9, 1]
+      ldr d26, [x13, x4, lsl, 3] # cb
+      fsub d2, d2, d26 # cs-cb
+      fabs d2, d2 # Bout = |cs-cb|
+      fmul d1, d1, d2 # t3
+      fadd d0, d0, d1
+  elif op == coExclusion:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 40]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9, 1]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24 # sa*da
+      ldr d2, [sp, 40] # cs
+      ldrb w4, [x9, 1]
+      ldr d26, [x13, x4, lsl, 3] # cb
+      fmul d27, d2, d26 # cs*cb
+      fadd d2, d2, d26 # cs+cb
+      fadd d27, d27, d27 # 2*cs*cb
+      fsub d2, d2, d27 # Bout
+      fmul d1, d1, d2 # t3
       fadd d0, d0, d1
   dynasm a:
     arch aarch64
@@ -632,6 +1172,244 @@ proc emitBlendTailAarch64Static*(op: static CompOp, a: var Assembler) =
       fmul d2, d22, d24
       fmul d1, d1, d2
       fadd d0, d0, d1
+  elif op == coDarken:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 48]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9, 2]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24
+      ldr d2, [sp, 48]
+      ldrb w4, [x9, 2]
+      ldr d26, [x13, x4, lsl, 3]
+      fmin d2, d2, d26 # Bout = min(cs,cb)
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+  elif op == coLighten:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 48]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9, 2]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24
+      ldr d2, [sp, 48]
+      ldrb w4, [x9, 2]
+      ldr d26, [x13, x4, lsl, 3]
+      fmax d2, d2, d26 # Bout = max(cs,cb)
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+  elif op == coColorDodge:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 48]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9, 2]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24 # sa*da
+      ldr d2, [sp, 48] # cs
+      ldrb w4, [x9, 2]
+      ldr d26, [x13, x4, lsl, 3] # cb
+      fcmp d2, d17 # cs <= 0?
+      b.ls fwd("ddgBz")
+      fcmp d26, d18 # cb >= 1?
+      b.hs fwd("ddgBo")
+      fsub d26, d18, d26 # 1-cb
+      fdiv d26, d2, d26 # cs/(1-cb)
+      fmin d26, d26, d18 # Bout
+      b fwd("ddgBdone")
+      label ddgBz
+      fmov d26, d17 # Bout = 0
+      b fwd("ddgBdone")
+      label ddgBo
+      fmov d26, d18 # Bout = 1
+      label ddgBdone
+      fmul d1, d1, d26 # t3
+      fadd d0, d0, d1
+  elif op == coColorBurn:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 48]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9, 2]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24 # sa*da
+      ldr d2, [sp, 48] # cs
+      ldrb w4, [x9, 2]
+      ldr d26, [x13, x4, lsl, 3] # cb
+      fcmp d2, d18 # cs >= 1?
+      b.hs fwd("dbrBo")
+      fcmp d26, d17 # cb <= 0?
+      b.ls fwd("dbrBz")
+      fsub d26, d18, d2 # 1-cs
+      ldrb w4, [x9, 2]
+      ldr d2, [x13, x4, lsl, 3] # cb
+      fdiv d26, d26, d2 # (1-cs)/cb
+      fmin d26, d26, d18
+      fsub d26, d18, d26 # Bout
+      b fwd("dbrBdone")
+      label dbrBz
+      fmov d26, d17 # Bout = 0
+      b fwd("dbrBdone")
+      label dbrBo
+      fmov d26, d18 # Bout = 1
+      label dbrBdone
+      fmul d1, d1, d26 # t3
+      fadd d0, d0, d1
+  elif op == coHardLight:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 48]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9, 2]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      ldr d1, [sp, 48] # cs
+      ldrb w4, [x9, 2]
+      ldr d2, [x13, x4, lsl, 3] # cb
+      fcmp d1, d19 # cs <= 0.5?
+      b.ls fwd("hltBlo")
+      fsub d26, d18, d1 # 1-cs
+      fadd d26, d26, d26
+      fsub d1, d18, d2 # 1-cb
+      fmul d26, d26, d1
+      fsub d1, d18, d26 # Bout = 1-2*(1-cs)*(1-cb)
+      b fwd("hltBdone")
+      label hltBlo
+      fmul d1, d1, d2
+      fadd d1, d1, d1 # Bout = 2*cs*cb
+      label hltBdone
+      fmul d2, d22, d24
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+  elif op == coSoftLight:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 48]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9, 2]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      ldr d1, [sp, 48] # cs
+      ldrb w4, [x9, 2]
+      ldr d2, [x13, x4, lsl, 3] # cb
+      fcmp d1, d19 # cs <= 0.5?
+      b.ls fwd("sftBlo")
+      fmul d26, d19, d19 # 0.25
+      fcmp d2, d26 # cb <= 0.25?
+      b.ls fwd("sftBpoly")
+      fsqrt d26, d2 # d = sqrt(cb)
+      b fwd("sftBd")
+      label sftBpoly
+      fadd d26, d2, d2 # 2cb
+      fadd d26, d26, d26 # 4cb
+      fadd d27, d18, d18 # 2
+      fadd d27, d27, d18 # 3
+      fsub d26, d26, d27 # 4cb-3
+      fadd d26, d26, d26 # 8cb-6
+      fadd d26, d26, d26 # 16cb-12
+      fmul d26, d26, d2 # (16cb-12)*cb
+      fadd d27, d18, d18 # 2
+      fadd d27, d27, d27 # 4
+      fadd d26, d26, d27 # +4
+      fmul d26, d26, d2 # d
+      label sftBd
+      fadd d27, d1, d1 # 2cs
+      fsub d27, d27, d18 # 2cs-1
+      fsub d26, d26, d2 # d-cb
+      fmul d27, d27, d26
+      fadd d1, d2, d27 # Bout = cb+(2cs-1)*(d-cb)
+      b fwd("sftBdone")
+      label sftBlo
+      fsub d26, d18, d1
+      fsub d26, d26, d1 # 1-2cs
+      fmul d26, d26, d2 # *cb
+      fsub d27, d18, d2 # 1-cb
+      fmul d26, d26, d27
+      fsub d1, d2, d26 # Bout = cb-(1-2cs)*cb*(1-cb)
+      label sftBdone
+      fmul d2, d22, d24
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+  elif op == coDifference:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 48]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9, 2]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24 # sa*da
+      ldr d2, [sp, 48] # cs
+      ldrb w4, [x9, 2]
+      ldr d26, [x13, x4, lsl, 3] # cb
+      fsub d2, d2, d26 # cs-cb
+      fabs d2, d2 # Bout = |cs-cb|
+      fmul d1, d1, d2 # t3
+      fadd d0, d0, d1
+  elif op == coExclusion:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 48]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9, 2]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24 # sa*da
+      ldr d2, [sp, 48] # cs
+      ldrb w4, [x9, 2]
+      ldr d26, [x13, x4, lsl, 3] # cb
+      fmul d27, d2, d26 # cs*cb
+      fadd d2, d2, d26 # cs+cb
+      fadd d27, d27, d27 # 2*cs*cb
+      fsub d2, d2, d27 # Bout
+      fmul d1, d1, d2 # t3
+      fadd d0, d0, d1
   dynasm a:
     arch aarch64
     fdiv d0, d0, d23
@@ -676,6 +1454,14 @@ proc emitBlendTailAarch64*(op: CompOp, a: var Assembler) =
   of coMultiply: emitBlendTailAarch64Static(coMultiply, a)
   of coScreen: emitBlendTailAarch64Static(coScreen, a)
   of coOverlay: emitBlendTailAarch64Static(coOverlay, a)
+  of coDarken: emitBlendTailAarch64Static(coDarken, a)
+  of coLighten: emitBlendTailAarch64Static(coLighten, a)
+  of coColorDodge: emitBlendTailAarch64Static(coColorDodge, a)
+  of coColorBurn: emitBlendTailAarch64Static(coColorBurn, a)
+  of coHardLight: emitBlendTailAarch64Static(coHardLight, a)
+  of coSoftLight: emitBlendTailAarch64Static(coSoftLight, a)
+  of coDifference: emitBlendTailAarch64Static(coDifference, a)
+  of coExclusion: emitBlendTailAarch64Static(coExclusion, a)
   else:
     raise newException(Defect,
       "emitBlendTailAarch64: scalar-only op has no JIT tail")

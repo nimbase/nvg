@@ -464,7 +464,8 @@ test "all comp ops identical: fills":
   const ops = [coSourceOver, coSourceIn, coSourceOut, coAtop,
     coDestinationOver, coDestinationIn, coDestinationOut,
     coDestinationAtop, coLighter, coCopy, coXor, coMultiply, coScreen,
-    coOverlay]
+    coOverlay, coDarken, coLighten, coColorDodge, coColorBurn,
+    coHardLight, coSoftLight, coDifference, coExclusion]
   var totalDiff = 0
   for op in ops:
     let d = checkScene(160, 120, proc(c: Canvas) =
@@ -599,7 +600,9 @@ when defined(amd64):
     randomize(91827)
     const ops = [coSourceIn, coSourceOut, coAtop, coDestinationOver,
       coDestinationIn, coDestinationOut, coDestinationAtop, coLighter,
-      coCopy, coXor, coMultiply, coScreen, coOverlay]
+      coCopy, coXor, coMultiply, coScreen, coOverlay, coDarken,
+      coLighten, coColorDodge, coColorBurn, coHardLight, coSoftLight,
+      coDifference, coExclusion]
     let kern = JitKernels()
     let srcs = [rgbaf(1, 0, 0, 1), rgbaf(0, 1, 0, 0.5),
       rgbaf(0.2, 0.4, 0.8, 0.0), rgbaf(2.0, -0.5, 0.5, 0.75),
@@ -639,7 +642,9 @@ when defined(amd64):
     randomize(55121)
     const ops = [coSourceIn, coSourceOut, coAtop, coDestinationOver,
       coDestinationIn, coDestinationOut, coDestinationAtop, coLighter,
-      coCopy, coXor, coMultiply, coScreen, coOverlay]
+      coCopy, coXor, coMultiply, coScreen, coOverlay, coDarken,
+      coLighten, coColorDodge, coColorBurn, coHardLight, coSoftLight,
+      coDifference, coExclusion]
     let kern = JitKernels()
     let p = linearGradient(10, 20, 300, 400,
       rgbaf(2.0, -0.5, 0.5, 0.75), rgbaf(0.2, 0.4, 0.8, 0.0))
@@ -1052,7 +1057,9 @@ when defined(amd64):
     randomize(27182)
     const ops = [coSourceIn, coSourceOut, coAtop, coDestinationOver,
       coDestinationIn, coDestinationOut, coDestinationAtop, coLighter,
-      coCopy, coXor, coMultiply, coScreen, coOverlay]
+      coCopy, coXor, coMultiply, coScreen, coOverlay, coDarken,
+      coLighten, coColorDodge, coColorBurn, coHardLight, coSoftLight,
+      coDifference, coExclusion]
     let kern = JitKernels()
     let p = linearGradientStops(10, 20, 300, 400, [
       GradientStop(pos: 0.0, color: rgbaf(2.0, -0.5, 0.5, 0.75)),
@@ -1169,7 +1176,9 @@ when defined(amd64):
     randomize(60617)
     const ops = [coSourceIn, coSourceOut, coAtop, coDestinationOver,
       coDestinationIn, coDestinationOut, coDestinationAtop, coLighter,
-      coCopy, coXor, coMultiply, coScreen, coOverlay]
+      coCopy, coXor, coMultiply, coScreen, coOverlay, coDarken,
+      coLighten, coColorDodge, coColorBurn, coHardLight, coSoftLight,
+      coDifference, coExclusion]
     let kern = JitKernels()
     let p = radialGradientStops(50, 50, 10, 60, [
       GradientStop(pos: 0.0, color: rgbaf(2.0, -0.5, 0.5, 0.75)),
@@ -1266,7 +1275,9 @@ when defined(amd64):
     randomize(70707)
     const ops = [coSourceIn, coSourceOut, coAtop, coDestinationOver,
       coDestinationIn, coDestinationOut, coDestinationAtop, coLighter,
-      coCopy, coXor, coMultiply, coScreen, coOverlay]
+      coCopy, coXor, coMultiply, coScreen, coOverlay, coDarken,
+      coLighten, coColorDodge, coColorBurn, coHardLight, coSoftLight,
+      coDifference, coExclusion]
     var data = newSeq[uint8](6 * 4 * 4)
     for i in 0 ..< data.len: data[i] = uint8(rand(255))
     let kern = JitKernels()
@@ -1308,7 +1319,8 @@ when defined(amd64):
     const ops = [coSourceOver, coSourceIn, coSourceOut, coAtop,
       coDestinationOver, coDestinationIn, coDestinationOut,
       coDestinationAtop, coLighter, coCopy, coXor, coMultiply, coScreen,
-      coOverlay]
+      coOverlay, coDarken, coLighten, coColorDodge, coColorBurn,
+      coHardLight, coSoftLight, coDifference, coExclusion]
     var totalDiff = 0
     for op in ops:
       let d = checkScene(160, 120, proc(c: Canvas) =
@@ -1387,6 +1399,14 @@ test "aarch64 generic kernels assemble":
   if genOk(buildSolidRowGenAarch64(coMultiply)): inc n
   if genOk(buildSolidRowGenAarch64(coScreen)): inc n
   if genOk(buildSolidRowGenAarch64(coOverlay)): inc n
+  if genOk(buildSolidRowGenAarch64(coDarken)): inc n
+  if genOk(buildSolidRowGenAarch64(coLighten)): inc n
+  if genOk(buildSolidRowGenAarch64(coColorDodge)): inc n
+  if genOk(buildSolidRowGenAarch64(coColorBurn)): inc n
+  if genOk(buildSolidRowGenAarch64(coHardLight)): inc n
+  if genOk(buildSolidRowGenAarch64(coSoftLight)): inc n
+  if genOk(buildSolidRowGenAarch64(coDifference)): inc n
+  if genOk(buildSolidRowGenAarch64(coExclusion)): inc n
   if genOk(buildLinearRowGenAarch64(coAtop)): inc n
   if genOk(buildLinearRowGenAarch64(coMultiply)): inc n
   if genOk(buildLinearRowGenAarch64(coCopy)): inc n
@@ -1399,4 +1419,4 @@ test "aarch64 generic kernels assemble":
   if genOk(buildPatternRowGenAarch64(coAtop)): inc n
   if genOk(buildPatternRowGenAarch64(coMultiply)): inc n
   if genOk(buildPatternRowGenAarch64(coCopy)): inc n
-  check n == 25
+  check n == 33
