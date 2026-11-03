@@ -62,7 +62,7 @@ destroyJitBackend(c.backend.JitBackend)
 - [x] JIT backend, pixel-identical to scalar
 - [x] PNG export without dependencies
 - [ ] Text rendering (shaping + glyph outlines)
-- [ ] Bilinear and multi-stop paints on the JIT fast path
+- [x] Bilinear and multi-stop paints on the JIT fast path
 - [ ] AArch64 kernel execution sign-off
 - [ ] Image file loading API
 

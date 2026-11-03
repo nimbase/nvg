@@ -243,3 +243,95 @@ proc patternRunnable*(p: Paint): bool =
   p.kind == pkPattern and p.pattern.img != nil and
     abs(p.pattern.ex) >= 1e-12 and abs(p.pattern.ey) >= 1e-12 and
     p.pattern.img.w > 0 and p.pattern.img.h > 0
+
+type
+  MultiLinearRowFn* = SolidRowFn
+    ## Multi-stop linear gradient row kernel. Same ABI as solid/linear;
+    ## stops travel via pointer+len in ctx (heap array owned by the
+    ## paint, alive through the fill).
+
+  MultiLinearCtx* = object
+    ## Pointer-based multi-stop ctx (arbitrary stop count, O(N) search
+    ## per pixel like the scalar). Offsets are load-bearing for the new
+    ## x64 kernels; keep field order stable.
+    ## 0,8,16,24: m0,m1,m4,m5; 32,40,48,56,64: sx,sy,dx,dy,len2;
+    ## 72: stopsPtr; 80: stopsLen; 88,96,104,112,120:
+    ## aAlpha,c255,half,zero,one; 128: divtab; 136,144,152: rowX,m2y,m3y.
+    m0*, m1*, m4*, m5*: float64
+    sx*, sy*, dx*, dy*, len2*: float64
+    stopsPtr*: pointer
+    stopsLen*: int64
+    aAlpha*, c255*, half*, zero*, one*: float64
+    divtab*: pointer
+    rowX*, m2y*, m3y*: float64
+
+  MultiRadialRowFn* = SolidRowFn
+
+  MultiRadialCtx* = object
+    ## Same idea for radial gradients: 0,8,16,24: m0,m1,m4,m5;
+    ## 32,40,48,56: cx,cy,inr,f; 64: stopsPtr; 72: stopsLen;
+    ## 80,88,96,104,112: aAlpha,c255,half,zero,one; 120: divtab;
+    ## 128,136,144: rowX,m2y,m3y.
+    m0*, m1*, m4*, m5*: float64
+    cx*, cy*, inr*, f*: float64
+    stopsPtr*: pointer
+    stopsLen*: int64
+    aAlpha*, c255*, half*, zero*, one*: float64
+    divtab*: pointer
+    rowX*, m2y*, m3y*: float64
+
+proc bakeMultiLinearCtx*(p: Paint, alpha: float64): MultiLinearCtx =
+  ## Bake a multi-stop linear gradient. Same degenerate `len2` handling
+  ## as `bakeLinearCtx`; stops pointer borrows the paint's heap array
+  ## (alive through the synchronous fill).
+  let aAlpha = clamp01(alpha)
+  var dx = p.linear.ex - p.linear.sx
+  var dy = p.linear.ey - p.linear.sy
+  var len2 = dx*dx + dy*dy
+  if len2 <= 1e-12:
+    dx = 0.0
+    dy = 0.0
+    len2 = 1.0
+  let n = p.linear.stops.len
+  result = MultiLinearCtx(m0: p.map[0], m1: p.map[1], m4: p.map[4],
+    m5: p.map[5], sx: p.linear.sx, sy: p.linear.sy, dx: dx, dy: dy,
+    len2: len2,
+    stopsPtr: if n > 0: addr p.linear.stops[0] else: nil,
+    stopsLen: int64(n),
+    aAlpha: aAlpha, c255: 255.0, half: 0.5, zero: 0.0, one: 1.0,
+    divtab: divTablePtr(), rowX: 0.0, m2y: 0.0, m3y: 0.0)
+
+proc bakeMultiRadialCtx*(p: Paint, alpha: float64): MultiRadialCtx =
+  ## Bake a multi-stop radial gradient. Same `f` floor as `bakeRadialCtx`.
+  let aAlpha = clamp01(alpha)
+  let n = p.radial.stops.len
+  result = MultiRadialCtx(m0: p.map[0], m1: p.map[1], m4: p.map[4],
+    m5: p.map[5], cx: p.radial.cx, cy: p.radial.cy, inr: p.radial.inr,
+    f: max(1.0, p.radial.outr - p.radial.inr),
+    stopsPtr: if n > 0: addr p.radial.stops[0] else: nil,
+    stopsLen: int64(n),
+    aAlpha: aAlpha, c255: 255.0, half: 0.5, zero: 0.0, one: 1.0,
+    divtab: divTablePtr(), rowX: 0.0, m2y: 0.0, m3y: 0.0)
+
+proc multiLinearSkippable*(p: Paint, alpha: float64): bool =
+  ## Source-over no-op gate for multi-stop linear: zero global alpha,
+  ## empty (transparent), or every stop alpha non-positive (lerps stay
+  ## `<= 0`, so `clamp01(a*alpha)` is always 0).
+  if clamp01(alpha) <= 0.0: return true
+  if p.linear.stops.len == 0: return true
+  for s in p.linear.stops:
+    if s.color.a > 0.0: return false
+  true
+
+proc multiRadialSkippable*(p: Paint, alpha: float64): bool =
+  if clamp01(alpha) <= 0.0: return true
+  if p.radial.stops.len == 0: return true
+  for s in p.radial.stops:
+    if s.color.a > 0.0: return false
+  true
+
+type
+  PatternBilinearRowFn* = SolidRowFn
+    ## Bilinear-filter pattern row kernel. Same ABI and same `PatternCtx`
+    ## layout as nearest (no new ctx); caller gates on runnable +
+    ## `ifNearest` absent.

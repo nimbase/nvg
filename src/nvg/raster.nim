@@ -518,6 +518,189 @@ proc fillPatternJit*(surf: Surface, polys: seq[SubPoly], paint: Paint,
       fn(dst, addr covBuf[rx - x0], int64(re - rx + 1), addr ctx)
       rx = re + 1
 
+proc fillMultiLinearJit*(surf: Surface, polys: seq[SubPoly], paint: Paint,
+    alpha: float64, clip: Clip, fn: MultiLinearRowFn,
+    covBuf: var seq[float64], aa = true, rule = frEvenOdd,
+    op = coSourceOver) =
+  ## Multi-stop linear-gradient fill through an op-specialized JIT row
+  ## kernel. Same structure as `fillLinearJit` (span/coverage in Nim,
+  ## per-run `rowX` plus per-row `m2y`/`m3y`, one kernel call per
+  ## covered run). Stops borrow the paint heap array via the ctx.
+  if polys.len == 0 or surf.pixels.len == 0: return
+  if paint.kind != pkLinear: return
+  if clamp01(alpha) <= 0.0: return
+  if op == coSourceOver and multiLinearSkippable(paint, alpha): return
+  var ctx = bakeMultiLinearCtx(paint, alpha)
+  let edges = buildEdges(polys)
+  if edges.len == 0: return
+  let (x0, y0, x1, y1, ok) = fillBounds(polys, surf, clip)
+  if not ok: return
+  let rowW = x1 - x0 + 1
+  if covBuf.len < rowW: covBuf.setLen(rowW)
+  var edgeMark = newSeq[bool](rowW)
+  var xs: seq[tuple[x: float64, dir: int]] = @[]
+  var spans: seq[tuple[a, b: float64]] = @[]
+  for y in y0 .. y1:
+    scanRowSpans(edges, x0, x1, y, edgeMark, xs, spans, rule)
+    var any = false
+    for x in x0 .. x1:
+      let cx = float64(x) + 0.5
+      var inside = false
+      for sp in spans:
+        if cx >= sp.a and cx <= sp.b:
+          inside = true
+          break
+      let cov =
+        if not aa:
+          if inside: 1.0 else: 0.0
+        elif edgeMark[x - x0]:
+          coverageEdges(float64(x), float64(y), edges, rule)
+        elif inside:
+          1.0
+        else:
+          0.0
+      covBuf[x - x0] = cov
+      if cov > 0.0: any = true
+    if not any: continue
+    let rowY = float64(y) + 0.5
+    ctx.m2y = paint.map[2] * rowY
+    ctx.m3y = paint.map[3] * rowY
+    let rowBase = cast[int](addr surf.pixels[0]) +
+      (y * surf.w + x0) * 4
+    var rx = x0
+    while rx <= x1:
+      if covBuf[rx - x0] <= 0.0:
+        inc rx
+        continue
+      var re = rx
+      while re + 1 <= x1 and covBuf[re + 1 - x0] > 0.0:
+        inc re
+      ctx.rowX = float64(rx) + 0.5
+      let dst = cast[pointer](rowBase + (rx - x0) * 4)
+      fn(dst, addr covBuf[rx - x0], int64(re - rx + 1), addr ctx)
+      rx = re + 1
+
+proc fillMultiRadialJit*(surf: Surface, polys: seq[SubPoly], paint: Paint,
+    alpha: float64, clip: Clip, fn: MultiRadialRowFn,
+    covBuf: var seq[float64], aa = true, rule = frEvenOdd,
+    op = coSourceOver) =
+  ## Multi-stop radial-gradient fill through an op-specialized JIT row
+  ## kernel. Same structure as `fillMultiLinearJit`.
+  if polys.len == 0 or surf.pixels.len == 0: return
+  if paint.kind != pkRadial: return
+  if clamp01(alpha) <= 0.0: return
+  if op == coSourceOver and multiRadialSkippable(paint, alpha): return
+  var ctx = bakeMultiRadialCtx(paint, alpha)
+  let edges = buildEdges(polys)
+  if edges.len == 0: return
+  let (x0, y0, x1, y1, ok) = fillBounds(polys, surf, clip)
+  if not ok: return
+  let rowW = x1 - x0 + 1
+  if covBuf.len < rowW: covBuf.setLen(rowW)
+  var edgeMark = newSeq[bool](rowW)
+  var xs: seq[tuple[x: float64, dir: int]] = @[]
+  var spans: seq[tuple[a, b: float64]] = @[]
+  for y in y0 .. y1:
+    scanRowSpans(edges, x0, x1, y, edgeMark, xs, spans, rule)
+    var any = false
+    for x in x0 .. x1:
+      let cx = float64(x) + 0.5
+      var inside = false
+      for sp in spans:
+        if cx >= sp.a and cx <= sp.b:
+          inside = true
+          break
+      let cov =
+        if not aa:
+          if inside: 1.0 else: 0.0
+        elif edgeMark[x - x0]:
+          coverageEdges(float64(x), float64(y), edges, rule)
+        elif inside:
+          1.0
+        else:
+          0.0
+      covBuf[x - x0] = cov
+      if cov > 0.0: any = true
+    if not any: continue
+    let rowY = float64(y) + 0.5
+    ctx.m2y = paint.map[2] * rowY
+    ctx.m3y = paint.map[3] * rowY
+    let rowBase = cast[int](addr surf.pixels[0]) +
+      (y * surf.w + x0) * 4
+    var rx = x0
+    while rx <= x1:
+      if covBuf[rx - x0] <= 0.0:
+        inc rx
+        continue
+      var re = rx
+      while re + 1 <= x1 and covBuf[re + 1 - x0] > 0.0:
+        inc re
+      ctx.rowX = float64(rx) + 0.5
+      let dst = cast[pointer](rowBase + (rx - x0) * 4)
+      fn(dst, addr covBuf[rx - x0], int64(re - rx + 1), addr ctx)
+      rx = re + 1
+
+proc fillPatternBilinearJit*(surf: Surface, polys: seq[SubPoly],
+    paint: Paint, alpha: float64, clip: Clip, fn: PatternBilinearRowFn,
+    covBuf: var seq[float64], aa = true, rule = frEvenOdd,
+    op = coSourceOver) =
+  ## Bilinear-pattern fill through an op-specialized JIT row kernel.
+  ## Same structure as `fillPatternJit` (nearest) with the same
+  ## `PatternCtx`; only the sampling filter differs (in-kernel).
+  if polys.len == 0 or surf.pixels.len == 0: return
+  if paint.kind != pkPattern: return
+  if clamp01(alpha) <= 0.0: return
+  if op == coSourceOver and patternSkippable(paint, alpha): return
+  var ctx = bakePatternCtx(paint, alpha)
+  let edges = buildEdges(polys)
+  if edges.len == 0: return
+  let (x0, y0, x1, y1, ok) = fillBounds(polys, surf, clip)
+  if not ok: return
+  let rowW = x1 - x0 + 1
+  if covBuf.len < rowW: covBuf.setLen(rowW)
+  var edgeMark = newSeq[bool](rowW)
+  var xs: seq[tuple[x: float64, dir: int]] = @[]
+  var spans: seq[tuple[a, b: float64]] = @[]
+  for y in y0 .. y1:
+    scanRowSpans(edges, x0, x1, y, edgeMark, xs, spans, rule)
+    var any = false
+    for x in x0 .. x1:
+      let cx = float64(x) + 0.5
+      var inside = false
+      for sp in spans:
+        if cx >= sp.a and cx <= sp.b:
+          inside = true
+          break
+      let cov =
+        if not aa:
+          if inside: 1.0 else: 0.0
+        elif edgeMark[x - x0]:
+          coverageEdges(float64(x), float64(y), edges, rule)
+        elif inside:
+          1.0
+        else:
+          0.0
+      covBuf[x - x0] = cov
+      if cov > 0.0: any = true
+    if not any: continue
+    let rowY = float64(y) + 0.5
+    ctx.m2y = paint.map[2] * rowY
+    ctx.m3y = paint.map[3] * rowY
+    let rowBase = cast[int](addr surf.pixels[0]) +
+      (y * surf.w + x0) * 4
+    var rx = x0
+    while rx <= x1:
+      if covBuf[rx - x0] <= 0.0:
+        inc rx
+        continue
+      var re = rx
+      while re + 1 <= x1 and covBuf[re + 1 - x0] > 0.0:
+        inc re
+      ctx.rowX = float64(rx) + 0.5
+      let dst = cast[pointer](rowBase + (rx - x0) * 4)
+      fn(dst, addr covBuf[rx - x0], int64(re - rx + 1), addr ctx)
+      rx = re + 1
+
 # --- Stroke expansion ---
 
 proc norm2(x, y: float64): tuple[x, y: float64, len: float64] =

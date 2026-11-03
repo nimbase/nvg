@@ -412,10 +412,10 @@ test "pattern-nearest strokes identical":
   if d.n > 0: echo d.detail
   check d.n == 0
 
-test "fallback paths identical: bilinear patterns, multi-stop":
-  let d = checkScene(200, 200, proc(c: Canvas) =
+test "multi-stop and bilinear identical: fills, strokes, hard stops":
+  let d = checkScene(256, 256, proc(c: Canvas) =
     c.clear(rgb(255, 255, 255))
-    # Bilinear patterns stay scalar (JIT handles nearest only).
+    # Bilinear pattern fill (JIT fast path).
     let data = @[255'u8, 0, 0, 255, 0, 255, 0, 255,
       0, 0, 255, 255, 255, 255, 255, 255]
     let id = c.createImageRGBA(2, 2, {}, data)
@@ -423,20 +423,40 @@ test "fallback paths identical: bilinear patterns, multi-stop":
     c.rect(20.5, 20.5, 60, 60)
     c.setFillPaint(c.imagePattern(0, 0, 2, 2, 0, id, 1.0))
     c.fill()
-    # Multi-stop gradients stay scalar (JIT handles 2-stop only).
+    # Bilinear with repeat + rotation + tint.
+    let idR = c.createImageRGBA(2, 2, {ifRepeatX, ifRepeatY}, data)
     c.beginPath()
-    c.circle(100, 150, 40)
-    c.setFillPaint(c.linearGradientStops(60, 150, 140, 150,
+    c.rect(100.5, 20.5, 80, 60)
+    c.setFillPaint(c.imagePattern(100, 20, 25, 25, 0.5, idR, 0.8))
+    c.fill()
+    # Multi-stop linear with a hard stop (duplicate pos).
+    c.beginPath()
+    c.circle(100, 170, 45)
+    c.setFillPaint(c.linearGradientStops(55, 170, 145, 170,
       [GradientStop(pos: 0.0, color: rgbf(0, 0, 1)),
         GradientStop(pos: 0.5, color: rgbf(0, 1, 0)),
+        GradientStop(pos: 0.5, color: rgbf(1, 1, 0)),
         GradientStop(pos: 1.0, color: rgbf(1, 0, 0))]))
     c.fill()
-    c.setCompositeOp(coSourceOver)
+    # Multi-stop radial, translucent + global alpha.
+    c.setGlobalAlpha(0.7)
     c.beginPath()
-    c.rect(150.5, 150.5, 40, 40)
-    c.setFillColor(rgbf(1, 0, 0))
-    c.setCompositeOp(coLighter)
-    c.fill())
+    c.rect(170.5, 120.5, 70, 80)
+    c.setFillPaint(c.radialGradientStops(205, 160, 5, 50,
+      [GradientStop(pos: 0.0, color: rgbaf(1, 0, 0, 1)),
+        GradientStop(pos: 0.6, color: rgbaf(0, 1, 0, 0.4)),
+        GradientStop(pos: 1.0, color: rgbaf(0, 0, 1, 0.9))]))
+    c.fill()
+    c.setGlobalAlpha(1.0)
+    # Multi-stop linear stroke.
+    c.beginPath()
+    c.rect(20, 220, 120, 20)
+    c.setStrokePaint(c.linearGradientStops(20, 220, 140, 240,
+      [GradientStop(pos: 0.0, color: rgbf(1, 0, 0)),
+        GradientStop(pos: 0.5, color: rgbf(0, 1, 0)),
+        GradientStop(pos: 1.0, color: rgbf(0, 0, 1))]))
+    c.setStrokeWidth(6.0)
+    c.stroke())
   if d.n > 0: echo d.detail
   check d.n == 0
 
@@ -962,6 +982,364 @@ when defined(amd64):
       imagePattern(img, 0, 0, 8, 8, 0.0, rgbaf(1, 1, 1, 0.0)), 1.0)
     check patternSkippable(imagePattern(img, 0, 0, 8, 8, 0.0), 0.0)
     check not patternSkippable(imagePattern(img, 0, 0, 8, 8, 0.0), 1.0)
+
+  test "multi-linear row kernel matches sample+blend":
+    randomize(31415)
+    let kern = JitKernels()
+    let fn = kern.getMultiLinear()
+    check fn != nil
+    var paints: seq[Paint] = @[
+      linearGradientStops(0, 0, 800, 0, [
+        GradientStop(pos: 0.0, color: rgbaf(1, 0, 0, 1)),
+        GradientStop(pos: 0.5, color: rgbaf(0, 1, 0, 0.5)),
+        GradientStop(pos: 1.0, color: rgbaf(0, 0, 1, 0.25))]),
+      linearGradientStops(10, 20, 300, 400, [
+        GradientStop(pos: 0.0, color: rgbaf(2.0, -0.5, 0.5, 0.75)),
+        GradientStop(pos: 0.4, color: rgbaf(0.2, 0.4, 0.8, 0.0)),
+        GradientStop(pos: 0.4, color: rgbaf(1, 1, 0, 0.5)),
+        GradientStop(pos: 1.0, color: rgbaf(0, 1, 0, 0.9))]),
+      linearGradientStops(50, 50, 50, 50, [
+        GradientStop(pos: 0.0, color: rgbaf(1, 0, 0, 1)),
+        GradientStop(pos: 0.7, color: rgbaf(0, 1, 0, 1)),
+        GradientStop(pos: 1.0, color: rgbaf(0, 0, 1, 1))]),
+      linearGradientStops(0, 0, 100, 0, [
+        GradientStop(pos: 0.0, color: rgbf(1, 0, 0)),
+        GradientStop(pos: 0.0, color: rgbf(0, 1, 0)),
+        GradientStop(pos: 1.0, color: rgbf(0, 0, 1))]),
+      linearGradientStops(0, 0, 100, 0, [
+        GradientStop(pos: 0.5, color: rgbaf(1, 0, 0, 0.8))])]
+    var mapped = linearGradientStops(0, 0, 100, 50, [
+      GradientStop(pos: 0.0, color: rgbaf(0.33, 0.66, 0.99, 0.01)),
+      GradientStop(pos: 0.3, color: rgbaf(0.5, 0.1, 0.9, 0.6)),
+      GradientStop(pos: 1.0, color: rgbaf(0, 0, 0, 1))])
+    mapped.map = [2.0, 0.5, -0.25, 1.5, 5.0, -3.0]
+    paints.add(mapped)
+    var totalDiff = 0
+    for pi, p in paints:
+      for alpha in [1.0, 0.4]:
+        for n in [0, 1, 2, 3, 7, 64]:
+          let x0 = [10, 0, 100, -10, 40, 100][pi]
+          let y = [0, 7, 50, 0, 40, 50][pi]
+          var ctx = bakeMultiLinearCtx(p, alpha)
+          let rowY = float64(y) + 0.5
+          ctx.rowX = float64(x0) + 0.5
+          ctx.m2y = p.map[2] * rowY
+          ctx.m3y = p.map[3] * rowY
+          var dst = newSeq[uint8](n * 4)
+          var cov = newSeq[float64](max(n, 1))
+          for i in 0 ..< dst.len: dst[i] = uint8(rand(255))
+          for i in 0 ..< n: cov[i] = [0.0, 0.25, 0.5, 1.0][rand(3)]
+          var got = dst
+          if n > 0:
+            fn(addr got[0], addr cov[0], int64(n), addr ctx)
+          var surf = newSurface(max(n, 1), 1)
+          surf.pixels.setLen(dst.len)
+          for i, b in dst: surf.pixels[i] = b
+          let aA = clamp01(alpha)
+          for i in 0 ..< n:
+            let col = p.sample(float64(x0 + i) + 0.5, rowY)
+            surf.blendPixel(i, 0,
+              color(col.r, col.g, col.b, col.a * aA), cov[i],
+              coSourceOver)
+          let dd = diffStat(got, surf.pixels)
+          if dd.n > 0 and totalDiff == 0:
+            echo "paint=", pi, " alpha=", alpha, " n=", n, "\n", dd.detail
+          totalDiff += dd.n
+    check totalDiff == 0
+    kern.destroy()
+
+  test "multi-linear generic-op kernel matches sample+blend":
+    randomize(27182)
+    const ops = [coSourceIn, coSourceOut, coAtop, coDestinationOver,
+      coDestinationIn, coDestinationOut, coDestinationAtop, coLighter,
+      coCopy, coXor, coMultiply, coScreen, coOverlay]
+    let kern = JitKernels()
+    let p = linearGradientStops(10, 20, 300, 400, [
+      GradientStop(pos: 0.0, color: rgbaf(2.0, -0.5, 0.5, 0.75)),
+      GradientStop(pos: 0.4, color: rgbaf(0.2, 0.4, 0.8, 0.0)),
+      GradientStop(pos: 0.4, color: rgbaf(1, 1, 0, 0.5)),
+      GradientStop(pos: 1.0, color: rgbaf(0, 1, 0, 0.9))])
+    var totalDiff = 0
+    for op in ops:
+      let fn = kern.getMultiLinear(op)
+      check fn != nil
+      for alpha in [1.0, 0.4]:
+        for n in [1, 7, 32]:
+          var ctx = bakeMultiLinearCtx(p, alpha)
+          let rowY = 7.5
+          ctx.rowX = 0.5
+          ctx.m2y = p.map[2] * rowY
+          ctx.m3y = p.map[3] * rowY
+          var dst = newSeq[uint8](n * 4)
+          var cov = newSeq[float64](n)
+          for i in 0 ..< dst.len: dst[i] = uint8(rand(255))
+          for i in 0 ..< n: cov[i] = [0.0, 0.25, 0.5, 1.0][rand(3)]
+          var got = dst
+          fn(addr got[0], addr cov[0], int64(n), addr ctx)
+          var surf = newSurface(n, 1)
+          surf.pixels.setLen(dst.len)
+          for i, b in dst: surf.pixels[i] = b
+          let aA = clamp01(alpha)
+          for i in 0 ..< n:
+            let col = p.sample(float64(i) + 0.5, rowY)
+            surf.blendPixel(i, 0,
+              color(col.r, col.g, col.b, col.a * aA), cov[i], op)
+          let dd = diffStat(got, surf.pixels)
+          if dd.n > 0 and totalDiff == 0:
+            echo "op=", op, " alpha=", alpha, " n=", n, "\n", dd.detail
+          totalDiff += dd.n
+    check totalDiff == 0
+    kern.destroy()
+
+  test "multi skippable gates match fill":
+    var p = linearGradientStops(0, 0, 100, 0, [
+      GradientStop(pos: 0.0, color: rgbaf(1, 0, 0, 0.0)),
+      GradientStop(pos: 0.5, color: rgbaf(0, 0, 1, 0.0)),
+      GradientStop(pos: 1.0, color: rgbaf(0, 1, 0, 0.0))])
+    check multiLinearSkippable(p, 1.0)
+    check multiLinearSkippable(p, 0.0)
+    var q = linearGradientStops(0, 0, 100, 0, [
+      GradientStop(pos: 0.0, color: rgbaf(1, 0, 0, 1.0)),
+      GradientStop(pos: 1.0, color: rgbaf(0, 0, 1, 0.0))])
+    check not multiLinearSkippable(q, 1.0)
+    check multiLinearSkippable(q, 0.0)
+    check multiLinearSkippable(
+      linearGradientStops(0, 0, 100, 0, []), 1.0)
+    var r = radialGradientStops(0, 0, 5, 50, [
+      GradientStop(pos: 0.0, color: rgbaf(1, 0, 0, 0.0)),
+      GradientStop(pos: 1.0, color: rgbaf(0, 0, 1, 0.0))])
+    check multiRadialSkippable(r, 1.0)
+    var s = radialGradientStops(0, 0, 5, 50, [
+      GradientStop(pos: 0.0, color: rgbaf(1, 0, 0, 1.0)),
+      GradientStop(pos: 1.0, color: rgbaf(0, 0, 1, 0.0))])
+    check not multiRadialSkippable(s, 1.0)
+
+  test "multi-radial row kernel matches sample+blend":
+    randomize(80808)
+    let kern = JitKernels()
+    let fn = kern.getMultiRadial()
+    check fn != nil
+    var paints: seq[Paint] = @[
+      radialGradientStops(100, 100, 5, 60, [
+        GradientStop(pos: 0.0, color: rgbaf(1, 0, 0, 1)),
+        GradientStop(pos: 0.5, color: rgbaf(0, 1, 0, 0.5)),
+        GradientStop(pos: 1.0, color: rgbaf(0, 0, 1, 0.25))]),
+      radialGradientStops(0, 0, 0, 40, [
+        GradientStop(pos: 0.0, color: rgbaf(2.0, -0.5, 0.5, 0.75)),
+        GradientStop(pos: 1.0, color: rgbaf(0.2, 0.4, 0.8, 0.0))]),
+      radialGradientStops(50, 50, 30, 10, [
+        GradientStop(pos: 0.0, color: rgbaf(1, 0, 0, 1)),
+        GradientStop(pos: 0.3, color: rgbaf(0, 0, 1, 0.2)),
+        GradientStop(pos: 1.0, color: rgbaf(0, 1, 0, 1))])]
+    var totalDiff = 0
+    for pi, p in paints:
+      for alpha in [1.0, 0.4]:
+        for n in [0, 1, 2, 3, 7, 64]:
+          let x0 = [60, 0, 40][pi]
+          let y = [100, 7, 40][pi]
+          var ctx = bakeMultiRadialCtx(p, alpha)
+          let rowY = float64(y) + 0.5
+          ctx.rowX = float64(x0) + 0.5
+          ctx.m2y = p.map[2] * rowY
+          ctx.m3y = p.map[3] * rowY
+          var dst = newSeq[uint8](n * 4)
+          var cov = newSeq[float64](max(n, 1))
+          for i in 0 ..< dst.len: dst[i] = uint8(rand(255))
+          for i in 0 ..< n: cov[i] = [0.0, 0.25, 0.5, 1.0][rand(3)]
+          var got = dst
+          if n > 0:
+            fn(addr got[0], addr cov[0], int64(n), addr ctx)
+          var surf = newSurface(max(n, 1), 1)
+          surf.pixels.setLen(dst.len)
+          for i, b in dst: surf.pixels[i] = b
+          let aA = clamp01(alpha)
+          for i in 0 ..< n:
+            let col = p.sample(float64(x0 + i) + 0.5, rowY)
+            surf.blendPixel(i, 0,
+              color(col.r, col.g, col.b, col.a * aA), cov[i],
+              coSourceOver)
+          let dd = diffStat(got, surf.pixels)
+          if dd.n > 0 and totalDiff == 0:
+            echo "paint=", pi, " alpha=", alpha, " n=", n, "\n", dd.detail
+          totalDiff += dd.n
+    check totalDiff == 0
+    kern.destroy()
+
+  test "multi-radial generic-op kernel matches sample+blend":
+    randomize(60617)
+    const ops = [coSourceIn, coSourceOut, coAtop, coDestinationOver,
+      coDestinationIn, coDestinationOut, coDestinationAtop, coLighter,
+      coCopy, coXor, coMultiply, coScreen, coOverlay]
+    let kern = JitKernels()
+    let p = radialGradientStops(50, 50, 10, 60, [
+      GradientStop(pos: 0.0, color: rgbaf(2.0, -0.5, 0.5, 0.75)),
+      GradientStop(pos: 0.5, color: rgbaf(0.2, 0.4, 0.8, 0.2)),
+      GradientStop(pos: 1.0, color: rgbaf(0, 1, 0, 0.9))])
+    var totalDiff = 0
+    for op in ops:
+      let fn = kern.getMultiRadial(op)
+      check fn != nil
+      for alpha in [1.0, 0.4]:
+        for n in [1, 7, 32]:
+          var ctx = bakeMultiRadialCtx(p, alpha)
+          let rowY = 50.5
+          ctx.rowX = 5.5
+          ctx.m2y = p.map[2] * rowY
+          ctx.m3y = p.map[3] * rowY
+          var dst = newSeq[uint8](n * 4)
+          var cov = newSeq[float64](n)
+          for i in 0 ..< dst.len: dst[i] = uint8(rand(255))
+          for i in 0 ..< n: cov[i] = [0.0, 0.25, 0.5, 1.0][rand(3)]
+          var got = dst
+          fn(addr got[0], addr cov[0], int64(n), addr ctx)
+          var surf = newSurface(n, 1)
+          surf.pixels.setLen(dst.len)
+          for i, b in dst: surf.pixels[i] = b
+          let aA = clamp01(alpha)
+          for i in 0 ..< n:
+            let col = p.sample(float64(5 + i) + 0.5, rowY)
+            surf.blendPixel(i, 0,
+              color(col.r, col.g, col.b, col.a * aA), cov[i], op)
+          let dd = diffStat(got, surf.pixels)
+          if dd.n > 0 and totalDiff == 0:
+            echo "op=", op, " alpha=", alpha, " n=", n, "\n", dd.detail
+          totalDiff += dd.n
+    check totalDiff == 0
+    kern.destroy()
+
+  test "pattern-bilinear row kernel matches sample+blend":
+    randomize(50505)
+    var data = newSeq[uint8](7 * 5 * 4)
+    for i in 0 ..< data.len: data[i] = uint8(rand(255))
+    let kern = JitKernels()
+    let fn = kern.getPatternBilinear()
+    check fn != nil
+    var paints: seq[Paint] = @[
+      imagePattern(newImage(7, 5, {}, data), 0, 0, 8, 8, 0.0),
+      imagePattern(newImage(7, 5, {ifRepeatX, ifRepeatY}, data),
+        0, 0, 8, 8, 0.0),
+      imagePattern(newImage(7, 5, {ifFlipY}, data),
+        0, 0, 8, 8, 0.0),
+      imagePattern(newImage(4, 6,
+        {ifRepeatX, ifRepeatY, ifFlipY}, data),
+        10, 20, 30, 25, 0.7, rgbaf(0.9, 0.5, 0.2, 0.8))]
+    var mapped = imagePattern(
+      newImage(7, 5, {ifRepeatX}, data), 0, 0, 8, 8, 0.3)
+    mapped.map = [2.0, 0.5, -0.25, 1.5, 5.0, -3.0]
+    paints.add(mapped)
+    var totalDiff = 0
+    for pi, p in paints:
+      for alpha in [1.0, 0.4]:
+        for n in [0, 1, 2, 3, 7, 64]:
+          let x0 = [3, -20, 3, 0, 100][pi]
+          let y = [2, -15, 2, 7, 50][pi]
+          if patternSkippable(p, alpha): continue
+          var ctx = bakePatternCtx(p, alpha)
+          let rowY = float64(y) + 0.5
+          ctx.rowX = float64(x0) + 0.5
+          ctx.m2y = p.map[2] * rowY
+          ctx.m3y = p.map[3] * rowY
+          var dst = newSeq[uint8](n * 4)
+          var cov = newSeq[float64](max(n, 1))
+          for i in 0 ..< dst.len: dst[i] = uint8(rand(255))
+          for i in 0 ..< n: cov[i] = [0.0, 0.25, 0.5, 1.0][rand(3)]
+          var got = dst
+          if n > 0:
+            fn(addr got[0], addr cov[0], int64(n), addr ctx)
+          var surf = newSurface(max(n, 1), 1)
+          surf.pixels.setLen(dst.len)
+          for i, b in dst: surf.pixels[i] = b
+          let aA = clamp01(alpha)
+          for i in 0 ..< n:
+            let col = p.sample(float64(x0 + i) + 0.5, rowY)
+            surf.blendPixel(i, 0,
+              color(col.r, col.g, col.b, col.a * aA), cov[i],
+              coSourceOver)
+          let dd = diffStat(got, surf.pixels)
+          if dd.n > 0 and totalDiff == 0:
+            echo "paint=", pi, " alpha=", alpha, " n=", n, "\n", dd.detail
+          totalDiff += dd.n
+    check totalDiff == 0
+    kern.destroy()
+
+  test "pattern-bilinear generic-op kernel matches sample+blend":
+    randomize(70707)
+    const ops = [coSourceIn, coSourceOut, coAtop, coDestinationOver,
+      coDestinationIn, coDestinationOut, coDestinationAtop, coLighter,
+      coCopy, coXor, coMultiply, coScreen, coOverlay]
+    var data = newSeq[uint8](6 * 4 * 4)
+    for i in 0 ..< data.len: data[i] = uint8(rand(255))
+    let kern = JitKernels()
+    let p = imagePattern(newImage(6, 4, {ifRepeatX, ifRepeatY}, data),
+      5, 5, 20, 15, 0.5, rgbaf(0.9, 0.8, 0.7, 0.85))
+    var totalDiff = 0
+    for op in ops:
+      let fn = kern.getPatternBilinear(op)
+      check fn != nil
+      for alpha in [1.0, 0.4]:
+        for n in [1, 7, 32]:
+          var ctx = bakePatternCtx(p, alpha)
+          let rowY = 7.5
+          ctx.rowX = 0.5
+          ctx.m2y = p.map[2] * rowY
+          ctx.m3y = p.map[3] * rowY
+          var dst = newSeq[uint8](n * 4)
+          var cov = newSeq[float64](n)
+          for i in 0 ..< dst.len: dst[i] = uint8(rand(255))
+          for i in 0 ..< n: cov[i] = [0.0, 0.25, 0.5, 1.0][rand(3)]
+          var got = dst
+          fn(addr got[0], addr cov[0], int64(n), addr ctx)
+          var surf = newSurface(n, 1)
+          surf.pixels.setLen(dst.len)
+          for i, b in dst: surf.pixels[i] = b
+          let aA = clamp01(alpha)
+          for i in 0 ..< n:
+            let col = p.sample(float64(i) + 0.5, rowY)
+            surf.blendPixel(i, 0,
+              color(col.r, col.g, col.b, col.a * aA), cov[i], op)
+          let dd = diffStat(got, surf.pixels)
+          if dd.n > 0 and totalDiff == 0:
+            echo "op=", op, " alpha=", alpha, " n=", n, "\n", dd.detail
+          totalDiff += dd.n
+    check totalDiff == 0
+    kern.destroy()
+
+  test "all comp ops identical: multi-stop and bilinear fills":
+    const ops = [coSourceOver, coSourceIn, coSourceOut, coAtop,
+      coDestinationOver, coDestinationIn, coDestinationOut,
+      coDestinationAtop, coLighter, coCopy, coXor, coMultiply, coScreen,
+      coOverlay]
+    var totalDiff = 0
+    for op in ops:
+      let d = checkScene(160, 120, proc(c: Canvas) =
+        c.clear(rgbaf(0.2, 0.4, 0.8, 0.6))
+        let data = @[255'u8, 0, 0, 255, 0, 255, 0, 255,
+          0, 0, 255, 255, 255, 255, 255, 255]
+        let id = c.createImageRGBA(2, 2, {ifRepeatX, ifRepeatY}, data)
+        c.beginPath()
+        c.rect(10.5, 10.5, 60, 50)
+        c.setFillPaint(c.imagePattern(10, 10, 20, 20, 0.3, id, 0.9))
+        c.setCompositeOp(op)
+        c.fill()
+        c.beginPath()
+        c.circle(110.5, 60.5, 35)
+        c.setFillPaint(c.linearGradientStops(80, 60, 140, 60,
+          [GradientStop(pos: 0.0, color: rgbaf(0, 1, 0, 0.8)),
+            GradientStop(pos: 0.5, color: rgbaf(1, 1, 0, 0.5)),
+            GradientStop(pos: 1.0, color: rgbaf(0, 0, 1, 0.3))]))
+        c.setCompositeOp(op)
+        c.fill()
+        c.beginPath()
+        c.rect(10.5, 70.5, 60, 40)
+        c.setFillPaint(c.radialGradientStops(40, 90, 5, 30,
+          [GradientStop(pos: 0.0, color: rgbaf(1, 1, 0, 0.9)),
+            GradientStop(pos: 1.0, color: rgbaf(1, 0, 1, 0.2))]))
+        c.setCompositeOp(op)
+        c.fill())
+      if d.n > 0 and totalDiff == 0:
+        echo "op=", op, "\n", d.detail
+      totalDiff += d.n
+    check totalDiff == 0
 
 test "aarch64 kernel assembles":
   # Bytes-only on non-ARM hosts; execution is amd64-gated above until

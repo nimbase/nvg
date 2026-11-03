@@ -2713,6 +2713,2256 @@ proc buildPatternRowGenAarch64*(op: static CompOp): ExecutableBuffer =
     ret()
   a.finalize()
 
+proc buildMultiLinearRowX64*(): ExecutableBuffer =
+  ## Multi-stop linear-gradient source-over row kernel. Same ABI as solid.
+  ## `t`/`tc` replicate `paint.sample` (linear branch) + `sampleStops`
+  ## exactly: clamp01, below-first (last author at min pos), past-last
+  ## (final non-degenerate lerp at u>=1, clamped in lerp), else linear
+  ## search L/R + lerp. Stops borrow the paint heap array via
+  ## `MultiLinearCtx` (ptr+len); len 0/1 handled (transparent/constant).
+  ## Blend replicates source-over. Finite colors only.
+  var a = newAssembler(akX64)
+  dynasm a:
+    arch x64
+    alias dst, rdi, rcx
+    alias cov, rsi, rdx
+    alias nn, rdx, r8
+    alias ctx, rcx, r9
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov r10, dst
+    mov r11, cov
+    mov rax, nn
+    mov r8, ctx
+    sub rsp, 96
+    movupd [rsp], xmm6
+    movupd [rsp + 16], xmm7
+    movupd [rsp + 32], xmm8
+    movupd [rsp + 48], xmm9
+    movupd [rsp + 64], xmm10
+    movupd [rsp + 80], xmm11
+    mov r9, [r8 + 128] # divtab
+    movsd xmm4, [r8 + 96] # c255
+    movsd xmm5, [r8 + 112] # zero
+    movsd xmm6, [r8 + 120] # one
+    movsd xmm7, [r8 + 104] # half
+    cmp rax, 0
+    jle fwd("done")
+    movsd xmm8, [r8 + 136] # rowX
+    label row
+    # qx = (m0*x + m2y) + m4
+    movsd xmm0, xmm8
+    mulsd xmm0, [r8 + 0]
+    addsd xmm0, [r8 + 144]
+    addsd xmm0, [r8 + 16]
+    # qy = (m1*x + m3y) + m5
+    movsd xmm1, xmm8
+    mulsd xmm1, [r8 + 8]
+    addsd xmm1, [r8 + 152]
+    addsd xmm1, [r8 + 24]
+    # t = ((qx-sx)*dx + (qy-sy)*dy) / len2, clamped to tc
+    subsd xmm0, [r8 + 32]
+    mulsd xmm0, [r8 + 48]
+    subsd xmm1, [r8 + 40]
+    mulsd xmm1, [r8 + 56]
+    addsd xmm0, xmm1
+    divsd xmm0, [r8 + 64]
+    maxpd xmm0, xmm5
+    minpd xmm0, xmm6
+    movsd xmm9, xmm0 # tc
+    mov r12, [r8 + 72] # stopsPtr
+    mov rbx, [r8 + 80] # stopsLen
+    cmp rbx, 0
+    jle fwd("transparent")
+    cmp rbx, 1
+    jz fwd("single")
+    # pos0
+    movsd xmm0, [r12]
+    ucomisd xmm9, xmm0
+    jb fwd("below")
+    # posLast
+    mov rcx, rbx
+    dec rcx
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx]
+    ucomisd xmm9, xmm0
+    jae fwd("final")
+    # interior: L in r13
+    `xor` r13, r13
+    label search
+    mov r14, r13
+    inc r14
+    mov rcx, r14
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx] # posR
+    ucomisd xmm0, xmm9
+    jbe fwd("adv")
+    jmp fwd("found")
+    label adv
+    mov r13, r14
+    jmp bwd("search")
+    label found
+    # ptrL in rcx, ptrR in rdx
+    mov rcx, r13
+    imul rcx, rcx, 40
+    add rcx, r12
+    mov rdx, r13
+    inc rdx
+    imul rdx, rdx, 40
+    add rdx, r12
+    movsd xmm0, [rcx] # posL
+    movsd xmm1, [rdx] # posR
+    movsd xmm2, xmm9
+    subsd xmm2, xmm0
+    movsd xmm3, xmm1
+    subsd xmm3, xmm0
+    divsd xmm2, xmm3
+    maxpd xmm2, xmm5
+    minpd xmm2, xmm6
+    movsd xmm9, xmm2 # u (xmm10 is free temp for lerps)
+    # A first (xmm10 temp, result xmm3)
+    movsd xmm3, [rcx + 32]
+    movsd xmm10, [rdx + 32]
+    subsd xmm10, xmm3
+    mulsd xmm10, xmm9
+    addsd xmm3, xmm10
+    # R -> xmm0
+    movsd xmm0, [rcx + 8]
+    movsd xmm10, [rdx + 8]
+    subsd xmm10, xmm0
+    mulsd xmm10, xmm9
+    addsd xmm0, xmm10
+    # G -> xmm1
+    movsd xmm1, [rcx + 16]
+    movsd xmm10, [rdx + 16]
+    subsd xmm10, xmm1
+    mulsd xmm10, xmm9
+    addsd xmm1, xmm10
+    # B -> xmm2
+    movsd xmm2, [rcx + 24]
+    movsd xmm10, [rdx + 24]
+    subsd xmm10, xmm2
+    mulsd xmm10, xmm9
+    addsd xmm2, xmm10
+    jmp fwd("evaldone")
+    label transparent
+    xorpd xmm0, xmm0
+    xorpd xmm1, xmm1
+    xorpd xmm2, xmm2
+    xorpd xmm3, xmm3
+    jmp fwd("evaldone")
+    label single
+    movsd xmm0, [r12 + 8]
+    movsd xmm1, [r12 + 16]
+    movsd xmm2, [r12 + 24]
+    movsd xmm3, [r12 + 32]
+    jmp fwd("evaldone")
+    label below
+    movsd xmm0, [r12] # pos0
+    `xor` r13, r13
+    label belowloop
+    mov r14, r13
+    inc r14
+    cmp r14, rbx
+    jge fwd("belowdone")
+    mov rcx, r14
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm1, [rcx]
+    ucomisd xmm1, xmm0
+    jnz fwd("belowdone")
+    mov r13, r14
+    jmp bwd("belowloop")
+    label belowdone
+    mov rcx, r13
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx + 8]
+    movsd xmm1, [rcx + 16]
+    movsd xmm2, [rcx + 24]
+    movsd xmm3, [rcx + 32]
+    jmp fwd("evaldone")
+    label final
+    # posLast in xmm0 already? Reload for safety
+    mov rcx, rbx
+    dec rcx
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx] # posLast
+    mov r13, rbx
+    dec r13 # j = len-1
+    label finalloop
+    cmp r13, 0
+    jle fwd("finalcheck")
+    mov r14, r13
+    dec r14
+    mov rdx, r14
+    imul rdx, rdx, 40
+    add rdx, r12
+    movsd xmm1, [rdx]
+    ucomisd xmm1, xmm0
+    jnz fwd("finalcheck")
+    mov r13, r14
+    jmp bwd("finalloop")
+    label finalcheck
+    cmp r13, 0
+    jz fwd("finallast")
+    dec r13 # L
+    mov rcx, r13
+    imul rcx, rcx, 40
+    add rcx, r12 # ptrL
+    mov rdx, rbx
+    dec rdx
+    imul rdx, rdx, 40
+    add rdx, r12 # ptrLast
+    movsd xmm0, [rcx] # posL
+    movsd xmm2, xmm9
+    subsd xmm2, xmm0
+    movsd xmm3, [rdx] # posLast
+    subsd xmm3, xmm0
+    divsd xmm2, xmm3
+    maxpd xmm2, xmm5
+    minpd xmm2, xmm6
+    movsd xmm9, xmm2 # u
+    # A first, then R/G/B (xmm10 temp)
+    movsd xmm3, [rcx + 32]
+    movsd xmm10, [rdx + 32]
+    subsd xmm10, xmm3
+    mulsd xmm10, xmm9
+    addsd xmm3, xmm10
+    movsd xmm0, [rcx + 8]
+    movsd xmm10, [rdx + 8]
+    subsd xmm10, xmm0
+    mulsd xmm10, xmm9
+    addsd xmm0, xmm10
+    movsd xmm1, [rcx + 16]
+    movsd xmm10, [rdx + 16]
+    subsd xmm10, xmm1
+    mulsd xmm10, xmm9
+    addsd xmm1, xmm10
+    movsd xmm2, [rcx + 24]
+    movsd xmm10, [rdx + 24]
+    subsd xmm10, xmm2
+    mulsd xmm10, xmm9
+    addsd xmm2, xmm10
+    jmp fwd("evaldone")
+    label finallast
+    mov rcx, rbx
+    dec rcx
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx + 8]
+    movsd xmm1, [rcx + 16]
+    movsd xmm2, [rcx + 24]
+    movsd xmm3, [rcx + 32]
+    jmp fwd("evaldone")
+    label evaldone
+    # xmm0=cr, xmm1=cg, xmm2=cb, xmm3=a_lerp -> sa_c/inv + sourceOver blend
+    mulsd xmm3, [r8 + 88] # aAlpha
+    maxpd xmm3, xmm5
+    minpd xmm3, xmm6
+    mulsd xmm3, [r11] # cov
+    movsd xmm10, xmm3 # sa_c
+    movsd xmm11, xmm6
+    subsd xmm11, xmm10 # inv
+    # R
+    mulsd xmm0, xmm10
+    movzx edx, byte [r10]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm3, xmm11
+    addsd xmm0, xmm3
+    maxpd xmm0, xmm5
+    minpd xmm0, xmm6
+    mulsd xmm0, xmm4
+    addsd xmm0, xmm7
+    cvttsd2si edx, xmm0
+    mov byte [r10], dl
+    # G
+    mulsd xmm1, xmm10
+    movzx edx, byte [r10 + 1]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm3, xmm11
+    addsd xmm1, xmm3
+    maxpd xmm1, xmm5
+    minpd xmm1, xmm6
+    mulsd xmm1, xmm4
+    addsd xmm1, xmm7
+    cvttsd2si edx, xmm1
+    mov byte [r10 + 1], dl
+    # B
+    mulsd xmm2, xmm10
+    movzx edx, byte [r10 + 2]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm3, xmm11
+    addsd xmm2, xmm3
+    maxpd xmm2, xmm5
+    minpd xmm2, xmm6
+    mulsd xmm2, xmm4
+    addsd xmm2, xmm7
+    cvttsd2si edx, xmm2
+    mov byte [r10 + 2], dl
+    # A
+    movzx edx, byte [r10 + 3]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm3, xmm11
+    addsd xmm3, xmm10
+    maxpd xmm3, xmm5
+    minpd xmm3, xmm6
+    mulsd xmm3, xmm4
+    addsd xmm3, xmm7
+    cvttsd2si edx, xmm3
+    mov byte [r10 + 3], dl
+    addsd xmm8, xmm6 # x += 1.0
+    add r10, 4
+    add r11, 8
+    sub rax, 1
+    cmp rax, 0
+    jg bwd("row")
+    label done
+    movupd xmm6, [rsp]
+    movupd xmm7, [rsp + 16]
+    movupd xmm8, [rsp + 32]
+    movupd xmm9, [rsp + 48]
+    movupd xmm10, [rsp + 64]
+    movupd xmm11, [rsp + 80]
+    add rsp, 96
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret()
+  a.finalize()
+
+proc buildMultiLinearRowGenX64*(op: static CompOp): ExecutableBuffer =
+  ## Multi-stop linear-gradient head with the generic-op blend tail. Same ABI as solid.
+  ## `t`/`tc` replicate `paint.sample` (linear branch) + `sampleStops`
+  ## exactly: clamp01, below-first (last author at min pos), past-last
+  ## (final non-degenerate lerp at u>=1, clamped in lerp), else linear
+  ## search L/R + lerp. Stops borrow the paint heap array via
+  ## `MultiLinearCtx` (ptr+len); len 0/1 handled (transparent/constant).
+  ## Paint eval mirrors sampleStops exactly; channels clamp and clearing ops run.
+  var a = newAssembler(akX64)
+  dynasm a:
+    arch x64
+    alias dst, rdi, rcx
+    alias cov, rsi, rdx
+    alias nn, rdx, r8
+    alias ctx, rcx, r9
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov r10, dst
+    mov r11, cov
+    mov rax, nn
+    mov r8, ctx
+    sub rsp, 160
+    movupd [rsp], xmm6
+    movupd [rsp + 16], xmm7
+    movupd [rsp + 32], xmm8
+    movupd [rsp + 48], xmm9
+    movupd [rsp + 64], xmm10
+    movupd [rsp + 80], xmm11
+    movabs rcx, 0x3EB0C6F7A0B5ED8D # 1e-6 bits (ao threshold)
+    mov qword [rsp + 152], rcx
+    mov r9, [r8 + 128] # divtab
+    movsd xmm4, [r8 + 96] # c255
+    movsd xmm5, [r8 + 112] # zero
+    movsd xmm6, [r8 + 120] # one
+    movsd xmm7, [r8 + 104] # half
+    cmp rax, 0
+    jle fwd("done")
+    movsd xmm8, [r8 + 136] # rowX
+    label row
+    # qx = (m0*x + m2y) + m4
+    movsd xmm0, xmm8
+    mulsd xmm0, [r8 + 0]
+    addsd xmm0, [r8 + 144]
+    addsd xmm0, [r8 + 16]
+    # qy = (m1*x + m3y) + m5
+    movsd xmm1, xmm8
+    mulsd xmm1, [r8 + 8]
+    addsd xmm1, [r8 + 152]
+    addsd xmm1, [r8 + 24]
+    # t = ((qx-sx)*dx + (qy-sy)*dy) / len2, clamped to tc
+    subsd xmm0, [r8 + 32]
+    mulsd xmm0, [r8 + 48]
+    subsd xmm1, [r8 + 40]
+    mulsd xmm1, [r8 + 56]
+    addsd xmm0, xmm1
+    divsd xmm0, [r8 + 64]
+    maxpd xmm0, xmm5
+    minpd xmm0, xmm6
+    movsd xmm9, xmm0 # tc
+    mov r12, [r8 + 72] # stopsPtr
+    mov rbx, [r8 + 80] # stopsLen
+    cmp rbx, 0
+    jle fwd("transparent")
+    cmp rbx, 1
+    jz fwd("single")
+    # pos0
+    movsd xmm0, [r12]
+    ucomisd xmm9, xmm0
+    jb fwd("below")
+    # posLast
+    mov rcx, rbx
+    dec rcx
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx]
+    ucomisd xmm9, xmm0
+    jae fwd("final")
+    # interior: L in r13
+    `xor` r13, r13
+    label search
+    mov r14, r13
+    inc r14
+    mov rcx, r14
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx] # posR
+    ucomisd xmm0, xmm9
+    jbe fwd("adv")
+    jmp fwd("found")
+    label adv
+    mov r13, r14
+    jmp bwd("search")
+    label found
+    # ptrL in rcx, ptrR in rdx
+    mov rcx, r13
+    imul rcx, rcx, 40
+    add rcx, r12
+    mov rdx, r13
+    inc rdx
+    imul rdx, rdx, 40
+    add rdx, r12
+    movsd xmm0, [rcx] # posL
+    movsd xmm1, [rdx] # posR
+    movsd xmm2, xmm9
+    subsd xmm2, xmm0
+    movsd xmm3, xmm1
+    subsd xmm3, xmm0
+    divsd xmm2, xmm3
+    maxpd xmm2, xmm5
+    minpd xmm2, xmm6
+    movsd xmm9, xmm2 # u (xmm10 is free temp for lerps)
+    # A first (xmm10 temp, result xmm3)
+    movsd xmm3, [rcx + 32]
+    movsd xmm10, [rdx + 32]
+    subsd xmm10, xmm3
+    mulsd xmm10, xmm9
+    addsd xmm3, xmm10
+    # R -> xmm0
+    movsd xmm0, [rcx + 8]
+    movsd xmm10, [rdx + 8]
+    subsd xmm10, xmm0
+    mulsd xmm10, xmm9
+    addsd xmm0, xmm10
+    # G -> xmm1
+    movsd xmm1, [rcx + 16]
+    movsd xmm10, [rdx + 16]
+    subsd xmm10, xmm1
+    mulsd xmm10, xmm9
+    addsd xmm1, xmm10
+    # B -> xmm2
+    movsd xmm2, [rcx + 24]
+    movsd xmm10, [rdx + 24]
+    subsd xmm10, xmm2
+    mulsd xmm10, xmm9
+    addsd xmm2, xmm10
+    jmp fwd("evaldone")
+    label transparent
+    xorpd xmm0, xmm0
+    xorpd xmm1, xmm1
+    xorpd xmm2, xmm2
+    xorpd xmm3, xmm3
+    jmp fwd("evaldone")
+    label single
+    movsd xmm0, [r12 + 8]
+    movsd xmm1, [r12 + 16]
+    movsd xmm2, [r12 + 24]
+    movsd xmm3, [r12 + 32]
+    jmp fwd("evaldone")
+    label below
+    movsd xmm0, [r12] # pos0
+    `xor` r13, r13
+    label belowloop
+    mov r14, r13
+    inc r14
+    cmp r14, rbx
+    jge fwd("belowdone")
+    mov rcx, r14
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm1, [rcx]
+    ucomisd xmm1, xmm0
+    jnz fwd("belowdone")
+    mov r13, r14
+    jmp bwd("belowloop")
+    label belowdone
+    mov rcx, r13
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx + 8]
+    movsd xmm1, [rcx + 16]
+    movsd xmm2, [rcx + 24]
+    movsd xmm3, [rcx + 32]
+    jmp fwd("evaldone")
+    label final
+    # posLast in xmm0 already? Reload for safety
+    mov rcx, rbx
+    dec rcx
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx] # posLast
+    mov r13, rbx
+    dec r13 # j = len-1
+    label finalloop
+    cmp r13, 0
+    jle fwd("finalcheck")
+    mov r14, r13
+    dec r14
+    mov rdx, r14
+    imul rdx, rdx, 40
+    add rdx, r12
+    movsd xmm1, [rdx]
+    ucomisd xmm1, xmm0
+    jnz fwd("finalcheck")
+    mov r13, r14
+    jmp bwd("finalloop")
+    label finalcheck
+    cmp r13, 0
+    jz fwd("finallast")
+    dec r13 # L
+    mov rcx, r13
+    imul rcx, rcx, 40
+    add rcx, r12 # ptrL
+    mov rdx, rbx
+    dec rdx
+    imul rdx, rdx, 40
+    add rdx, r12 # ptrLast
+    movsd xmm0, [rcx] # posL
+    movsd xmm2, xmm9
+    subsd xmm2, xmm0
+    movsd xmm3, [rdx] # posLast
+    subsd xmm3, xmm0
+    divsd xmm2, xmm3
+    maxpd xmm2, xmm5
+    minpd xmm2, xmm6
+    movsd xmm9, xmm2 # u
+    # A first, then R/G/B (xmm10 temp)
+    movsd xmm3, [rcx + 32]
+    movsd xmm10, [rdx + 32]
+    subsd xmm10, xmm3
+    mulsd xmm10, xmm9
+    addsd xmm3, xmm10
+    movsd xmm0, [rcx + 8]
+    movsd xmm10, [rdx + 8]
+    subsd xmm10, xmm0
+    mulsd xmm10, xmm9
+    addsd xmm0, xmm10
+    movsd xmm1, [rcx + 16]
+    movsd xmm10, [rdx + 16]
+    subsd xmm10, xmm1
+    mulsd xmm10, xmm9
+    addsd xmm1, xmm10
+    movsd xmm2, [rcx + 24]
+    movsd xmm10, [rdx + 24]
+    subsd xmm10, xmm2
+    mulsd xmm10, xmm9
+    addsd xmm2, xmm10
+    jmp fwd("evaldone")
+    label finallast
+    mov rcx, rbx
+    dec rcx
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx + 8]
+    movsd xmm1, [rcx + 16]
+    movsd xmm2, [rcx + 24]
+    movsd xmm3, [rcx + 32]
+    jmp fwd("evaldone")
+    label evaldone
+    # xmm0=cr, xmm1=cg, xmm2=cb, xmm3=a_lerp -> clamped rgb + sa, then tail
+    maxpd xmm0, xmm5
+    minpd xmm0, xmm6
+    maxpd xmm1, xmm5
+    minpd xmm1, xmm6
+    maxpd xmm2, xmm5
+    minpd xmm2, xmm6
+    mulsd xmm3, [r8 + 88] # aAlpha
+    maxpd xmm3, xmm5
+    minpd xmm3, xmm6
+    mulsd xmm3, [r11] # cov
+    movsd xmm10, xmm3 # sa
+  # NB: `include` must nest in `when` here (same quirk as above).
+  when op != coSourceOver:
+    include blend_x64
+  dynasm a:
+    arch x64
+    addsd xmm8, xmm6 # x += 1.0
+    add r10, 4
+    add r11, 8
+    sub rax, 1
+    cmp rax, 0
+    jg bwd("row")
+    label done
+    movupd xmm6, [rsp]
+    movupd xmm7, [rsp + 16]
+    movupd xmm8, [rsp + 32]
+    movupd xmm9, [rsp + 48]
+    movupd xmm10, [rsp + 64]
+    movupd xmm11, [rsp + 80]
+    add rsp, 160
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret()
+  a.finalize()
+
+proc buildMultiRadialRowX64*(): ExecutableBuffer =
+  ## Multi-stop radial-gradient source-over row kernel. Same ABI as solid.
+  ## `t`/`tc` replicate `paint.sample` (radial branch) + `sampleStops`
+  ## exactly: clamp01, below-first (last author at min pos), past-last
+  ## (final non-degenerate lerp at u>=1, clamped in lerp), else linear
+  ## search L/R + lerp. Stops borrow the paint heap array via
+  ## `MultiRadialCtx` (ptr+len); len 0/1 handled (transparent/constant).
+  ## Blend replicates source-over. Finite colors only.
+  var a = newAssembler(akX64)
+  dynasm a:
+    arch x64
+    alias dst, rdi, rcx
+    alias cov, rsi, rdx
+    alias nn, rdx, r8
+    alias ctx, rcx, r9
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov r10, dst
+    mov r11, cov
+    mov rax, nn
+    mov r8, ctx
+    sub rsp, 96
+    movupd [rsp], xmm6
+    movupd [rsp + 16], xmm7
+    movupd [rsp + 32], xmm8
+    movupd [rsp + 48], xmm9
+    movupd [rsp + 64], xmm10
+    movupd [rsp + 80], xmm11
+    mov r9, [r8 + 120] # divtab
+    movsd xmm4, [r8 + 88] # c255
+    movsd xmm5, [r8 + 104] # zero
+    movsd xmm6, [r8 + 112] # one
+    movsd xmm7, [r8 + 96] # half
+    cmp rax, 0
+    jle fwd("done")
+    movsd xmm8, [r8 + 128] # rowX
+    label row
+    # qx = (m0*x + m2y) + m4
+    movsd xmm0, xmm8
+    mulsd xmm0, [r8 + 0]
+    addsd xmm0, [r8 + 136]
+    addsd xmm0, [r8 + 16]
+    # qy = (m1*x + m3y) + m5
+    movsd xmm1, xmm8
+    mulsd xmm1, [r8 + 8]
+    addsd xmm1, [r8 + 144]
+    addsd xmm1, [r8 + 24]
+    # dist = sqrt((qx-cx)^2 + (qy-cy)^2)
+    subsd xmm0, [r8 + 32] # cx
+    subsd xmm1, [r8 + 40] # cy
+    movsd xmm2, xmm0
+    mulsd xmm2, xmm2
+    movsd xmm3, xmm1
+    mulsd xmm3, xmm3
+    addsd xmm2, xmm3
+    sqrtsd xmm2, xmm2
+    # t = (dist-inr)/f, clamped to tc
+    subsd xmm2, [r8 + 48] # inr
+    divsd xmm2, [r8 + 56] # f
+    maxpd xmm2, xmm5
+    minpd xmm2, xmm6
+    movsd xmm9, xmm2 # tc
+    mov r12, [r8 + 64] # stopsPtr
+    mov rbx, [r8 + 72] # stopsLen
+    cmp rbx, 0
+    jle fwd("transparent")
+    cmp rbx, 1
+    jz fwd("single")
+    # pos0
+    movsd xmm0, [r12]
+    ucomisd xmm9, xmm0
+    jb fwd("below")
+    # posLast
+    mov rcx, rbx
+    dec rcx
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx]
+    ucomisd xmm9, xmm0
+    jae fwd("final")
+    # interior: L in r13
+    `xor` r13, r13
+    label search
+    mov r14, r13
+    inc r14
+    mov rcx, r14
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx] # posR
+    ucomisd xmm0, xmm9
+    jbe fwd("adv")
+    jmp fwd("found")
+    label adv
+    mov r13, r14
+    jmp bwd("search")
+    label found
+    # ptrL in rcx, ptrR in rdx
+    mov rcx, r13
+    imul rcx, rcx, 40
+    add rcx, r12
+    mov rdx, r13
+    inc rdx
+    imul rdx, rdx, 40
+    add rdx, r12
+    movsd xmm0, [rcx] # posL
+    movsd xmm1, [rdx] # posR
+    movsd xmm2, xmm9
+    subsd xmm2, xmm0
+    movsd xmm3, xmm1
+    subsd xmm3, xmm0
+    divsd xmm2, xmm3
+    maxpd xmm2, xmm5
+    minpd xmm2, xmm6
+    movsd xmm9, xmm2 # u (xmm10 is free temp for lerps)
+    # A first (xmm10 temp, result xmm3)
+    movsd xmm3, [rcx + 32]
+    movsd xmm10, [rdx + 32]
+    subsd xmm10, xmm3
+    mulsd xmm10, xmm9
+    addsd xmm3, xmm10
+    # R -> xmm0
+    movsd xmm0, [rcx + 8]
+    movsd xmm10, [rdx + 8]
+    subsd xmm10, xmm0
+    mulsd xmm10, xmm9
+    addsd xmm0, xmm10
+    # G -> xmm1
+    movsd xmm1, [rcx + 16]
+    movsd xmm10, [rdx + 16]
+    subsd xmm10, xmm1
+    mulsd xmm10, xmm9
+    addsd xmm1, xmm10
+    # B -> xmm2
+    movsd xmm2, [rcx + 24]
+    movsd xmm10, [rdx + 24]
+    subsd xmm10, xmm2
+    mulsd xmm10, xmm9
+    addsd xmm2, xmm10
+    jmp fwd("evaldone")
+    label transparent
+    xorpd xmm0, xmm0
+    xorpd xmm1, xmm1
+    xorpd xmm2, xmm2
+    xorpd xmm3, xmm3
+    jmp fwd("evaldone")
+    label single
+    movsd xmm0, [r12 + 8]
+    movsd xmm1, [r12 + 16]
+    movsd xmm2, [r12 + 24]
+    movsd xmm3, [r12 + 32]
+    jmp fwd("evaldone")
+    label below
+    movsd xmm0, [r12] # pos0
+    `xor` r13, r13
+    label belowloop
+    mov r14, r13
+    inc r14
+    cmp r14, rbx
+    jge fwd("belowdone")
+    mov rcx, r14
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm1, [rcx]
+    ucomisd xmm1, xmm0
+    jnz fwd("belowdone")
+    mov r13, r14
+    jmp bwd("belowloop")
+    label belowdone
+    mov rcx, r13
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx + 8]
+    movsd xmm1, [rcx + 16]
+    movsd xmm2, [rcx + 24]
+    movsd xmm3, [rcx + 32]
+    jmp fwd("evaldone")
+    label final
+    # posLast in xmm0 already? Reload for safety
+    mov rcx, rbx
+    dec rcx
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx] # posLast
+    mov r13, rbx
+    dec r13 # j = len-1
+    label finalloop
+    cmp r13, 0
+    jle fwd("finalcheck")
+    mov r14, r13
+    dec r14
+    mov rdx, r14
+    imul rdx, rdx, 40
+    add rdx, r12
+    movsd xmm1, [rdx]
+    ucomisd xmm1, xmm0
+    jnz fwd("finalcheck")
+    mov r13, r14
+    jmp bwd("finalloop")
+    label finalcheck
+    cmp r13, 0
+    jz fwd("finallast")
+    dec r13 # L
+    mov rcx, r13
+    imul rcx, rcx, 40
+    add rcx, r12 # ptrL
+    mov rdx, rbx
+    dec rdx
+    imul rdx, rdx, 40
+    add rdx, r12 # ptrLast
+    movsd xmm0, [rcx] # posL
+    movsd xmm2, xmm9
+    subsd xmm2, xmm0
+    movsd xmm3, [rdx] # posLast
+    subsd xmm3, xmm0
+    divsd xmm2, xmm3
+    maxpd xmm2, xmm5
+    minpd xmm2, xmm6
+    movsd xmm9, xmm2 # u
+    # A first, then R/G/B (xmm10 temp)
+    movsd xmm3, [rcx + 32]
+    movsd xmm10, [rdx + 32]
+    subsd xmm10, xmm3
+    mulsd xmm10, xmm9
+    addsd xmm3, xmm10
+    movsd xmm0, [rcx + 8]
+    movsd xmm10, [rdx + 8]
+    subsd xmm10, xmm0
+    mulsd xmm10, xmm9
+    addsd xmm0, xmm10
+    movsd xmm1, [rcx + 16]
+    movsd xmm10, [rdx + 16]
+    subsd xmm10, xmm1
+    mulsd xmm10, xmm9
+    addsd xmm1, xmm10
+    movsd xmm2, [rcx + 24]
+    movsd xmm10, [rdx + 24]
+    subsd xmm10, xmm2
+    mulsd xmm10, xmm9
+    addsd xmm2, xmm10
+    jmp fwd("evaldone")
+    label finallast
+    mov rcx, rbx
+    dec rcx
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx + 8]
+    movsd xmm1, [rcx + 16]
+    movsd xmm2, [rcx + 24]
+    movsd xmm3, [rcx + 32]
+    jmp fwd("evaldone")
+    label evaldone
+    # xmm0=cr, xmm1=cg, xmm2=cb, xmm3=a_lerp -> sa_c/inv + sourceOver blend
+    mulsd xmm3, [r8 + 80] # aAlpha
+    maxpd xmm3, xmm5
+    minpd xmm3, xmm6
+    mulsd xmm3, [r11] # cov
+    movsd xmm10, xmm3 # sa_c
+    movsd xmm11, xmm6
+    subsd xmm11, xmm10 # inv
+    # R
+    mulsd xmm0, xmm10
+    movzx edx, byte [r10]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm3, xmm11
+    addsd xmm0, xmm3
+    maxpd xmm0, xmm5
+    minpd xmm0, xmm6
+    mulsd xmm0, xmm4
+    addsd xmm0, xmm7
+    cvttsd2si edx, xmm0
+    mov byte [r10], dl
+    # G
+    mulsd xmm1, xmm10
+    movzx edx, byte [r10 + 1]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm3, xmm11
+    addsd xmm1, xmm3
+    maxpd xmm1, xmm5
+    minpd xmm1, xmm6
+    mulsd xmm1, xmm4
+    addsd xmm1, xmm7
+    cvttsd2si edx, xmm1
+    mov byte [r10 + 1], dl
+    # B
+    mulsd xmm2, xmm10
+    movzx edx, byte [r10 + 2]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm3, xmm11
+    addsd xmm2, xmm3
+    maxpd xmm2, xmm5
+    minpd xmm2, xmm6
+    mulsd xmm2, xmm4
+    addsd xmm2, xmm7
+    cvttsd2si edx, xmm2
+    mov byte [r10 + 2], dl
+    # A
+    movzx edx, byte [r10 + 3]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm3, xmm11
+    addsd xmm3, xmm10
+    maxpd xmm3, xmm5
+    minpd xmm3, xmm6
+    mulsd xmm3, xmm4
+    addsd xmm3, xmm7
+    cvttsd2si edx, xmm3
+    mov byte [r10 + 3], dl
+    addsd xmm8, xmm6 # x += 1.0
+    add r10, 4
+    add r11, 8
+    sub rax, 1
+    cmp rax, 0
+    jg bwd("row")
+    label done
+    movupd xmm6, [rsp]
+    movupd xmm7, [rsp + 16]
+    movupd xmm8, [rsp + 32]
+    movupd xmm9, [rsp + 48]
+    movupd xmm10, [rsp + 64]
+    movupd xmm11, [rsp + 80]
+    add rsp, 96
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret()
+  a.finalize()
+
+
+
+proc buildMultiRadialRowGenX64*(op: static CompOp): ExecutableBuffer =
+  ## Multi-stop radial-gradient head with the generic-op blend tail. Same ABI as solid.
+  ## `t`/`tc` replicate `paint.sample` (radial branch) + `sampleStops`
+  ## exactly: clamp01, below-first (last author at min pos), past-last
+  ## (final non-degenerate lerp at u>=1, clamped in lerp), else linear
+  ## search L/R + lerp. Stops borrow the paint heap array via
+  ## `MultiRadialCtx` (ptr+len); len 0/1 handled (transparent/constant).
+  ## Paint eval mirrors sampleStops exactly; channels clamp and clearing ops run.
+  var a = newAssembler(akX64)
+  dynasm a:
+    arch x64
+    alias dst, rdi, rcx
+    alias cov, rsi, rdx
+    alias nn, rdx, r8
+    alias ctx, rcx, r9
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov r10, dst
+    mov r11, cov
+    mov rax, nn
+    mov r8, ctx
+    sub rsp, 160
+    movupd [rsp], xmm6
+    movupd [rsp + 16], xmm7
+    movupd [rsp + 32], xmm8
+    movupd [rsp + 48], xmm9
+    movupd [rsp + 64], xmm10
+    movupd [rsp + 80], xmm11
+    movabs rcx, 0x3EB0C6F7A0B5ED8D # 1e-6 bits (ao threshold)
+    mov qword [rsp + 152], rcx
+    mov r9, [r8 + 120] # divtab
+    movsd xmm4, [r8 + 88] # c255
+    movsd xmm5, [r8 + 104] # zero
+    movsd xmm6, [r8 + 112] # one
+    movsd xmm7, [r8 + 96] # half
+    cmp rax, 0
+    jle fwd("done")
+    movsd xmm8, [r8 + 128] # rowX
+    label row
+    # qx = (m0*x + m2y) + m4
+    movsd xmm0, xmm8
+    mulsd xmm0, [r8 + 0]
+    addsd xmm0, [r8 + 136]
+    addsd xmm0, [r8 + 16]
+    # qy = (m1*x + m3y) + m5
+    movsd xmm1, xmm8
+    mulsd xmm1, [r8 + 8]
+    addsd xmm1, [r8 + 144]
+    addsd xmm1, [r8 + 24]
+    # dist = sqrt((qx-cx)^2 + (qy-cy)^2)
+    subsd xmm0, [r8 + 32] # cx
+    subsd xmm1, [r8 + 40] # cy
+    movsd xmm2, xmm0
+    mulsd xmm2, xmm2
+    movsd xmm3, xmm1
+    mulsd xmm3, xmm3
+    addsd xmm2, xmm3
+    sqrtsd xmm2, xmm2
+    # t = (dist-inr)/f, clamped to tc
+    subsd xmm2, [r8 + 48] # inr
+    divsd xmm2, [r8 + 56] # f
+    maxpd xmm2, xmm5
+    minpd xmm2, xmm6
+    movsd xmm9, xmm2 # tc
+    mov r12, [r8 + 64] # stopsPtr
+    mov rbx, [r8 + 72] # stopsLen
+    cmp rbx, 0
+    jle fwd("transparent")
+    cmp rbx, 1
+    jz fwd("single")
+    # pos0
+    movsd xmm0, [r12]
+    ucomisd xmm9, xmm0
+    jb fwd("below")
+    # posLast
+    mov rcx, rbx
+    dec rcx
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx]
+    ucomisd xmm9, xmm0
+    jae fwd("final")
+    # interior: L in r13
+    `xor` r13, r13
+    label search
+    mov r14, r13
+    inc r14
+    mov rcx, r14
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx] # posR
+    ucomisd xmm0, xmm9
+    jbe fwd("adv")
+    jmp fwd("found")
+    label adv
+    mov r13, r14
+    jmp bwd("search")
+    label found
+    # ptrL in rcx, ptrR in rdx
+    mov rcx, r13
+    imul rcx, rcx, 40
+    add rcx, r12
+    mov rdx, r13
+    inc rdx
+    imul rdx, rdx, 40
+    add rdx, r12
+    movsd xmm0, [rcx] # posL
+    movsd xmm1, [rdx] # posR
+    movsd xmm2, xmm9
+    subsd xmm2, xmm0
+    movsd xmm3, xmm1
+    subsd xmm3, xmm0
+    divsd xmm2, xmm3
+    maxpd xmm2, xmm5
+    minpd xmm2, xmm6
+    movsd xmm9, xmm2 # u (xmm10 is free temp for lerps)
+    # A first (xmm10 temp, result xmm3)
+    movsd xmm3, [rcx + 32]
+    movsd xmm10, [rdx + 32]
+    subsd xmm10, xmm3
+    mulsd xmm10, xmm9
+    addsd xmm3, xmm10
+    # R -> xmm0
+    movsd xmm0, [rcx + 8]
+    movsd xmm10, [rdx + 8]
+    subsd xmm10, xmm0
+    mulsd xmm10, xmm9
+    addsd xmm0, xmm10
+    # G -> xmm1
+    movsd xmm1, [rcx + 16]
+    movsd xmm10, [rdx + 16]
+    subsd xmm10, xmm1
+    mulsd xmm10, xmm9
+    addsd xmm1, xmm10
+    # B -> xmm2
+    movsd xmm2, [rcx + 24]
+    movsd xmm10, [rdx + 24]
+    subsd xmm10, xmm2
+    mulsd xmm10, xmm9
+    addsd xmm2, xmm10
+    jmp fwd("evaldone")
+    label transparent
+    xorpd xmm0, xmm0
+    xorpd xmm1, xmm1
+    xorpd xmm2, xmm2
+    xorpd xmm3, xmm3
+    jmp fwd("evaldone")
+    label single
+    movsd xmm0, [r12 + 8]
+    movsd xmm1, [r12 + 16]
+    movsd xmm2, [r12 + 24]
+    movsd xmm3, [r12 + 32]
+    jmp fwd("evaldone")
+    label below
+    movsd xmm0, [r12] # pos0
+    `xor` r13, r13
+    label belowloop
+    mov r14, r13
+    inc r14
+    cmp r14, rbx
+    jge fwd("belowdone")
+    mov rcx, r14
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm1, [rcx]
+    ucomisd xmm1, xmm0
+    jnz fwd("belowdone")
+    mov r13, r14
+    jmp bwd("belowloop")
+    label belowdone
+    mov rcx, r13
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx + 8]
+    movsd xmm1, [rcx + 16]
+    movsd xmm2, [rcx + 24]
+    movsd xmm3, [rcx + 32]
+    jmp fwd("evaldone")
+    label final
+    # posLast in xmm0 already? Reload for safety
+    mov rcx, rbx
+    dec rcx
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx] # posLast
+    mov r13, rbx
+    dec r13 # j = len-1
+    label finalloop
+    cmp r13, 0
+    jle fwd("finalcheck")
+    mov r14, r13
+    dec r14
+    mov rdx, r14
+    imul rdx, rdx, 40
+    add rdx, r12
+    movsd xmm1, [rdx]
+    ucomisd xmm1, xmm0
+    jnz fwd("finalcheck")
+    mov r13, r14
+    jmp bwd("finalloop")
+    label finalcheck
+    cmp r13, 0
+    jz fwd("finallast")
+    dec r13 # L
+    mov rcx, r13
+    imul rcx, rcx, 40
+    add rcx, r12 # ptrL
+    mov rdx, rbx
+    dec rdx
+    imul rdx, rdx, 40
+    add rdx, r12 # ptrLast
+    movsd xmm0, [rcx] # posL
+    movsd xmm2, xmm9
+    subsd xmm2, xmm0
+    movsd xmm3, [rdx] # posLast
+    subsd xmm3, xmm0
+    divsd xmm2, xmm3
+    maxpd xmm2, xmm5
+    minpd xmm2, xmm6
+    movsd xmm9, xmm2 # u
+    # A first, then R/G/B (xmm10 temp)
+    movsd xmm3, [rcx + 32]
+    movsd xmm10, [rdx + 32]
+    subsd xmm10, xmm3
+    mulsd xmm10, xmm9
+    addsd xmm3, xmm10
+    movsd xmm0, [rcx + 8]
+    movsd xmm10, [rdx + 8]
+    subsd xmm10, xmm0
+    mulsd xmm10, xmm9
+    addsd xmm0, xmm10
+    movsd xmm1, [rcx + 16]
+    movsd xmm10, [rdx + 16]
+    subsd xmm10, xmm1
+    mulsd xmm10, xmm9
+    addsd xmm1, xmm10
+    movsd xmm2, [rcx + 24]
+    movsd xmm10, [rdx + 24]
+    subsd xmm10, xmm2
+    mulsd xmm10, xmm9
+    addsd xmm2, xmm10
+    jmp fwd("evaldone")
+    label finallast
+    mov rcx, rbx
+    dec rcx
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx + 8]
+    movsd xmm1, [rcx + 16]
+    movsd xmm2, [rcx + 24]
+    movsd xmm3, [rcx + 32]
+    jmp fwd("evaldone")
+    label evaldone
+    # xmm0=cr, xmm1=cg, xmm2=cb, xmm3=a_lerp -> clamped rgb + sa, then tail
+    maxpd xmm0, xmm5
+    minpd xmm0, xmm6
+    maxpd xmm1, xmm5
+    minpd xmm1, xmm6
+    maxpd xmm2, xmm5
+    minpd xmm2, xmm6
+    mulsd xmm3, [r8 + 80] # aAlpha
+    maxpd xmm3, xmm5
+    minpd xmm3, xmm6
+    mulsd xmm3, [r11] # cov
+    movsd xmm10, xmm3 # sa
+  # NB: `include` must nest in `when` here (same quirk as above).
+  when op != coSourceOver:
+    include blend_x64
+  dynasm a:
+    arch x64
+    addsd xmm8, xmm6 # x += 1.0
+    add r10, 4
+    add r11, 8
+    sub rax, 1
+    cmp rax, 0
+    jg bwd("row")
+    label done
+    movupd xmm6, [rsp]
+    movupd xmm7, [rsp + 16]
+    movupd xmm8, [rsp + 32]
+    movupd xmm9, [rsp + 48]
+    movupd xmm10, [rsp + 64]
+    movupd xmm11, [rsp + 80]
+    add rsp, 160
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret()
+  a.finalize()
+
+proc buildPatternBilinearRowX64*(): ExecutableBuffer =
+  ## Bilinear-filter pattern source-over row kernel, same ABI and same
+  ## `PatternCtx` layout as nearest. Per-pixel op order replicates
+  ## `paint.sample` (pattern branch) + `sampleImage` (bilinear) +
+  ## `blendPixel`: qx/qy/u/v/flip as in nearest, then `fx=u*wF-0.5`,
+  ## `fy=v*hF-0.5`, trunc+adjust floor (saturation-safe), `tx/ty=clamp01`,
+  ## 4 premultiplied taps in scalar order (00,10,01,11) with repeat/clamp
+  ## wraps, `accA>1e-6` divide guard, tint muls, then standard blend.
+  ## Bilinear paints reach here (backend gates on runnable + `ifNearest`
+  ## absent); nearest keeps its own kernel.
+  var a = newAssembler(akX64)
+  dynasm a:
+    arch x64
+    alias dst, rdi, rcx
+    alias cov, rsi, rdx
+    alias nn, rdx, r8
+    alias ctx, rcx, r9
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r10, dst
+    mov r11, cov
+    mov rbx, nn
+    mov r8, ctx
+    sub rsp, 176
+    movupd [rsp], xmm6
+    movupd [rsp + 16], xmm7
+    movupd [rsp + 32], xmm8
+    movupd [rsp + 48], xmm9
+    movupd [rsp + 64], xmm10
+    movupd [rsp + 80], xmm11
+    movabs rcx, 0x3EB0C6F7A0B5ED8D # 1e-6 bits (acc threshold)
+    mov qword [rsp + 160], rcx
+    mov r9, [r8 + 168] # divtab
+    movsd xmm4, [r8 + 136] # c255
+    movsd xmm5, [r8 + 152] # zero
+    movsd xmm6, [r8 + 160] # one
+    movsd xmm7, [r8 + 144] # half
+    cmp rbx, 0
+    jle fwd("done")
+    movsd xmm8, [r8 + 224] # rowX
+    label row
+    # qx = (m0*x + m2y) + m4
+    movsd xmm0, xmm8
+    mulsd xmm0, [r8 + 0]
+    addsd xmm0, [r8 + 232]
+    addsd xmm0, [r8 + 16]
+    # qy = (m1*x + m3y) + m5
+    movsd xmm1, xmm8
+    mulsd xmm1, [r8 + 8]
+    addsd xmm1, [r8 + 240]
+    addsd xmm1, [r8 + 24]
+    # dx, dy
+    subsd xmm0, [r8 + 32]
+    subsd xmm1, [r8 + 40]
+    # u = (ca*dx + sn*dy)/ex
+    movsd xmm2, [r8 + 64]
+    mulsd xmm2, xmm0
+    movsd xmm3, [r8 + 72]
+    mulsd xmm3, xmm1
+    addsd xmm2, xmm3
+    divsd xmm2, [r8 + 48]
+    movsd xmm9, xmm2 # u
+    # v = (ca*dy - sn*dx)/ey
+    movsd xmm2, [r8 + 72]
+    mulsd xmm2, xmm0
+    movsd xmm3, [r8 + 64]
+    mulsd xmm3, xmm1
+    subsd xmm3, xmm2
+    divsd xmm3, [r8 + 56]
+    movsd xmm2, xmm3 # v
+    # flipY?
+    mov rcx, [r8 + 200]
+    cmp rcx, 0
+    jz fwd("noflip")
+    movsd xmm3, xmm6
+    subsd xmm3, xmm2
+    movsd xmm2, xmm3
+    label noflip
+    # fx = u*wF - 0.5 ; fy = v*hF - 0.5
+    mulsd xmm9, [r8 + 80]
+    subsd xmm9, xmm7
+    mulsd xmm2, [r8 + 88]
+    subsd xmm2, xmm7
+    movsd xmm0, xmm9 # fx
+    movsd xmm1, xmm2 # fy
+    # x0 = floor(fx) -> rsi temp, then r12=xi0 after wrap (wrap later)
+    cvttsd2si rdx, xmm0
+    mov rcx, rdx
+    add rcx, rcx
+    jnz fwd("fxadj")
+    test rdx, rdx
+    jnz fwd("fxkeep")
+    label fxadj
+    cvtsi2sd xmm3, rdx
+    ucomisd xmm3, xmm0
+    jbe fwd("fxkeep")
+    dec rdx
+    label fxkeep
+    mov rsi, rdx # x0
+    # tx = clamp01(fx - float(x0))
+    cvtsi2sd xmm3, rdx
+    subsd xmm0, xmm3
+    maxpd xmm0, xmm5
+    minpd xmm0, xmm6
+    movsd xmm9, xmm0 # tx
+    # y0 = floor(fy)
+    cvttsd2si rdx, xmm1
+    mov rcx, rdx
+    add rcx, rcx
+    jnz fwd("fyadj")
+    test rdx, rdx
+    jnz fwd("fykeep")
+    label fyadj
+    cvtsi2sd xmm3, rdx
+    ucomisd xmm3, xmm1
+    jbe fwd("fykeep")
+    dec rdx
+    label fykeep
+    mov rdi, rdx # y0 in rdi
+    cvtsi2sd xmm3, rdx
+    subsd xmm1, xmm3
+    maxpd xmm1, xmm5
+    minpd xmm1, xmm6
+    # weights: omtx=1-tx in xmm0, omty=1-ty in xmm2
+    movsd xmm3, xmm6
+    subsd xmm3, xmm9
+    movsd xmm0, xmm3 # omtx
+    movsd xmm3, xmm6
+    subsd xmm3, xmm1
+    movsd xmm2, xmm3 # omty
+    # w00 = omtx*omty
+    movsd xmm3, xmm0
+    mulsd xmm3, xmm2
+    movsd [rsp + 128], xmm3
+    # w10 = tx*omty
+    movsd xmm3, xmm9
+    mulsd xmm3, xmm2
+    movsd [rsp + 136], xmm3
+    # w01 = omtx*ty
+    movsd xmm3, xmm0
+    mulsd xmm3, xmm1
+    movsd [rsp + 144], xmm3
+    # w11 = tx*ty
+    movsd xmm3, xmm9
+    mulsd xmm3, xmm1
+    movsd [rsp + 152], xmm3
+    # xi0 = wrap(x0)
+    mov rdx, rsi
+    mov rcx, [r8 + 208] # repX
+    cmp rcx, 0
+    jz fwd("x0clamp")
+    mov rax, rdx
+    mov rcx, [r8 + 184] # imgW
+    cqo
+    idiv rcx
+    add rdx, rcx
+    cmp rdx, rcx
+    jl fwd("x0store")
+    sub rdx, rcx
+    jmp fwd("x0store")
+    label x0clamp
+    cmp rdx, 0
+    jge fwd("x0hi")
+    `xor` edx, edx
+    jmp fwd("x0store")
+    label x0hi
+    mov rcx, [r8 + 184]
+    dec rcx
+    cmp rdx, rcx
+    jle fwd("x0store")
+    mov rdx, rcx
+    label x0store
+    mov r12, rdx # xi0
+    # xi1 = wrap(x0+1)
+    mov rdx, rsi
+    inc rdx
+    mov rcx, [r8 + 208]
+    cmp rcx, 0
+    jz fwd("x1clamp")
+    mov rax, rdx
+    mov rcx, [r8 + 184]
+    cqo
+    idiv rcx
+    add rdx, rcx
+    cmp rdx, rcx
+    jl fwd("x1store")
+    sub rdx, rcx
+    jmp fwd("x1store")
+    label x1clamp
+    cmp rdx, 0
+    jge fwd("x1hi")
+    `xor` edx, edx
+    jmp fwd("x1store")
+    label x1hi
+    mov rcx, [r8 + 184]
+    dec rcx
+    cmp rdx, rcx
+    jle fwd("x1store")
+    mov rdx, rcx
+    label x1store
+    mov r14, rdx # xi1
+    # yi0 = wrap(y0)
+    mov rdx, rdi
+    mov rcx, [r8 + 216] # repY
+    cmp rcx, 0
+    jz fwd("y0clamp")
+    mov rax, rdx
+    mov rcx, [r8 + 192] # imgH
+    cqo
+    idiv rcx
+    add rdx, rcx
+    cmp rdx, rcx
+    jl fwd("y0store")
+    sub rdx, rcx
+    jmp fwd("y0store")
+    label y0clamp
+    cmp rdx, 0
+    jge fwd("y0hi")
+    `xor` edx, edx
+    jmp fwd("y0store")
+    label y0hi
+    mov rcx, [r8 + 192]
+    dec rcx
+    cmp rdx, rcx
+    jle fwd("y0store")
+    mov rdx, rcx
+    label y0store
+    mov r13, rdx # yi0
+    # yi1 = wrap(y0+1)
+    mov rdx, rdi
+    inc rdx
+    mov rcx, [r8 + 216]
+    cmp rcx, 0
+    jz fwd("y1clamp")
+    mov rax, rdx
+    mov rcx, [r8 + 192]
+    cqo
+    idiv rcx
+    add rdx, rcx
+    cmp rdx, rcx
+    jl fwd("y1store")
+    sub rdx, rcx
+    jmp fwd("y1store")
+    label y1clamp
+    cmp rdx, 0
+    jge fwd("y1hi")
+    `xor` edx, edx
+    jmp fwd("y1store")
+    label y1hi
+    mov rcx, [r8 + 192]
+    dec rcx
+    cmp rdx, rcx
+    jle fwd("y1store")
+    mov rdx, rcx
+    label y1store
+    mov r15, rdx # yi1
+    # zero acc
+    xorpd xmm0, xmm0
+    movsd [rsp + 96], xmm0
+    movsd [rsp + 104], xmm0
+    movsd [rsp + 112], xmm0
+    movsd [rsp + 120], xmm0
+    # tap (yi0,xi0) w00
+    mov rcx, [r8 + 184] # imgW
+    mov rdx, r13
+    imul rdx, rcx
+    add rdx, r12
+    mov rcx, [r8 + 176] # imgPx
+    lea rcx, [rcx + rdx*4]
+    movzx edx, byte [rcx]
+    movsd xmm0, [r9 + rdx*8]
+    movzx edx, byte [rcx + 1]
+    movsd xmm1, [r9 + rdx*8]
+    movzx edx, byte [rcx + 2]
+    movsd xmm2, [r9 + rdx*8]
+    movzx edx, byte [rcx + 3]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm0, xmm3 # r*a
+    mulsd xmm1, xmm3 # g*a
+    mulsd xmm2, xmm3 # b*a
+    mulsd xmm0, [rsp + 128]
+    mulsd xmm1, [rsp + 128]
+    mulsd xmm2, [rsp + 128]
+    mulsd xmm3, [rsp + 128]
+    addsd xmm0, [rsp + 96]
+    movsd [rsp + 96], xmm0
+    addsd xmm1, [rsp + 104]
+    movsd [rsp + 104], xmm1
+    addsd xmm2, [rsp + 112]
+    movsd [rsp + 112], xmm2
+    addsd xmm3, [rsp + 120]
+    movsd [rsp + 120], xmm3
+    # tap (yi0,xi1) w10
+    mov rcx, [r8 + 184]
+    mov rdx, r13
+    imul rdx, rcx
+    add rdx, r14
+    mov rcx, [r8 + 176]
+    lea rcx, [rcx + rdx*4]
+    movzx edx, byte [rcx]
+    movsd xmm0, [r9 + rdx*8]
+    movzx edx, byte [rcx + 1]
+    movsd xmm1, [r9 + rdx*8]
+    movzx edx, byte [rcx + 2]
+    movsd xmm2, [r9 + rdx*8]
+    movzx edx, byte [rcx + 3]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm0, xmm3
+    mulsd xmm1, xmm3
+    mulsd xmm2, xmm3
+    mulsd xmm0, [rsp + 136]
+    mulsd xmm1, [rsp + 136]
+    mulsd xmm2, [rsp + 136]
+    mulsd xmm3, [rsp + 136]
+    addsd xmm0, [rsp + 96]
+    movsd [rsp + 96], xmm0
+    addsd xmm1, [rsp + 104]
+    movsd [rsp + 104], xmm1
+    addsd xmm2, [rsp + 112]
+    movsd [rsp + 112], xmm2
+    addsd xmm3, [rsp + 120]
+    movsd [rsp + 120], xmm3
+    # tap (yi1,xi0) w01
+    mov rcx, [r8 + 184]
+    mov rdx, r15
+    imul rdx, rcx
+    add rdx, r12
+    mov rcx, [r8 + 176]
+    lea rcx, [rcx + rdx*4]
+    movzx edx, byte [rcx]
+    movsd xmm0, [r9 + rdx*8]
+    movzx edx, byte [rcx + 1]
+    movsd xmm1, [r9 + rdx*8]
+    movzx edx, byte [rcx + 2]
+    movsd xmm2, [r9 + rdx*8]
+    movzx edx, byte [rcx + 3]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm0, xmm3
+    mulsd xmm1, xmm3
+    mulsd xmm2, xmm3
+    mulsd xmm0, [rsp + 144]
+    mulsd xmm1, [rsp + 144]
+    mulsd xmm2, [rsp + 144]
+    mulsd xmm3, [rsp + 144]
+    addsd xmm0, [rsp + 96]
+    movsd [rsp + 96], xmm0
+    addsd xmm1, [rsp + 104]
+    movsd [rsp + 104], xmm1
+    addsd xmm2, [rsp + 112]
+    movsd [rsp + 112], xmm2
+    movzx edx, byte [rcx + 3]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm3, [rsp + 144]
+    addsd xmm3, [rsp + 120]
+    movsd [rsp + 120], xmm3
+    # tap (yi1,xi1) w11
+    mov rcx, [r8 + 184]
+    mov rdx, r15
+    imul rdx, rcx
+    add rdx, r14
+    mov rcx, [r8 + 176]
+    lea rcx, [rcx + rdx*4]
+    movzx edx, byte [rcx]
+    movsd xmm0, [r9 + rdx*8]
+    movzx edx, byte [rcx + 1]
+    movsd xmm1, [r9 + rdx*8]
+    movzx edx, byte [rcx + 2]
+    movsd xmm2, [r9 + rdx*8]
+    movzx edx, byte [rcx + 3]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm0, xmm3
+    mulsd xmm1, xmm3
+    mulsd xmm2, xmm3
+    mulsd xmm0, [rsp + 152]
+    mulsd xmm1, [rsp + 152]
+    mulsd xmm2, [rsp + 152]
+    mulsd xmm3, [rsp + 152]
+    addsd xmm0, [rsp + 96]
+    movsd [rsp + 96], xmm0
+    addsd xmm1, [rsp + 104]
+    movsd [rsp + 104], xmm1
+    addsd xmm2, [rsp + 112]
+    movsd [rsp + 112], xmm2
+    movzx edx, byte [rcx + 3]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm3, [rsp + 152]
+    addsd xmm3, [rsp + 120]
+    movsd [rsp + 120], xmm3
+    # accA > 1e-6?
+    movsd xmm0, [rsp + 120]
+    movsd xmm1, [rsp + 160] # 1e-6 bits as double? stored qword bits
+    ucomisd xmm0, xmm1
+    jbe fwd("bilinzero")
+    jmp fwd("biltint")
+    label bilinzero
+    xorpd xmm0, xmm0
+    xorpd xmm1, xmm1
+    xorpd xmm2, xmm2
+    xorpd xmm3, xmm3
+    jmp fwd("bilblend")
+    label biltint
+    # reload and divide properly: accA in xmm3
+    movsd xmm3, [rsp + 120]
+    movsd xmm0, [rsp + 96]
+    divsd xmm0, xmm3
+    movsd xmm1, [rsp + 104]
+    divsd xmm1, xmm3
+    movsd xmm2, [rsp + 112]
+    divsd xmm2, xmm3
+    movsd xmm3, [rsp + 120] # ta
+    # tint
+    mulsd xmm0, [r8 + 96]
+    mulsd xmm1, [r8 + 104]
+    mulsd xmm2, [r8 + 112]
+    mulsd xmm3, [r8 + 120]
+    mulsd xmm3, [r8 + 128] # aAlpha
+    maxpd xmm3, xmm5
+    minpd xmm3, xmm6
+    mulsd xmm3, [r11] # cov -> sa_c
+    movsd xmm10, xmm3
+    movsd xmm11, xmm6
+    subsd xmm11, xmm10
+    # R
+    mulsd xmm0, xmm10
+    movzx edx, byte [r10]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm3, xmm11
+    addsd xmm0, xmm3
+    maxpd xmm0, xmm5
+    minpd xmm0, xmm6
+    mulsd xmm0, xmm4
+    addsd xmm0, xmm7
+    cvttsd2si edx, xmm0
+    mov byte [r10], dl
+    # G
+    mulsd xmm1, xmm10
+    movzx edx, byte [r10 + 1]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm3, xmm11
+    addsd xmm1, xmm3
+    maxpd xmm1, xmm5
+    minpd xmm1, xmm6
+    mulsd xmm1, xmm4
+    addsd xmm1, xmm7
+    cvttsd2si edx, xmm1
+    mov byte [r10 + 1], dl
+    # B
+    mulsd xmm2, xmm10
+    movzx edx, byte [r10 + 2]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm3, xmm11
+    addsd xmm2, xmm3
+    maxpd xmm2, xmm5
+    minpd xmm2, xmm6
+    mulsd xmm2, xmm4
+    addsd xmm2, xmm7
+    cvttsd2si edx, xmm2
+    mov byte [r10 + 2], dl
+    # A
+    movzx edx, byte [r10 + 3]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm3, xmm11
+    addsd xmm3, xmm10
+    maxpd xmm3, xmm5
+    minpd xmm3, xmm6
+    mulsd xmm3, xmm4
+    addsd xmm3, xmm7
+    cvttsd2si edx, xmm3
+    mov byte [r10 + 3], dl
+    jmp fwd("pixdone")
+    label bilblend
+    # transparent bilinear: sa=0 sourceOver no-op still writes back dst
+    # (sa_c=0 -> inv=1 -> dst unchanged); run the standard blend with
+    # zero paint for exactness.
+    xorpd xmm0, xmm0
+    xorpd xmm1, xmm1
+    xorpd xmm2, xmm2
+    movsd xmm3, xmm5 # a_lerp=0
+    mulsd xmm3, [r8 + 128]
+    maxpd xmm3, xmm5
+    minpd xmm3, xmm6
+    mulsd xmm3, [r11]
+    movsd xmm10, xmm3
+    movsd xmm11, xmm6
+    subsd xmm11, xmm10
+    mulsd xmm0, xmm10
+    movzx edx, byte [r10]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm3, xmm11
+    addsd xmm0, xmm3
+    maxpd xmm0, xmm5
+    minpd xmm0, xmm6
+    mulsd xmm0, xmm4
+    addsd xmm0, xmm7
+    cvttsd2si edx, xmm0
+    mov byte [r10], dl
+    mulsd xmm1, xmm10
+    movzx edx, byte [r10 + 1]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm3, xmm11
+    addsd xmm1, xmm3
+    maxpd xmm1, xmm5
+    minpd xmm1, xmm6
+    mulsd xmm1, xmm4
+    addsd xmm1, xmm7
+    cvttsd2si edx, xmm1
+    mov byte [r10 + 1], dl
+    mulsd xmm2, xmm10
+    movzx edx, byte [r10 + 2]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm3, xmm11
+    addsd xmm2, xmm3
+    maxpd xmm2, xmm5
+    minpd xmm2, xmm6
+    mulsd xmm2, xmm4
+    addsd xmm2, xmm7
+    cvttsd2si edx, xmm2
+    mov byte [r10 + 2], dl
+    movzx edx, byte [r10 + 3]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm3, xmm11
+    addsd xmm3, xmm10
+    maxpd xmm3, xmm5
+    minpd xmm3, xmm6
+    mulsd xmm3, xmm4
+    addsd xmm3, xmm7
+    cvttsd2si edx, xmm3
+    mov byte [r10 + 3], dl
+    label pixdone
+    addsd xmm8, xmm6 # x += 1.0
+    add r10, 4
+    add r11, 8
+    dec rbx
+    cmp rbx, 0
+    jg bwd("row")
+    label done
+    movupd xmm6, [rsp]
+    movupd xmm7, [rsp + 16]
+    movupd xmm8, [rsp + 32]
+    movupd xmm9, [rsp + 48]
+    movupd xmm10, [rsp + 64]
+    movupd xmm11, [rsp + 80]
+    add rsp, 176
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret()
+  a.finalize()
+
+
+proc buildPatternBilinearRowGenX64*(op: static CompOp): ExecutableBuffer =
+  ## Bilinear-filter pattern head with the generic-op blend tail, same ABI and same
+  ## `PatternCtx` layout as nearest. Per-pixel op order replicates
+  ## `paint.sample` (pattern branch) + `sampleImage` (bilinear) +
+  ## `blendPixel`: qx/qy/u/v/flip as in nearest, then `fx=u*wF-0.5`,
+  ## `fy=v*hF-0.5`, trunc+adjust floor (saturation-safe), `tx/ty=clamp01`,
+  ## 4 premultiplied taps in scalar order (00,10,01,11) with repeat/clamp
+  ## wraps, `accA>1e-6` divide guard, tint muls, then standard blend.
+  ## Texel channels clamp and clearing ops run (no transparent early-out).
+  var a = newAssembler(akX64)
+  dynasm a:
+    arch x64
+    alias dst, rdi, rcx
+    alias cov, rsi, rdx
+    alias nn, rdx, r8
+    alias ctx, rcx, r9
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r10, dst
+    mov r11, cov
+    mov rbx, nn
+    mov r8, ctx
+    sub rsp, 176
+    movupd [rsp], xmm6
+    movupd [rsp + 16], xmm7
+    movupd [rsp + 32], xmm8
+    movupd [rsp + 48], xmm9
+    movupd [rsp + 64], xmm10
+    movupd [rsp + 80], xmm11
+    movabs rcx, 0x3EB0C6F7A0B5ED8D # 1e-6 bits (acc threshold)
+    mov qword [rsp + 168], rcx
+    mov qword [rsp + 160], rcx
+    mov r9, [r8 + 168] # divtab
+    movsd xmm4, [r8 + 136] # c255
+    movsd xmm5, [r8 + 152] # zero
+    movsd xmm6, [r8 + 160] # one
+    movsd xmm7, [r8 + 144] # half
+    cmp rbx, 0
+    jle fwd("done")
+    movsd xmm8, [r8 + 224] # rowX
+    label row
+    # qx = (m0*x + m2y) + m4
+    movsd xmm0, xmm8
+    mulsd xmm0, [r8 + 0]
+    addsd xmm0, [r8 + 232]
+    addsd xmm0, [r8 + 16]
+    # qy = (m1*x + m3y) + m5
+    movsd xmm1, xmm8
+    mulsd xmm1, [r8 + 8]
+    addsd xmm1, [r8 + 240]
+    addsd xmm1, [r8 + 24]
+    # dx, dy
+    subsd xmm0, [r8 + 32]
+    subsd xmm1, [r8 + 40]
+    # u = (ca*dx + sn*dy)/ex
+    movsd xmm2, [r8 + 64]
+    mulsd xmm2, xmm0
+    movsd xmm3, [r8 + 72]
+    mulsd xmm3, xmm1
+    addsd xmm2, xmm3
+    divsd xmm2, [r8 + 48]
+    movsd xmm9, xmm2 # u
+    # v = (ca*dy - sn*dx)/ey
+    movsd xmm2, [r8 + 72]
+    mulsd xmm2, xmm0
+    movsd xmm3, [r8 + 64]
+    mulsd xmm3, xmm1
+    subsd xmm3, xmm2
+    divsd xmm3, [r8 + 56]
+    movsd xmm2, xmm3 # v
+    # flipY?
+    mov rcx, [r8 + 200]
+    cmp rcx, 0
+    jz fwd("noflip")
+    movsd xmm3, xmm6
+    subsd xmm3, xmm2
+    movsd xmm2, xmm3
+    label noflip
+    # fx = u*wF - 0.5 ; fy = v*hF - 0.5
+    mulsd xmm9, [r8 + 80]
+    subsd xmm9, xmm7
+    mulsd xmm2, [r8 + 88]
+    subsd xmm2, xmm7
+    movsd xmm0, xmm9 # fx
+    movsd xmm1, xmm2 # fy
+    # x0 = floor(fx) -> rsi temp, then r12=xi0 after wrap (wrap later)
+    cvttsd2si rdx, xmm0
+    mov rcx, rdx
+    add rcx, rcx
+    jnz fwd("fxadj")
+    test rdx, rdx
+    jnz fwd("fxkeep")
+    label fxadj
+    cvtsi2sd xmm3, rdx
+    ucomisd xmm3, xmm0
+    jbe fwd("fxkeep")
+    dec rdx
+    label fxkeep
+    mov rsi, rdx # x0
+    # tx = clamp01(fx - float(x0))
+    cvtsi2sd xmm3, rdx
+    subsd xmm0, xmm3
+    maxpd xmm0, xmm5
+    minpd xmm0, xmm6
+    movsd xmm9, xmm0 # tx
+    # y0 = floor(fy)
+    cvttsd2si rdx, xmm1
+    mov rcx, rdx
+    add rcx, rcx
+    jnz fwd("fyadj")
+    test rdx, rdx
+    jnz fwd("fykeep")
+    label fyadj
+    cvtsi2sd xmm3, rdx
+    ucomisd xmm3, xmm1
+    jbe fwd("fykeep")
+    dec rdx
+    label fykeep
+    mov rdi, rdx # y0 in rdi
+    cvtsi2sd xmm3, rdx
+    subsd xmm1, xmm3
+    maxpd xmm1, xmm5
+    minpd xmm1, xmm6
+    # weights: omtx=1-tx in xmm0, omty=1-ty in xmm2
+    movsd xmm3, xmm6
+    subsd xmm3, xmm9
+    movsd xmm0, xmm3 # omtx
+    movsd xmm3, xmm6
+    subsd xmm3, xmm1
+    movsd xmm2, xmm3 # omty
+    # w00 = omtx*omty
+    movsd xmm3, xmm0
+    mulsd xmm3, xmm2
+    movsd [rsp + 128], xmm3
+    # w10 = tx*omty
+    movsd xmm3, xmm9
+    mulsd xmm3, xmm2
+    movsd [rsp + 136], xmm3
+    # w01 = omtx*ty
+    movsd xmm3, xmm0
+    mulsd xmm3, xmm1
+    movsd [rsp + 144], xmm3
+    # w11 = tx*ty
+    movsd xmm3, xmm9
+    mulsd xmm3, xmm1
+    movsd [rsp + 168], xmm3
+    # xi0 = wrap(x0)
+    mov rdx, rsi
+    mov rcx, [r8 + 208] # repX
+    cmp rcx, 0
+    jz fwd("x0clamp")
+    mov rax, rdx
+    mov rcx, [r8 + 184] # imgW
+    cqo
+    idiv rcx
+    add rdx, rcx
+    cmp rdx, rcx
+    jl fwd("x0store")
+    sub rdx, rcx
+    jmp fwd("x0store")
+    label x0clamp
+    cmp rdx, 0
+    jge fwd("x0hi")
+    `xor` edx, edx
+    jmp fwd("x0store")
+    label x0hi
+    mov rcx, [r8 + 184]
+    dec rcx
+    cmp rdx, rcx
+    jle fwd("x0store")
+    mov rdx, rcx
+    label x0store
+    mov r12, rdx # xi0
+    # xi1 = wrap(x0+1)
+    mov rdx, rsi
+    inc rdx
+    mov rcx, [r8 + 208]
+    cmp rcx, 0
+    jz fwd("x1clamp")
+    mov rax, rdx
+    mov rcx, [r8 + 184]
+    cqo
+    idiv rcx
+    add rdx, rcx
+    cmp rdx, rcx
+    jl fwd("x1store")
+    sub rdx, rcx
+    jmp fwd("x1store")
+    label x1clamp
+    cmp rdx, 0
+    jge fwd("x1hi")
+    `xor` edx, edx
+    jmp fwd("x1store")
+    label x1hi
+    mov rcx, [r8 + 184]
+    dec rcx
+    cmp rdx, rcx
+    jle fwd("x1store")
+    mov rdx, rcx
+    label x1store
+    mov r14, rdx # xi1
+    # yi0 = wrap(y0)
+    mov rdx, rdi
+    mov rcx, [r8 + 216] # repY
+    cmp rcx, 0
+    jz fwd("y0clamp")
+    mov rax, rdx
+    mov rcx, [r8 + 192] # imgH
+    cqo
+    idiv rcx
+    add rdx, rcx
+    cmp rdx, rcx
+    jl fwd("y0store")
+    sub rdx, rcx
+    jmp fwd("y0store")
+    label y0clamp
+    cmp rdx, 0
+    jge fwd("y0hi")
+    `xor` edx, edx
+    jmp fwd("y0store")
+    label y0hi
+    mov rcx, [r8 + 192]
+    dec rcx
+    cmp rdx, rcx
+    jle fwd("y0store")
+    mov rdx, rcx
+    label y0store
+    mov r13, rdx # yi0
+    # yi1 = wrap(y0+1)
+    mov rdx, rdi
+    inc rdx
+    mov rcx, [r8 + 216]
+    cmp rcx, 0
+    jz fwd("y1clamp")
+    mov rax, rdx
+    mov rcx, [r8 + 192]
+    cqo
+    idiv rcx
+    add rdx, rcx
+    cmp rdx, rcx
+    jl fwd("y1store")
+    sub rdx, rcx
+    jmp fwd("y1store")
+    label y1clamp
+    cmp rdx, 0
+    jge fwd("y1hi")
+    `xor` edx, edx
+    jmp fwd("y1store")
+    label y1hi
+    mov rcx, [r8 + 192]
+    dec rcx
+    cmp rdx, rcx
+    jle fwd("y1store")
+    mov rdx, rcx
+    label y1store
+    mov r15, rdx # yi1
+    # zero acc
+    xorpd xmm0, xmm0
+    movsd [rsp + 96], xmm0
+    movsd [rsp + 104], xmm0
+    movsd [rsp + 112], xmm0
+    movsd [rsp + 120], xmm0
+    # tap (yi0,xi0) w00
+    mov rcx, [r8 + 184] # imgW
+    mov rdx, r13
+    imul rdx, rcx
+    add rdx, r12
+    mov rcx, [r8 + 176] # imgPx
+    lea rcx, [rcx + rdx*4]
+    movzx edx, byte [rcx]
+    movsd xmm0, [r9 + rdx*8]
+    movzx edx, byte [rcx + 1]
+    movsd xmm1, [r9 + rdx*8]
+    movzx edx, byte [rcx + 2]
+    movsd xmm2, [r9 + rdx*8]
+    movzx edx, byte [rcx + 3]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm0, xmm3 # r*a
+    mulsd xmm1, xmm3 # g*a
+    mulsd xmm2, xmm3 # b*a
+    mulsd xmm0, [rsp + 128]
+    mulsd xmm1, [rsp + 128]
+    mulsd xmm2, [rsp + 128]
+    mulsd xmm3, [rsp + 128]
+    addsd xmm0, [rsp + 96]
+    movsd [rsp + 96], xmm0
+    addsd xmm1, [rsp + 104]
+    movsd [rsp + 104], xmm1
+    addsd xmm2, [rsp + 112]
+    movsd [rsp + 112], xmm2
+    addsd xmm3, [rsp + 120]
+    movsd [rsp + 120], xmm3
+    # tap (yi0,xi1) w10
+    mov rcx, [r8 + 184]
+    mov rdx, r13
+    imul rdx, rcx
+    add rdx, r14
+    mov rcx, [r8 + 176]
+    lea rcx, [rcx + rdx*4]
+    movzx edx, byte [rcx]
+    movsd xmm0, [r9 + rdx*8]
+    movzx edx, byte [rcx + 1]
+    movsd xmm1, [r9 + rdx*8]
+    movzx edx, byte [rcx + 2]
+    movsd xmm2, [r9 + rdx*8]
+    movzx edx, byte [rcx + 3]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm0, xmm3
+    mulsd xmm1, xmm3
+    mulsd xmm2, xmm3
+    mulsd xmm0, [rsp + 136]
+    mulsd xmm1, [rsp + 136]
+    mulsd xmm2, [rsp + 136]
+    mulsd xmm3, [rsp + 136]
+    addsd xmm0, [rsp + 96]
+    movsd [rsp + 96], xmm0
+    addsd xmm1, [rsp + 104]
+    movsd [rsp + 104], xmm1
+    addsd xmm2, [rsp + 112]
+    movsd [rsp + 112], xmm2
+    addsd xmm3, [rsp + 120]
+    movsd [rsp + 120], xmm3
+    # tap (yi1,xi0) w01
+    mov rcx, [r8 + 184]
+    mov rdx, r15
+    imul rdx, rcx
+    add rdx, r12
+    mov rcx, [r8 + 176]
+    lea rcx, [rcx + rdx*4]
+    movzx edx, byte [rcx]
+    movsd xmm0, [r9 + rdx*8]
+    movzx edx, byte [rcx + 1]
+    movsd xmm1, [r9 + rdx*8]
+    movzx edx, byte [rcx + 2]
+    movsd xmm2, [r9 + rdx*8]
+    movzx edx, byte [rcx + 3]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm0, xmm3
+    mulsd xmm1, xmm3
+    mulsd xmm2, xmm3
+    mulsd xmm0, [rsp + 144]
+    mulsd xmm1, [rsp + 144]
+    mulsd xmm2, [rsp + 144]
+    mulsd xmm3, [rsp + 144]
+    addsd xmm0, [rsp + 96]
+    movsd [rsp + 96], xmm0
+    addsd xmm1, [rsp + 104]
+    movsd [rsp + 104], xmm1
+    addsd xmm2, [rsp + 112]
+    movsd [rsp + 112], xmm2
+    movzx edx, byte [rcx + 3]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm3, [rsp + 144]
+    addsd xmm3, [rsp + 120]
+    movsd [rsp + 120], xmm3
+    # tap (yi1,xi1) w11
+    mov rcx, [r8 + 184]
+    mov rdx, r15
+    imul rdx, rcx
+    add rdx, r14
+    mov rcx, [r8 + 176]
+    lea rcx, [rcx + rdx*4]
+    movzx edx, byte [rcx]
+    movsd xmm0, [r9 + rdx*8]
+    movzx edx, byte [rcx + 1]
+    movsd xmm1, [r9 + rdx*8]
+    movzx edx, byte [rcx + 2]
+    movsd xmm2, [r9 + rdx*8]
+    movzx edx, byte [rcx + 3]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm0, xmm3
+    mulsd xmm1, xmm3
+    mulsd xmm2, xmm3
+    mulsd xmm0, [rsp + 168]
+    mulsd xmm1, [rsp + 168]
+    mulsd xmm2, [rsp + 168]
+    mulsd xmm3, [rsp + 168]
+    addsd xmm0, [rsp + 96]
+    movsd [rsp + 96], xmm0
+    addsd xmm1, [rsp + 104]
+    movsd [rsp + 104], xmm1
+    addsd xmm2, [rsp + 112]
+    movsd [rsp + 112], xmm2
+    movzx edx, byte [rcx + 3]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm3, [rsp + 168]
+    addsd xmm3, [rsp + 120]
+    movsd [rsp + 120], xmm3
+    # accA > 1e-6?
+    movsd xmm0, [rsp + 120]
+    movsd xmm1, [rsp + 160] # 1e-6 bits as double? stored qword bits
+    ucomisd xmm0, xmm1
+    jbe fwd("bilinzero")
+    jmp fwd("biltint")
+    label biltint
+    # reload and divide properly: accA in xmm3
+    movsd xmm3, [rsp + 120]
+    movsd xmm0, [rsp + 96]
+    divsd xmm0, xmm3
+    movsd xmm1, [rsp + 104]
+    divsd xmm1, xmm3
+    movsd xmm2, [rsp + 112]
+    divsd xmm2, xmm3
+    movsd xmm3, [rsp + 120] # ta
+    # tint (no blend yet)
+    mulsd xmm0, [r8 + 96]
+    mulsd xmm1, [r8 + 104]
+    mulsd xmm2, [r8 + 112]
+    mulsd xmm3, [r8 + 120]
+    jmp fwd("geneval")
+    label bilinzero
+    xorpd xmm0, xmm0
+    xorpd xmm1, xmm1
+    xorpd xmm2, xmm2
+    xorpd xmm3, xmm3
+    label geneval
+    # xmm0/1/2 = straight paint, xmm3 = a_lerp -> clamped rgb + sa, then tail
+    maxpd xmm0, xmm5
+    minpd xmm0, xmm6
+    maxpd xmm1, xmm5
+    minpd xmm1, xmm6
+    maxpd xmm2, xmm5
+    minpd xmm2, xmm6
+    mulsd xmm3, [r8 + 128] # aAlpha
+    maxpd xmm3, xmm5
+    minpd xmm3, xmm6
+    mulsd xmm3, [r11] # cov
+    movsd xmm10, xmm3 # sa
+  # NB: `include` must nest in `when` here (same quirk as above).
+  when op != coSourceOver:
+    include blend_x64
+  dynasm a:
+    arch x64
+    label pixdone
+    addsd xmm8, xmm6 # x += 1.0
+    add r10, 4
+    add r11, 8
+    dec rbx
+    cmp rbx, 0
+    jg bwd("row")
+    label done
+    movupd xmm6, [rsp]
+    movupd xmm7, [rsp + 16]
+    movupd xmm8, [rsp + 32]
+    movupd xmm9, [rsp + 48]
+    movupd xmm10, [rsp + 64]
+    movupd xmm11, [rsp + 80]
+    add rsp, 176
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret()
+  a.finalize()
+
 type
   JitKernels* = ref JitKernelsObj
     ## Owns JIT row kernels. Paint-agnostic (constants travel via ctx),
@@ -2734,6 +4984,15 @@ type
     patBufs: array[CompOp, ExecutableBuffer]
     patFns: array[CompOp, PatternRowFn]
     patHas: array[CompOp, bool]
+    mlinBufs: array[CompOp, ExecutableBuffer]
+    mlinFns: array[CompOp, MultiLinearRowFn]
+    mlinHas: array[CompOp, bool]
+    mradBufs: array[CompOp, ExecutableBuffer]
+    mradFns: array[CompOp, MultiRadialRowFn]
+    mradHas: array[CompOp, bool]
+    pbilBufs: array[CompOp, ExecutableBuffer]
+    pbilFns: array[CompOp, PatternBilinearRowFn]
+    pbilHas: array[CompOp, bool]
 
 proc getSolid*(k: JitKernels, op: CompOp = coSourceOver): SolidRowFn =
   ## Return the solid row kernel for `op`, building it on first use.
@@ -2877,6 +5136,88 @@ proc getPattern*(k: JitKernels, op: CompOp = coSourceOver): PatternRowFn =
   else:
     nil
 
+proc getMultiLinear*(k: JitKernels, op: CompOp = coSourceOver): MultiLinearRowFn =
+  ## Return the multi-stop linear-gradient row kernel for `op`.
+  ## Same platform gate as `getSolid` (amd64 only; AArch64 not yet).
+  when defined(amd64):
+    if not k.mlinHas[op]:
+      ensureDivTable()
+      k.mlinBufs[op] = case op
+        of coSourceOver: buildMultiLinearRowX64()
+        of coSourceIn: buildMultiLinearRowGenX64(coSourceIn)
+        of coSourceOut: buildMultiLinearRowGenX64(coSourceOut)
+        of coAtop: buildMultiLinearRowGenX64(coAtop)
+        of coDestinationOver: buildMultiLinearRowGenX64(coDestinationOver)
+        of coDestinationIn: buildMultiLinearRowGenX64(coDestinationIn)
+        of coDestinationOut: buildMultiLinearRowGenX64(coDestinationOut)
+        of coDestinationAtop: buildMultiLinearRowGenX64(coDestinationAtop)
+        of coLighter: buildMultiLinearRowGenX64(coLighter)
+        of coCopy: buildMultiLinearRowGenX64(coCopy)
+        of coXor: buildMultiLinearRowGenX64(coXor)
+        of coMultiply: buildMultiLinearRowGenX64(coMultiply)
+        of coScreen: buildMultiLinearRowGenX64(coScreen)
+        of coOverlay: buildMultiLinearRowGenX64(coOverlay)
+      k.mlinFns[op] = cast[MultiLinearRowFn](
+        k.mlinBufs[op].ptrAt(AssemblyOffset(0)))
+      k.mlinHas[op] = true
+    k.mlinFns[op]
+  else:
+    nil
+
+proc getMultiRadial*(k: JitKernels, op: CompOp = coSourceOver): MultiRadialRowFn =
+  ## Return the multi-stop radial-gradient row kernel for `op`.
+  when defined(amd64):
+    if not k.mradHas[op]:
+      ensureDivTable()
+      k.mradBufs[op] = case op
+        of coSourceOver: buildMultiRadialRowX64()
+        of coSourceIn: buildMultiRadialRowGenX64(coSourceIn)
+        of coSourceOut: buildMultiRadialRowGenX64(coSourceOut)
+        of coAtop: buildMultiRadialRowGenX64(coAtop)
+        of coDestinationOver: buildMultiRadialRowGenX64(coDestinationOver)
+        of coDestinationIn: buildMultiRadialRowGenX64(coDestinationIn)
+        of coDestinationOut: buildMultiRadialRowGenX64(coDestinationOut)
+        of coDestinationAtop: buildMultiRadialRowGenX64(coDestinationAtop)
+        of coLighter: buildMultiRadialRowGenX64(coLighter)
+        of coCopy: buildMultiRadialRowGenX64(coCopy)
+        of coXor: buildMultiRadialRowGenX64(coXor)
+        of coMultiply: buildMultiRadialRowGenX64(coMultiply)
+        of coScreen: buildMultiRadialRowGenX64(coScreen)
+        of coOverlay: buildMultiRadialRowGenX64(coOverlay)
+      k.mradFns[op] = cast[MultiRadialRowFn](
+        k.mradBufs[op].ptrAt(AssemblyOffset(0)))
+      k.mradHas[op] = true
+    k.mradFns[op]
+  else:
+    nil
+
+proc getPatternBilinear*(k: JitKernels, op: CompOp = coSourceOver): PatternBilinearRowFn =
+  ## Return the bilinear-pattern row kernel for `op`.
+  when defined(amd64):
+    if not k.pbilHas[op]:
+      ensureDivTable()
+      k.pbilBufs[op] = case op
+        of coSourceOver: buildPatternBilinearRowX64()
+        of coSourceIn: buildPatternBilinearRowGenX64(coSourceIn)
+        of coSourceOut: buildPatternBilinearRowGenX64(coSourceOut)
+        of coAtop: buildPatternBilinearRowGenX64(coAtop)
+        of coDestinationOver: buildPatternBilinearRowGenX64(coDestinationOver)
+        of coDestinationIn: buildPatternBilinearRowGenX64(coDestinationIn)
+        of coDestinationOut: buildPatternBilinearRowGenX64(coDestinationOut)
+        of coDestinationAtop: buildPatternBilinearRowGenX64(coDestinationAtop)
+        of coLighter: buildPatternBilinearRowGenX64(coLighter)
+        of coCopy: buildPatternBilinearRowGenX64(coCopy)
+        of coXor: buildPatternBilinearRowGenX64(coXor)
+        of coMultiply: buildPatternBilinearRowGenX64(coMultiply)
+        of coScreen: buildPatternBilinearRowGenX64(coScreen)
+        of coOverlay: buildPatternBilinearRowGenX64(coOverlay)
+      k.pbilFns[op] = cast[PatternBilinearRowFn](
+        k.pbilBufs[op].ptrAt(AssemblyOffset(0)))
+      k.pbilHas[op] = true
+    k.pbilFns[op]
+  else:
+    nil
+
 proc destroy*(k: JitKernels) =
   ## Release executable mappings. Idempotent; also runs via GC.
   for op in CompOp:
@@ -2900,6 +5241,18 @@ proc destroy*(k: JitKernels) =
       k.patBufs[op].destroy()
       k.patHas[op] = false
       k.patFns[op] = nil
+    if k.mlinHas[op]:
+      k.mlinBufs[op].destroy()
+      k.mlinHas[op] = false
+      k.mlinFns[op] = nil
+    if k.mradHas[op]:
+      k.mradBufs[op].destroy()
+      k.mradHas[op] = false
+      k.mradFns[op] = nil
+    if k.pbilHas[op]:
+      k.pbilBufs[op].destroy()
+      k.pbilHas[op] = false
+      k.pbilFns[op] = nil
 
 proc `=destroy`*(x: var JitKernelsObj) =
   for op in CompOp:
@@ -2923,3 +5276,15 @@ proc `=destroy`*(x: var JitKernelsObj) =
       x.patBufs[op].destroy()
       x.patHas[op] = false
       x.patFns[op] = nil
+    if x.mlinHas[op]:
+      x.mlinBufs[op].destroy()
+      x.mlinHas[op] = false
+      x.mlinFns[op] = nil
+    if x.mradHas[op]:
+      x.mradBufs[op].destroy()
+      x.mradHas[op] = false
+      x.mradFns[op] = nil
+    if x.pbilHas[op]:
+      x.pbilBufs[op].destroy()
+      x.pbilHas[op] = false
+      x.pbilFns[op] = nil

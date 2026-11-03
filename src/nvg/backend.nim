@@ -25,12 +25,12 @@ when defined(nvgJit):
   type
     JitBackend* = ref object of Backend
       ## CPU backend with op-specialized JIT row kernels (`jit.nim`) for
-      ## solid, linear-, radial-, box-gradient and nearest-pattern fills
-      ## and strokes (bilinear patterns and multi-stop gradients stay
-      ## scalar); everything else falls back to the scalar rasterizer, so
-      ## output is identical to `CpuBackend`. Opt-in via
-      ## `newCanvas(w, h, newJitBackend())`; call `destroyJitBackend` when
-      ## done (mappings are also released by GC).
+      ## solid, linear-, radial-, box-gradient (2-stop and multi-stop)
+      ## and nearest/bilinear-pattern fills and strokes; everything else
+      ## falls back to the scalar rasterizer, so output is identical to
+      ## `CpuBackend`. Opt-in via `newCanvas(w, h, newJitBackend())`;
+      ## call `destroyJitBackend` when done (mappings are also released
+      ## by GC).
       kern*: JitKernels
       covJit*: seq[float64]
 
@@ -76,8 +76,7 @@ when defined(nvgJit):
     ## guaranteed opposite orientations and still mis-fills
     ## self-intersections), so only `fill` takes a rule; `stroke` below
     ## keeps the default. Kernels are op-specialized (`get*(op)`); the
-    ## scalar fallback covers bilinear patterns, multi-stop gradients,
-    ## non-runnable patterns, and non-amd64 hosts.
+    ## scalar fallback covers non-runnable patterns and non-amd64 hosts.
     when defined(amd64):
       case paint.kind
       of pkSolid:
@@ -93,11 +92,23 @@ when defined(nvgJit):
             fillLinearJit(surf, polys, paint, alpha, clip, fn,
               b.covJit, aa, rule, op)
             return
+        else:
+          let fn = b.kern.getMultiLinear(op)
+          if fn != nil:
+            fillMultiLinearJit(surf, polys, paint, alpha, clip, fn,
+              b.covJit, aa, rule, op)
+            return
       of pkRadial:
         if isBasicTwoStop(paint.radial.stops):
           let fn = b.kern.getRadial(op)
           if fn != nil:
             fillRadialJit(surf, polys, paint, alpha, clip, fn,
+              b.covJit, aa, rule, op)
+            return
+        else:
+          let fn = b.kern.getMultiRadial(op)
+          if fn != nil:
+            fillMultiRadialJit(surf, polys, paint, alpha, clip, fn,
               b.covJit, aa, rule, op)
             return
       of pkBox:
@@ -107,14 +118,20 @@ when defined(nvgJit):
             b.covJit, aa, rule, op)
           return
       of pkPattern:
-        if paint.pattern.img != nil and
-            ifNearest in paint.pattern.img.flags and
-            patternRunnable(paint):
-          let fn = b.kern.getPattern(op)
-          if fn != nil:
-            fillPatternJit(surf, polys, paint, alpha, clip, fn,
-              b.covJit, aa, rule, op)
-            return
+        if patternRunnable(paint):
+          if paint.pattern.img != nil and
+              ifNearest in paint.pattern.img.flags:
+            let fn = b.kern.getPattern(op)
+            if fn != nil:
+              fillPatternJit(surf, polys, paint, alpha, clip, fn,
+                b.covJit, aa, rule, op)
+              return
+          else:
+            let fn = b.kern.getPatternBilinear(op)
+            if fn != nil:
+              fillPatternBilinearJit(surf, polys, paint, alpha, clip,
+                fn, b.covJit, aa, rule, op)
+              return
     fillPolys(surf, polys, paint, alpha, clip, aa, op, rule)
 
   method stroke*(b: JitBackend, surf: Surface, polys: seq[SubPoly],
@@ -138,12 +155,26 @@ when defined(nvgJit):
             fillLinearJit(surf, expanded, paint, alpha, clip, fn,
               b.covJit, aa, frEvenOdd, op)
             return
+        else:
+          let fn = b.kern.getMultiLinear(op)
+          if fn != nil:
+            let expanded = expandStroke(polys, width, cap, join, miterLimit)
+            fillMultiLinearJit(surf, expanded, paint, alpha, clip, fn,
+              b.covJit, aa, frEvenOdd, op)
+            return
       of pkRadial:
         if isBasicTwoStop(paint.radial.stops):
           let fn = b.kern.getRadial(op)
           if fn != nil:
             let expanded = expandStroke(polys, width, cap, join, miterLimit)
             fillRadialJit(surf, expanded, paint, alpha, clip, fn,
+              b.covJit, aa, frEvenOdd, op)
+            return
+        else:
+          let fn = b.kern.getMultiRadial(op)
+          if fn != nil:
+            let expanded = expandStroke(polys, width, cap, join, miterLimit)
+            fillMultiRadialJit(surf, expanded, paint, alpha, clip, fn,
               b.covJit, aa, frEvenOdd, op)
             return
       of pkBox:
@@ -154,15 +185,22 @@ when defined(nvgJit):
             b.covJit, aa, frEvenOdd, op)
           return
       of pkPattern:
-        if paint.pattern.img != nil and
-            ifNearest in paint.pattern.img.flags and
-            patternRunnable(paint):
-          let fn = b.kern.getPattern(op)
-          if fn != nil:
-            let expanded = expandStroke(polys, width, cap, join, miterLimit)
-            fillPatternJit(surf, expanded, paint, alpha, clip, fn,
-              b.covJit, aa, frEvenOdd, op)
-            return
+        if patternRunnable(paint):
+          if paint.pattern.img != nil and
+              ifNearest in paint.pattern.img.flags:
+            let fn = b.kern.getPattern(op)
+            if fn != nil:
+              let expanded = expandStroke(polys, width, cap, join, miterLimit)
+              fillPatternJit(surf, expanded, paint, alpha, clip, fn,
+                b.covJit, aa, frEvenOdd, op)
+              return
+          else:
+            let fn = b.kern.getPatternBilinear(op)
+            if fn != nil:
+              let expanded = expandStroke(polys, width, cap, join, miterLimit)
+              fillPatternBilinearJit(surf, expanded, paint, alpha, clip,
+                fn, b.covJit, aa, frEvenOdd, op)
+              return
     strokePolys(surf, polys, paint, width, cap, join, miterLimit, alpha,
       clip, aa, op)
 
