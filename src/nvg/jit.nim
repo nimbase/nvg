@@ -4974,6 +4974,7 @@ proc getSolid*(k: JitKernels, op: CompOp = coSourceOver): SolidRowFn =
   ## rasterizer; the AArch64 kernels are assemble-verified until an ARM
   ## run signs off execution).
   when defined(amd64):
+    if op >= coDarken: return nil # scalar-only until JIT tails land
     if not k.solidHas[op]:
       ensureDivTable()
       k.solidBufs[op] = case op
@@ -4991,6 +4992,7 @@ proc getSolid*(k: JitKernels, op: CompOp = coSourceOver): SolidRowFn =
         of coMultiply: buildSolidRowGenX64(coMultiply)
         of coScreen: buildSolidRowGenX64(coScreen)
         of coOverlay: buildSolidRowGenX64(coOverlay)
+        else: raise newException(Defect, "scalar-only op has no JIT kernel")
       k.solidFns[op] = cast[SolidRowFn](
         k.solidBufs[op].ptrAt(AssemblyOffset(0)))
       k.solidHas[op] = true
@@ -5002,6 +5004,7 @@ proc getLinear*(k: JitKernels, op: CompOp = coSourceOver): LinearRowFn =
   ## Return the linear-gradient row kernel for `op`, building it on
   ## first use. Same platform gate as `getSolid`.
   when defined(amd64):
+    if op >= coDarken: return nil # scalar-only until JIT tails land
     if not k.linearHas[op]:
       ensureDivTable()
       k.linearBufs[op] = case op
@@ -5019,6 +5022,7 @@ proc getLinear*(k: JitKernels, op: CompOp = coSourceOver): LinearRowFn =
         of coMultiply: buildLinearRowGenX64(coMultiply)
         of coScreen: buildLinearRowGenX64(coScreen)
         of coOverlay: buildLinearRowGenX64(coOverlay)
+        else: raise newException(Defect, "scalar-only op has no JIT kernel")
       k.linearFns[op] = cast[LinearRowFn](
         k.linearBufs[op].ptrAt(AssemblyOffset(0)))
       k.linearHas[op] = true
@@ -5030,6 +5034,7 @@ proc getRadial*(k: JitKernels, op: CompOp = coSourceOver): RadialRowFn =
   ## Return the radial-gradient row kernel for `op`, building it on
   ## first use. Same platform gate as `getSolid`.
   when defined(amd64):
+    if op >= coDarken: return nil # scalar-only until JIT tails land
     if not k.radialHas[op]:
       ensureDivTable()
       k.radialBufs[op] = case op
@@ -5047,6 +5052,7 @@ proc getRadial*(k: JitKernels, op: CompOp = coSourceOver): RadialRowFn =
         of coMultiply: buildRadialRowGenX64(coMultiply)
         of coScreen: buildRadialRowGenX64(coScreen)
         of coOverlay: buildRadialRowGenX64(coOverlay)
+        else: raise newException(Defect, "scalar-only op has no JIT kernel")
       k.radialFns[op] = cast[RadialRowFn](
         k.radialBufs[op].ptrAt(AssemblyOffset(0)))
       k.radialHas[op] = true
@@ -5058,6 +5064,7 @@ proc getBox*(k: JitKernels, op: CompOp = coSourceOver): BoxRowFn =
   ## Return the box-gradient row kernel for `op`, building it on first
   ## use. Same platform gate as `getSolid`.
   when defined(amd64):
+    if op >= coDarken: return nil # scalar-only until JIT tails land
     if not k.boxHas[op]:
       ensureDivTable()
       k.boxBufs[op] = case op
@@ -5075,6 +5082,7 @@ proc getBox*(k: JitKernels, op: CompOp = coSourceOver): BoxRowFn =
         of coMultiply: buildBoxRowGenX64(coMultiply)
         of coScreen: buildBoxRowGenX64(coScreen)
         of coOverlay: buildBoxRowGenX64(coOverlay)
+        else: raise newException(Defect, "scalar-only op has no JIT kernel")
       k.boxFns[op] = cast[BoxRowFn](
         k.boxBufs[op].ptrAt(AssemblyOffset(0)))
       k.boxHas[op] = true
@@ -5086,6 +5094,7 @@ proc getPattern*(k: JitKernels, op: CompOp = coSourceOver): PatternRowFn =
   ## Return the nearest-pattern row kernel for `op`, building it on
   ## first use. Same platform gate as `getSolid`.
   when defined(amd64):
+    if op >= coDarken: return nil # scalar-only until JIT tails land
     if not k.patHas[op]:
       ensureDivTable()
       k.patBufs[op] = case op
@@ -5103,6 +5112,7 @@ proc getPattern*(k: JitKernels, op: CompOp = coSourceOver): PatternRowFn =
         of coMultiply: buildPatternRowGenX64(coMultiply)
         of coScreen: buildPatternRowGenX64(coScreen)
         of coOverlay: buildPatternRowGenX64(coOverlay)
+        else: raise newException(Defect, "scalar-only op has no JIT kernel")
       k.patFns[op] = cast[PatternRowFn](
         k.patBufs[op].ptrAt(AssemblyOffset(0)))
       k.patHas[op] = true
@@ -5114,6 +5124,7 @@ proc getMultiLinear*(k: JitKernels, op: CompOp = coSourceOver): MultiLinearRowFn
   ## Return the multi-stop linear-gradient row kernel for `op`.
   ## Same platform gate as `getSolid` (amd64 only; AArch64 not yet).
   when defined(amd64):
+    if op >= coDarken: return nil # scalar-only until JIT tails land
     if not k.mlinHas[op]:
       ensureDivTable()
       k.mlinBufs[op] = case op
@@ -5131,6 +5142,7 @@ proc getMultiLinear*(k: JitKernels, op: CompOp = coSourceOver): MultiLinearRowFn
         of coMultiply: buildMultiLinearRowGenX64(coMultiply)
         of coScreen: buildMultiLinearRowGenX64(coScreen)
         of coOverlay: buildMultiLinearRowGenX64(coOverlay)
+        else: raise newException(Defect, "scalar-only op has no JIT kernel")
       k.mlinFns[op] = cast[MultiLinearRowFn](
         k.mlinBufs[op].ptrAt(AssemblyOffset(0)))
       k.mlinHas[op] = true
@@ -5141,6 +5153,7 @@ proc getMultiLinear*(k: JitKernels, op: CompOp = coSourceOver): MultiLinearRowFn
 proc getMultiRadial*(k: JitKernels, op: CompOp = coSourceOver): MultiRadialRowFn =
   ## Return the multi-stop radial-gradient row kernel for `op`.
   when defined(amd64):
+    if op >= coDarken: return nil # scalar-only until JIT tails land
     if not k.mradHas[op]:
       ensureDivTable()
       k.mradBufs[op] = case op
@@ -5158,6 +5171,7 @@ proc getMultiRadial*(k: JitKernels, op: CompOp = coSourceOver): MultiRadialRowFn
         of coMultiply: buildMultiRadialRowGenX64(coMultiply)
         of coScreen: buildMultiRadialRowGenX64(coScreen)
         of coOverlay: buildMultiRadialRowGenX64(coOverlay)
+        else: raise newException(Defect, "scalar-only op has no JIT kernel")
       k.mradFns[op] = cast[MultiRadialRowFn](
         k.mradBufs[op].ptrAt(AssemblyOffset(0)))
       k.mradHas[op] = true
@@ -5168,6 +5182,7 @@ proc getMultiRadial*(k: JitKernels, op: CompOp = coSourceOver): MultiRadialRowFn
 proc getPatternBilinear*(k: JitKernels, op: CompOp = coSourceOver): PatternBilinearRowFn =
   ## Return the bilinear-pattern row kernel for `op`.
   when defined(amd64):
+    if op >= coDarken: return nil # scalar-only until JIT tails land
     if not k.pbilHas[op]:
       ensureDivTable()
       k.pbilBufs[op] = case op
@@ -5185,6 +5200,7 @@ proc getPatternBilinear*(k: JitKernels, op: CompOp = coSourceOver): PatternBilin
         of coMultiply: buildPatternBilinearRowGenX64(coMultiply)
         of coScreen: buildPatternBilinearRowGenX64(coScreen)
         of coOverlay: buildPatternBilinearRowGenX64(coOverlay)
+        else: raise newException(Defect, "scalar-only op has no JIT kernel")
       k.pbilFns[op] = cast[PatternBilinearRowFn](
         k.pbilBufs[op].ptrAt(AssemblyOffset(0)))
       k.pbilHas[op] = true

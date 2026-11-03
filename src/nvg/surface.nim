@@ -5,6 +5,7 @@
 ## fixed-Huffman DEFLATE stream (greedy LZ77, hash chains): no zlib
 ## binding, decodable by any standard inflater, deterministic output.
 
+import std/math
 import ./types
 
 export types
@@ -52,11 +53,15 @@ proc blendPixel*(s: Surface, x, y: int, src: Color, coverage = 1.0,
   ## Blend `src` over the destination pixel under `op`. Coverage scales
   ## the source alpha (antialiasing mask). Colors are straight alpha
   ## throughout; `coLighter` clamps the additive result.
-  ## `coSourceOver` is Normal. `coMultiply/coScreen/coOverlay` use
+  ## `coSourceOver` is Normal. `coMultiply`..`coLuminosity` use
   ## blend-then-composite on straight RGBA8: with straight source
   ## `Cs,as` (coverage-scaled) and dest `Cb,ab`, `Bout = Blend(Cs,Cb)`
-  ## (Multiply `Cs*Cb`, Screen `1-(1-Cs)(1-Cb)`, Overlay `2*Cs*Cb` for
-  ## `Cb <= 0.5` else `1-2(1-Cs)(1-Cb)`), then
+  ## (separable per channel: Multiply `Cs*Cb`, Screen, Overlay keyed on
+  ## `Cb <= 0.5`, Darken `min`, Lighten `max`, ColorDodge/ColorBurn with
+  ## zero-division guards, HardLight keyed on `Cs`, SoftLight per W3C,
+  ## Difference `|Cs-Cb|`, Exclusion; non-separable Hue/Saturation/
+  ## Color/Luminosity per W3C `Lum/ClipColor/SetLum/SetSat` with
+  ## `Lum = 0.3R+0.59G+0.11B`), then
   ## `outA = as + ab*(1-as)` and
   ## `outRGB = ((1-ab)*as*Cs + (1-as)*ab*Cb + as*ab*Bout)/outA`
   ## (transparent black when `outA` is 0). Naive `mix(Cb,Bout,as)` agrees
@@ -129,20 +134,112 @@ proc blendPixel*(s: Surface, x, y: int, src: Color, coverage = 1.0,
     cog = csg * (1.0 - da) + cdg * (1.0 - sa)
     cob = csb * (1.0 - da) + cdb * (1.0 - sa)
     ao = sa + da - 2.0 * sa * da
-  of coMultiply, coScreen, coOverlay:
+  of coMultiply, coScreen, coOverlay, coDarken, coLighten,
+      coColorDodge, coColorBurn, coHardLight, coSoftLight,
+      coDifference, coExclusion:
     # Blend-then-composite (see `blendPixel` docs). `sr/sg/sb` are
     # straight clamped source, `dr/dg/db` straight dest, `sa` is
-    # coverage-scaled, `da` dest alpha.
+    # coverage-scaled, `da` dest alpha. Separable formulae per W3C
+    # Compositing and Blending L1 (blend(Cb,Cs) there, transposed here
+    # to blend(Cs,Cb)); guard order matches the spec so joint edge
+    # cases (e.g. Cs=0 with Cb=1) agree.
     proc blendCh(cs, cb: float64, op: CompOp): float64 =
       case op
       of coMultiply: cs * cb
       of coScreen: cs + cb - cs * cb
-      else: # coOverlay
+      of coOverlay:
         if cb <= 0.5: 2.0 * cs * cb
         else: 1.0 - 2.0 * (1.0 - cs) * (1.0 - cb)
+      of coDarken: min(cs, cb)
+      of coLighten: max(cs, cb)
+      of coColorDodge:
+        if cs <= 0.0: 0.0
+        elif cb >= 1.0: 1.0
+        else: min(1.0, cs / (1.0 - cb))
+      of coColorBurn:
+        if cs >= 1.0: 1.0
+        elif cb <= 0.0: 0.0
+        else: 1.0 - min(1.0, (1.0 - cs) / cb)
+      of coHardLight:
+        if cs <= 0.5: 2.0 * cs * cb
+        else: 1.0 - 2.0 * (1.0 - cs) * (1.0 - cb)
+      of coSoftLight:
+        if cs <= 0.5:
+          cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb)
+        else:
+          let d =
+            if cb <= 0.25: ((16.0 * cb - 12.0) * cb + 4.0) * cb
+            else: sqrt(cb)
+          cb + (2.0 * cs - 1.0) * (d - cb)
+      of coDifference: abs(cs - cb)
+      else: # coExclusion
+        cs + cb - 2.0 * cs * cb
     let br = blendCh(sr, dr, op)
     let bg = blendCh(sg, dg, op)
     let bb = blendCh(sb, db, op)
+    cor = (1.0 - da) * sa * sr + (1.0 - sa) * da * dr + sa * da * br
+    cog = (1.0 - da) * sa * sg + (1.0 - sa) * da * dg + sa * da * bg
+    cob = (1.0 - da) * sa * sb + (1.0 - sa) * da * db + sa * da * bb
+    ao = sa + da * (1.0 - sa)
+  of coHue, coSaturation, coColor, coLuminosity:
+    # Non-separable blends per W3C (same blend-then-composite wrapper;
+    # `Lum = 0.3R+0.59G+0.11B` per the spec, not Rec.601).
+    proc lumC(r, g, b: float64): float64 = 0.3 * r + 0.59 * g + 0.11 * b
+    proc clipC(r, g, b: float64): tuple[r, g, b: float64] =
+      let l = lumC(r, g, b)
+      var rr = r
+      var gg = g
+      var bb = b
+      let n = min(rr, min(gg, bb))
+      let x = max(rr, max(gg, bb))
+      if n < 0.0:
+        rr = l + ((rr - l) * l / (l - n))
+        gg = l + ((gg - l) * l / (l - n))
+        bb = l + ((bb - l) * l / (l - n))
+      if x > 1.0:
+        rr = l + ((rr - l) * (1.0 - l) / (x - l))
+        gg = l + ((gg - l) * (1.0 - l) / (x - l))
+        bb = l + ((bb - l) * (1.0 - l) / (x - l))
+      (rr, gg, bb)
+    proc setLumC(r, g, b: float64, l: float64):
+        tuple[r, g, b: float64] =
+      let d = l - lumC(r, g, b)
+      clipC(r + d, g + d, b + d)
+    proc satC(r, g, b: float64): float64 =
+      max(r, max(g, b)) - min(r, min(g, b))
+    proc setSatC(r, g, b: float64, s: float64):
+        tuple[r, g, b: float64] =
+      var vals = [r, g, b]
+      var iMax = 0
+      var iMin = 0
+      for k in 1 .. 2:
+        if vals[k] > vals[iMax]: iMax = k
+        if vals[k] < vals[iMin]: iMin = k
+      if iMax == iMin: # gray input: spec yields black before SetLum
+        return (0.0, 0.0, 0.0)
+      let iMid = 3 - iMax - iMin
+      let nMid = ((vals[iMid] - vals[iMin]) * s) /
+        (vals[iMax] - vals[iMin])
+      var o = [0.0, 0.0, 0.0]
+      o[iMax] = s
+      o[iMid] = nMid
+      (o[0], o[1], o[2])
+    var br, bg, bb: float64
+    case op
+    of coHue:
+      let st = setSatC(sr, sg, sb, satC(dr, dg, db))
+      let l = setLumC(st.r, st.g, st.b, lumC(dr, dg, db))
+      br = l.r; bg = l.g; bb = l.b
+    of coSaturation:
+      let st = setSatC(dr, dg, db, satC(sr, sg, sb))
+      let l = setLumC(st.r, st.g, st.b, lumC(dr, dg, db))
+      br = l.r; bg = l.g; bb = l.b
+    of coColor:
+      let l = setLumC(sr, sg, sb, lumC(dr, dg, db))
+      br = l.r; bg = l.g; bb = l.b
+    else: # coLuminosity
+      let l = setLumC(dr, dg, db, lumC(sr, sg, sb))
+      br = l.r; bg = l.g; bb = l.b
     cor = (1.0 - da) * sa * sr + (1.0 - sa) * da * dr + sa * da * br
     cog = (1.0 - da) * sa * sg + (1.0 - sa) * da * dg + sa * da * bg
     cob = (1.0 - da) * sa * sb + (1.0 - sa) * da * db + sa * da * bb

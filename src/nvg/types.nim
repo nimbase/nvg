@@ -38,8 +38,13 @@ type
     wCW = 2
 
   CompOp* = enum
-    ## Porter-Duff composite operations honored by the CPU rasterizer
+    ## Composite/blend operations honored by the CPU rasterizer
     ## (see `surface.blendPixel`). `coSourceOver` IS Normal.
+    ## Porter-Duff: SourceOver..Xor. Separable blends
+    ## (Multiply..Exclusion) and non-separable blends
+    ## (Hue..Luminosity) use blend-then-composite with
+    ## `outA = as+ab(1-as)` (see `blendPixel` docs). New ops are
+    ## appended; ordinals of the original 14 are stable.
     coSourceOver
     coSourceIn
     coSourceOut
@@ -54,6 +59,18 @@ type
     coMultiply
     coScreen
     coOverlay
+    coDarken
+    coLighten
+    coColorDodge
+    coColorBurn
+    coHardLight
+    coSoftLight
+    coDifference
+    coExclusion
+    coHue
+    coSaturation
+    coColor
+    coLuminosity
 
   Clip* = object
     enabled*: bool

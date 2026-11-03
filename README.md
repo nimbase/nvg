@@ -19,7 +19,7 @@
   image patterns, solid colors
 - Flexible strokes: round/square caps, miter/bevel/round joins, dashed lines
 - Two fill rules (even-odd, nonzero winding) for holes and overlaps
-- 14 blend modes, from source-over to multiply, screen and overlay
+- 26 blend modes: Porter-Duff plus the full CSS mix-blend set
 - Masks and offscreen layers for cutouts and compositing tricks
 - Stars, polygons, rounded corners, plus measuring/splitting paths
 - An opt-in JIT backend that renders pixel-identical output, faster
@@ -56,7 +56,7 @@ destroyJitBackend(c.backend.JitBackend)
 - [x] Solid, gradient (multi-stop) and pattern paints
 - [x] Strokes: caps, joins, dashes
 - [x] Even-odd and nonzero winding fills
-- [x] Blend modes (Porter-Duff + multiply/screen/overlay)
+- [x] Blend modes (Porter-Duff + full CSS mix-blend set)
 - [x] Mask and layer compositing primitives
 - [x] Stars, polygons, path measurement and splitting
 - [x] JIT backend, pixel-identical to scalar

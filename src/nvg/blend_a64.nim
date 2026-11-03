@@ -676,3 +676,6 @@ proc emitBlendTailAarch64*(op: CompOp, a: var Assembler) =
   of coMultiply: emitBlendTailAarch64Static(coMultiply, a)
   of coScreen: emitBlendTailAarch64Static(coScreen, a)
   of coOverlay: emitBlendTailAarch64Static(coOverlay, a)
+  else:
+    raise newException(Defect,
+      "emitBlendTailAarch64: scalar-only op has no JIT tail")

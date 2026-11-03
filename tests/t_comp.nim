@@ -31,6 +31,35 @@ test "composite ops over opaque blue":
   check same(compPixel(coCopy, bg), 1, 0, 0, 0.5)
   check same(compPixel(coXor, bg), 0, 0, 1, 0.5)
 
+test "separable blends over opaque blue":
+  let bg = rgbf(0, 0, 1)
+  check same(compPixel(coDarken, bg), 0, 0, 0.5, 1)
+  check same(compPixel(coLighten, bg), 0.5, 0, 1, 1)
+  check same(compPixel(coColorDodge, bg), 0.5, 0, 0.5, 1)
+  check same(compPixel(coColorBurn, bg), 0.5, 0, 0.5, 1)
+  check same(compPixel(coHardLight, bg), 0.5, 0, 0.5, 1)
+  check same(compPixel(coSoftLight, bg), 0, 0, 1, 1)
+  check same(compPixel(coDifference, bg), 0.5, 0, 1, 1)
+  check same(compPixel(coExclusion, bg), 0.5, 0, 1, 1)
+
+test "non-separable blends over opaque blue":
+  let bg = rgbf(0, 0, 1)
+  check same(compPixel(coHue, bg), 0.18, 0, 0.5, 1)
+  check same(compPixel(coSaturation, bg), 0, 0, 1, 1)
+  check same(compPixel(coColor, bg), 0.18, 0, 0.5, 1)
+  check same(compPixel(coLuminosity, bg), 0.11, 0.11, 1, 1)
+
+test "blend-then-composite over translucent destination":
+  # Naive mix(Cb,Bout,as) agrees only for opaque dst; these pin the
+  # premultiplied wrapper: darken gives 1/3, difference 2/3.
+  let bg = rgbaf(0, 0, 1, 0.5)
+  let dk = compPixel(coDarken, bg)
+  check same(dk, 1.0 / 3.0, 0, 1.0 / 3.0, 0.75)
+  let df = compPixel(coDifference, bg)
+  check same(df, 2.0 / 3.0, 0, 2.0 / 3.0, 0.75)
+  check close(compPixel(coColorDodge, bg).a, 0.75)
+  check close(compPixel(coLuminosity, bg).a, 0.75)
+
 test "atop preserves translucent destination alpha":
   let bg = rgbaf(0, 0, 1, 0.5)
   let atop = compPixel(coAtop, bg)
@@ -76,7 +105,10 @@ test "intersected scissor clips to the overlap":
 test "composite golden":
   const ops = [coSourceOver, coSourceIn, coSourceOut, coAtop,
     coDestinationOver, coDestinationIn, coDestinationOut,
-    coDestinationAtop, coLighter, coCopy, coXor]
+    coDestinationAtop, coLighter, coCopy, coXor, coMultiply, coScreen,
+    coOverlay, coDarken, coLighten, coColorDodge, coColorBurn,
+    coHardLight, coSoftLight, coDifference, coExclusion, coHue,
+    coSaturation, coColor, coLuminosity]
   let c = newCanvas(ops.len * 24, 24)
   c.clear(rgbf(0, 0, 1))
   for i, op in ops:
