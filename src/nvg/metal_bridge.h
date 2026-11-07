@@ -12,10 +12,11 @@ extern "C" {
 #endif
 
 // Pipeline slots (index into the context's pipeline table).
-#define NVGMTL_SLOTS 12
+#define NVGMTL_SLOTS 14
 
-// Buffer slots: 0 = pixels (RGBA8 bytes), 1 = aux (float32 coverage).
-#define NVGMTL_NBUFS 2
+// Buffer slots: 0 = pixels (RGBA8 bytes), 1 = aux (float32 coverage
+// or byte scratch), 2 = spare (e.g. unsharp original).
+#define NVGMTL_NBUFS 3
 
 // Number of Metal devices, or 0 when Metal is unavailable.
 int nvgmtl_device_count(void);
@@ -37,6 +38,10 @@ void nvgmtl_fill(void *ctx, int slot, const void *params, int paramslen);
 // (Shared storage, CPU-uploaded; GPU texture reads are the tested
 // path, GPU texture writes are not used). 0 on success.
 int nvgmtl_pattern(void *ctx, const unsigned char *px, int w, int h);
+
+// Copy buffer `srcSlot` into `dstSlot` (full-size blit).
+// No-op on NULL or bad slots.
+void nvgmtl_copy(void *ctx, int dstSlot, int srcSlot);
 
 // Copy a full w*h*4-byte image into buffer `slot` (0 pixels, 1 aux).
 // No-op on NULL or bad slot.

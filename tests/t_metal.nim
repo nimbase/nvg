@@ -734,6 +734,127 @@ test "compute gaussian blur is byte-identical to cpu":
   else:
     skip()
 
+test "cpu unsharp mask hand computed":
+  var s = newSurface(3, 3)
+  for y in 0 ..< 3:
+    for x in 0 ..< 3:
+      s.setPixel(x, y, rgb(100, 100, 100))
+  s.setPixel(1, 1, rgb(150, 150, 150))
+  s.unsharpMask(1, 1.0)
+  check s.getPixel(1, 1).toRgba8() == (194u8, 194u8, 194u8, 255u8)
+  # Corner darkens away from the bright center (local contrast boost:
+  # blurred corner is 106, so 100 + (100 - 106) = 94).
+  check s.getPixel(0, 0).toRgba8() == (94u8, 94u8, 94u8, 255u8)
+  var flat = newSurface(2, 2)
+  flat.clear(rgbaf(0.4, 0.2, 0.8, 0.6))
+  flat.unsharpMask(1, 2.0)
+  check flat.getPixel(0, 0).toRgba8() == (102u8, 51u8, 204u8, 153u8)
+  var noop = newSurface(2, 2)
+  noop.clear(rgbf(1, 0, 0))
+  noop.unsharpMask(1, 0.0)
+  check noop.getPixel(1, 1).toRgba8() == (255u8, 0u8, 0u8, 255u8)
+  noop.unsharpMask(0, 1.0)
+  check noop.getPixel(1, 1).toRgba8() == (255u8, 0u8, 0u8, 255u8)
+
+test "cpu unsharp mask keeps transparent transparent":
+  var s = newSurface(3, 3)
+  s.clear(rgbaf(0, 0, 0, 0))
+  s.setPixel(1, 1, rgbf(1, 0, 0))
+  s.unsharpMask(1, 1.0)
+  check s.getPixel(1, 1).toRgba8() == (255u8, 0u8, 0u8, 255u8)
+  check s.getPixel(0, 0).toRgba8() == (0u8, 0u8, 0u8, 0u8)
+  check s.getPixel(0, 1).toRgba8()[3] == 0u8
+
+test "compute unsharp mask matches cpu within 2 lsb":
+  when defined(macosx):
+    if not mtlAvailable():
+      skip()
+    const W = 9
+    const H = 7
+    var s = newSurface(W, H)
+    for y in 0 ..< H:
+      for x in 0 ..< W:
+        s.setPixel(x, y, rgbaf(float64((x * 37 + y * 91) mod 256) / 255.0,
+          float64((x * 53 + y * 29) mod 256) / 255.0,
+          float64((x * 11 + y * 71) mod 256) / 255.0,
+          float64((x * 17 + y * 13) mod 256) / 255.0))
+    var ctx = newMetalCtx(W, H)
+    defer: ctx.close()
+    for radius in [1, 2]:
+      for amount in [0.5, 1.5]:
+        var cpu = newSurface(W, H)
+        for i in 0 ..< s.pixels.len:
+          cpu.pixels[i] = s.pixels[i]
+        cpu.unsharpMask(radius, amount)
+        ctx.upload(s.pixels)
+        ctx.unsharpMask(radius, amount)
+        let got = ctx.readback()
+        var maxDiff = 0
+        for i in 0 ..< got.len:
+          let d = abs(int(got[i]) - int(cpu.pixels[i]))
+          if d > maxDiff:
+            maxDiff = d
+        check maxDiff <= 2
+  else:
+    skip()
+
+test "cpu mosaic hand computed":
+  var s = newSurface(4, 4)
+  s.clear(rgbf(0, 0, 1))
+  for y in 0 ..< 2:
+    for x in 0 ..< 2:
+      s.setPixel(x, y, rgbf(1, 0, 0))
+  s.mosaic(2)
+  check s.getPixel(0, 0).toRgba8() == (255u8, 0u8, 0u8, 255u8)
+  check s.getPixel(1, 1).toRgba8() == (255u8, 0u8, 0u8, 255u8)
+  check s.getPixel(2, 0).toRgba8() == (0u8, 0u8, 255u8, 255u8)
+  check s.getPixel(3, 3).toRgba8() == (0u8, 0u8, 255u8, 255u8)
+  var p = newSurface(5, 5)
+  p.clear(rgbf(0, 1, 0))
+  p.setPixel(4, 4, rgbf(1, 1, 1))
+  p.mosaic(2)
+  check p.getPixel(4, 4).toRgba8() == (255u8, 255u8, 255u8, 255u8)
+  check p.getPixel(0, 4).toRgba8() == (0u8, 255u8, 0u8, 255u8)
+  var t = newSurface(2, 2)
+  t.clear(rgbaf(0, 0, 0, 0))
+  t.setPixel(0, 0, rgbf(1, 0, 0))
+  t.mosaic(2)
+  for y in 0 ..< 2:
+    for x in 0 ..< 2:
+      check t.getPixel(x, y).toRgba8() == (255u8, 0u8, 0u8, 64u8)
+  var noop = newSurface(2, 2)
+  noop.clear(rgbf(1, 0, 0))
+  noop.mosaic(1)
+  check noop.getPixel(0, 0).toRgba8() == (255u8, 0u8, 0u8, 255u8)
+  noop.mosaic(0)
+  check noop.getPixel(0, 0).toRgba8() == (255u8, 0u8, 0u8, 255u8)
+
+test "compute mosaic is byte-identical to cpu":
+  when defined(macosx):
+    if not mtlAvailable():
+      skip()
+    const W = 9
+    const H = 7
+    var s = newSurface(W, H)
+    for y in 0 ..< H:
+      for x in 0 ..< W:
+        s.setPixel(x, y, rgbaf(float64((x * 37 + y * 91) mod 256) / 255.0,
+          float64((x * 53 + y * 29) mod 256) / 255.0,
+          float64((x * 11 + y * 71) mod 256) / 255.0,
+          float64((x * 17 + y * 13) mod 256) / 255.0))
+    var ctx = newMetalCtx(W, H)
+    defer: ctx.close()
+    for cell in [2, 3, 4]:
+      var cpu = newSurface(W, H)
+      for i in 0 ..< s.pixels.len:
+        cpu.pixels[i] = s.pixels[i]
+      cpu.mosaic(cell)
+      ctx.upload(s.pixels)
+      ctx.mosaic(cell)
+      check ctx.readback() == cpu.pixels
+  else:
+    skip()
+
 test "compute bilinear pattern matches cpu within 1 lsb":
   when defined(macosx):
     if not mtlAvailable():

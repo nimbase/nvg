@@ -622,3 +622,77 @@ proc gaussianBlur*(s: Surface, sigma: float64, boxes = 3) =
   ## Non-positive sigma is a no-op.
   for w in boxWidthsForSigma(sigma, boxes):
     s.boxBlur((w - 1) div 2)
+
+proc unsharpMask*(s: Surface, radius: int, amount: float64) =
+  ## Sharpening via `output = original + amount * (original - blurred)`
+  ## with a box-blurred copy. Color works in premultiplied space
+  ## (`rgb*a`, divided back out by the original alpha) so transparent
+  ## edges keep their hue; fully transparent pixels stay transparent
+  ## and the alpha channel passes through untouched. Output clamps to
+  ## byte range; excessive amounts ring and emphasize noise. CPU uses
+  ## float64 while the Metal mirror uses float32, so the pair agrees
+  ## within 2 LSB. Non-positive radius or amount is a no-op.
+  if radius <= 0 or amount <= 0.0 or s.w <= 0 or s.h <= 0: return
+  var blurred = newSurface(s.w, s.h)
+  for i in 0 ..< s.pixels.len:
+    blurred.pixels[i] = s.pixels[i]
+  blurred.boxBlur(radius)
+  for i in 0 ..< (s.w * s.h):
+    let o = i * 4
+    let oa = int(s.pixels[o + 3])
+    if oa <= 0:
+      s.pixels[o] = 0
+      s.pixels[o + 1] = 0
+      s.pixels[o + 2] = 0
+      s.pixels[o + 3] = 0
+    else:
+      for k in 0 ..< 3:
+        let op = float64(s.pixels[o + k]) * float64(oa)
+        let bp = float64(blurred.pixels[o + k]) *
+          float64(blurred.pixels[o + 3])
+        let v = (op + amount * (op - bp)) / float64(oa)
+        s.pixels[o + k] =
+          if v <= 0.0: 0u8
+          elif v >= 255.0: 255u8
+          else: uint8(int(v + 0.5))
+
+proc mosaic*(s: Surface, cell: int) =
+  ## Pixelation: every `cell` by `cell` block (partial blocks at the
+  ## right/bottom edges average their available pixels) becomes its
+  ## premultiplied mean, like `boxBlur` in miniature: transparent
+  ## blocks stay transparent, edges keep their hue. Integer
+  ## round-half-up throughout, so the Metal mirror is byte-identical.
+  ## Cells of size 1 or less are a no-op.
+  if cell <= 1 or s.w <= 0 or s.h <= 0: return
+  for oy in countup(0, s.h - 1, cell):
+    for ox in countup(0, s.w - 1, cell):
+      var ar, ag, ab, aa, n = 0
+      let x1 = min(ox + cell, s.w)
+      let y1 = min(oy + cell, s.h)
+      for y in oy ..< y1:
+        for x in ox ..< x1:
+          let i = (y * s.w + x) * 4
+          let a = int(s.pixels[i + 3])
+          ar += int(s.pixels[i]) * a
+          ag += int(s.pixels[i + 1]) * a
+          ab += int(s.pixels[i + 2]) * a
+          aa += a
+          inc n
+      var r, g, b: uint8
+      if aa > 0:
+        let h = aa div 2
+        r = uint8((ar + h) div aa)
+        g = uint8((ag + h) div aa)
+        b = uint8((ab + h) div aa)
+      else:
+        r = 0
+        g = 0
+        b = 0
+      let a = uint8((aa + n div 2) div n)
+      for y in oy ..< y1:
+        for x in ox ..< x1:
+          let i = (y * s.w + x) * 4
+          s.pixels[i] = r
+          s.pixels[i + 1] = g
+          s.pixels[i + 2] = b
+          s.pixels[i + 3] = a

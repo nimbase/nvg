@@ -51,6 +51,8 @@ const
   MSlotPatternBilinear* = 9
   MSlotShade* = 10
   MSlotShadeMulti* = 11
+  MSlotUnsharp* = 12
+  MSlotMosaic* = 13
 
 const solidMsl* = """
 #include <metal_stdlib>
@@ -780,6 +782,77 @@ type BlurParams* = object
   ## Must match MSL `BlurP` layout (4 bytes).
   radius*: cint
 
+const fxMsl* = """
+#include <metal_stdlib>
+using namespace metal;
+// Unsharp mask mirroring scalar `unsharpMask`: premultiplied
+// `original + amount * (original - blurred)`, divided back out by the
+// original alpha. `orig` (buffer 4) is the pre-blur copy the caller
+// stashed via `nvgmtl_copy`; `io` holds the blurred image and receives
+// the result. CPU uses float64 while this uses float32, so the pair
+// agrees within 2 LSB.
+struct SharpP { float amount; };
+kernel void unsharp(device uchar4 *io [[buffer(0)]],
+                    constant SharpP &u [[buffer(1)]],
+                    constant uint2 &dims [[buffer(2)]],
+                    device uchar4 *orig [[buffer(4)]],
+                    uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= dims.x || gid.y >= dims.y) return;
+  uint i = gid.y * dims.x + gid.x;
+  uchar4 o = orig[i];
+  uchar4 b = io[i];
+  if (o.a == 0u) {
+    io[i] = uchar4(0, 0, 0, 0);
+    return;
+  }
+  float oa = float(o.a);
+  float3 op = float3(o.r, o.g, o.b) * oa;
+  float3 bp = float3(b.r, b.g, b.b) * float(b.a);
+  float3 sp = op + u.amount * (op - bp);
+  float3 c = sp / oa;
+  io[i] = uchar4(uchar3(saturate(c * (1.0 / 255.0)) * 255.0 + 0.5),
+                 o.a);
+}
+// Mosaic/pixelation mirroring scalar `mosaic`: each cell averages its
+// available pixels premultiplied (partial cells at the edges), integer
+// round-half-up throughout, so output is byte-identical to the CPU.
+// Reads pixels, writes aux; the caller copies aux back to pixels.
+struct MosP { int cell; };
+kernel void mosaic_avg(device uchar4 *src [[buffer(0)]],
+                       constant MosP &u [[buffer(1)]],
+                       constant uint2 &dims [[buffer(2)]],
+                       device uchar4 *tmp [[buffer(3)]],
+                       uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= dims.x || gid.y >= dims.y) return;
+  int c = u.cell;
+  int ox = (int(gid.x) / c) * c;
+  int oy = (int(gid.y) / c) * c;
+  uint3 accC = uint3(0);
+  uint accA = 0u;
+  uint n = 0u;
+  for (int y = oy; y < oy + c && y < int(dims.y); y++) {
+    for (int x = ox; x < ox + c && x < int(dims.x); x++) {
+      uchar4 t = src[uint(y) * dims.x + uint(x)];
+      accC += uint3(t.r, t.g, t.b) * uint(t.a);
+      accA += uint(t.a);
+      n++;
+    }
+  }
+  uint3 rgb = accA > 0u ? (accC + accA / 2u) / accA : uint3(0);
+  uint a = (accA + n / 2u) / n;
+  tmp[gid.y * dims.x + gid.x] =
+      uchar4(uchar3(rgb), uchar(a));
+}
+"""
+
+type MosParams* = object
+  ## Must match MSL `MosP` layout (4 bytes).
+  cell*: cint
+
+type SharpParams* = object
+  ## Must match MSL `SharpP` layout (4 bytes).
+  amount*: cfloat
+
 const patternBilinearMsl* = """
 #include <metal_stdlib>
 using namespace metal;
@@ -850,6 +923,8 @@ static:
   doAssert sizeof(MultiParams) == 208
   doAssert sizeof(PatternParams) == 52
   doAssert sizeof(BlurParams) == 4
+  doAssert sizeof(MosParams) == 4
+  doAssert sizeof(SharpParams) == 4
 
 when defined(macosx):
   proc nvgmtl_device_count(): cint {.importc.}
@@ -861,6 +936,7 @@ when defined(macosx):
       paramslen: cint) {.importc.}
   proc nvgmtl_upload(p: pointer, slot: cint,
       src: ptr uint8) {.importc.}
+  proc nvgmtl_copy(p: pointer, dstSlot, srcSlot: cint) {.importc.}
   proc nvgmtl_pattern(p: pointer, px: ptr uint8, w,
       h: cint): cint {.importc.}
   proc nvgmtl_readback(p: pointer, slot: cint,
@@ -906,6 +982,8 @@ proc newMetalCtx*(w, h: int): MetalCtx =
       result.buildSlot(MSlotBlurV, blurMsl, "blur_v")
       result.buildSlot(MSlotPatternBilinear, patternBilinearMsl,
         "fill_pattern_bilinear")
+      result.buildSlot(MSlotUnsharp, fxMsl, "unsharp")
+      result.buildSlot(MSlotMosaic, fxMsl, "mosaic_avg")
     except IOError:
       nvgmtl_destroy(p)
       result.p = nil
@@ -1072,6 +1150,28 @@ proc gaussianBlur*(ctx: MetalCtx, sigma: float64, boxes = 3) =
   when defined(macosx):
     for w in boxWidthsForSigma(sigma, boxes):
       ctx.boxBlur((w - 1) div 2)
+
+proc unsharpMask*(ctx: MetalCtx, radius: int, amount: float64) =
+  ## Unsharp mask mirroring scalar `unsharpMask`: stashes the original
+  ## in spare slot 2, runs the box blur, then combines. Float32 math,
+  ## so the pair agrees within 2 LSB. Non-positive radius or amount
+  ## is a no-op.
+  when defined(macosx):
+    if radius <= 0 or amount <= 0.0: return
+    nvgmtl_copy(ctx.p, 2, 0)
+    ctx.boxBlur(radius)
+    var u = SharpParams(amount: cfloat(amount))
+    nvgmtl_fill(ctx.p, cint(MSlotUnsharp), addr u, cint(sizeof(u)))
+
+proc mosaic*(ctx: MetalCtx, cell: int) =
+  ## Mosaic mirroring scalar `mosaic`: averages into aux, then copies
+  ## back to pixels. Integer math, so byte-identical to the CPU.
+  ## Cells of size 1 or less are a no-op.
+  when defined(macosx):
+    if cell <= 1: return
+    var u = MosParams(cell: cint(cell))
+    nvgmtl_fill(ctx.p, cint(MSlotMosaic), addr u, cint(sizeof(u)))
+    nvgmtl_copy(ctx.p, 0, 1)
 
 proc compBlend*(ctx: MetalCtx, op: CompOp, r, g, b, a,
     cov: float64) =

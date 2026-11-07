@@ -2,7 +2,7 @@
 // work when the host build does not enable ARC.
 // NOTE: Nim only tracks this file's mtime for rebuilds, not the header's;
 // touch this file after changing metal_bridge.h (e.g. NVGMTL_SLOTS).
-// Slot count: keep in sync with MSlot* in nvg/metal.nim (12 slots).
+// Slot count: keep in sync with MSlot* in nvg/metal.nim (14 slots).
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
 #include "metal_bridge.h"
@@ -118,9 +118,11 @@ void nvgmtl_fill(void *p, int slot, const void *params, int paramslen) {
       [ce setBytes:params length:(NSUInteger)paramslen atIndex:1];
     [ce setBytes:dims length:sizeof(dims) atIndex:2];
     // Aux doubles as full-size byte scratch (e.g. the blur passes
-    // ping-pong RGBA8 through it); kernels that ignore buffer(3)
+    // ping-pong RGBA8 through it); bufs[2] is spare (e.g. unsharp
+    // keeps the original there). Kernels that ignore a binding
     // simply never declare it.
     [ce setBuffer:c->bufs[1] offset:0 atIndex:3];
+    [ce setBuffer:c->bufs[2] offset:0 atIndex:4];
     [ce setTexture:c->pat atIndex:0];
     NSUInteger tx = (NSUInteger)c->w < 16 ? (NSUInteger)c->w : 16;
     NSUInteger ty = (NSUInteger)c->h < 16 ? (NSUInteger)c->h : 16;
@@ -150,6 +152,23 @@ int nvgmtl_pattern(void *p, const unsigned char *px, int w, int h) {
     c->pat = [t retain];
     [t release];
     return 0;
+  }
+}
+
+void nvgmtl_copy(void *p, int dstSlot, int srcSlot) {
+  @autoreleasepool {
+    NvgMtlCtx *c = (NvgMtlCtx *)p;
+    if (c == NULL) return;
+    if (dstSlot < 0 || dstSlot >= NVGMTL_NBUFS) return;
+    if (srcSlot < 0 || srcSlot >= NVGMTL_NBUFS) return;
+    id<MTLCommandBuffer> cb = [c->queue commandBuffer];
+    id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
+    [bl copyFromBuffer:c->bufs[srcSlot] sourceOffset:0
+        toBuffer:c->bufs[dstSlot] destinationOffset:0
+        size:(NSUInteger)(c->w * c->h * 4)];
+    [bl endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
   }
 }
 
