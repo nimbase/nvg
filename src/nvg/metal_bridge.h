@@ -12,7 +12,7 @@ extern "C" {
 #endif
 
 // Pipeline slots (index into the context's pipeline table).
-#define NVGMTL_SLOTS 7
+#define NVGMTL_SLOTS 8
 
 // Buffer slots: 0 = pixels (RGBA8 bytes), 1 = aux (float32 coverage).
 #define NVGMTL_NBUFS 2
@@ -32,6 +32,11 @@ int nvgmtl_build(void *ctx, int slot, const char *src, int srclen,
 // Dispatch `slot` over w*h threads; `params` (paramslen bytes, may be
 // NULL with 0) is visible as buffer(1), dims as buffer(2).
 void nvgmtl_fill(void *ctx, int slot, const void *params, int paramslen);
+
+// Create/replace the pattern texture from straight RGBA8 bytes
+// (Shared storage, CPU-uploaded; GPU texture reads are the tested
+// path, GPU texture writes are not used). 0 on success.
+int nvgmtl_pattern(void *ctx, const unsigned char *px, int w, int h);
 
 // Copy a full w*h*4-byte image into buffer `slot` (0 pixels, 1 aux).
 // No-op on NULL or bad slot.

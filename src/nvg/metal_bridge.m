@@ -13,6 +13,7 @@
   id<MTLCommandQueue> queue;
   id<MTLComputePipelineState> pipes[NVGMTL_SLOTS];
   id<MTLBuffer> bufs[NVGMTL_NBUFS];
+  id<MTLTexture> pat;
   int w;
   int h;
 }
@@ -37,6 +38,7 @@ void *nvgmtl_create(int w, int h) {
     c->queue = [[c->dev newCommandQueue] retain];
     for (int i = 0; i < NVGMTL_SLOTS; i++) c->pipes[i] = nil;
     for (int i = 0; i < NVGMTL_NBUFS; i++) c->bufs[i] = nil;
+    c->pat = nil;
     for (int i = 0; i < NVGMTL_NBUFS; i++) {
       c->bufs[i] = [[c->dev newBufferWithLength:(NSUInteger)(w * h * 4)
                                         options:MTLResourceStorageModeShared] retain];
@@ -59,6 +61,7 @@ void nvgmtl_destroy(void *p) {
     [c->queue release];
     for (int i = 0; i < NVGMTL_SLOTS; i++) [c->pipes[i] release];
     for (int i = 0; i < NVGMTL_NBUFS; i++) [c->bufs[i] release];
+    [c->pat release];
     [c release];
   }
 }
@@ -114,6 +117,7 @@ void nvgmtl_fill(void *p, int slot, const void *params, int paramslen) {
       [ce setBytes:params length:(NSUInteger)paramslen atIndex:1];
     [ce setBytes:dims length:sizeof(dims) atIndex:2];
     [ce setBuffer:c->bufs[1] offset:0 atIndex:3];
+    [ce setTexture:c->pat atIndex:0];
     NSUInteger tx = (NSUInteger)c->w < 16 ? (NSUInteger)c->w : 16;
     NSUInteger ty = (NSUInteger)c->h < 16 ? (NSUInteger)c->h : 16;
     [ce dispatchThreads:MTLSizeMake((NSUInteger)c->w, (NSUInteger)c->h, 1)
@@ -121,6 +125,27 @@ void nvgmtl_fill(void *p, int slot, const void *params, int paramslen) {
     [ce endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
+  }
+}
+
+int nvgmtl_pattern(void *p, const unsigned char *px, int w, int h) {
+  @autoreleasepool {
+    NvgMtlCtx *c = (NvgMtlCtx *)p;
+    if (c == NULL || px == NULL || w <= 0 || h <= 0) return -1;
+    MTLTextureDescriptor *td =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                           width:w height:h
+                                                        mipmapped:NO];
+    td.usage = MTLTextureUsageShaderRead;
+    td.storageMode = MTLStorageModeShared;
+    id<MTLTexture> t = [c->dev newTextureWithDescriptor:td];
+    if (t == nil) return -2;
+    MTLRegion rg = MTLRegionMake2D(0, 0, w, h);
+    [t replaceRegion:rg mipmapLevel:0 withBytes:px bytesPerRow:w * 4];
+    [c->pat release];
+    c->pat = [t retain];
+    [t release];
+    return 0;
   }
 }
 

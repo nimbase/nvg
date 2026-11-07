@@ -1,10 +1,17 @@
-## Metal GPU backend (M0-M1): compute-shader fills.
+## Metal GPU backend (M0-M6): compute-shader fills and composites.
 ##
 ## Local-test path only. A `MetalCtx` owns a Shared `MTLBuffer` of
 ## `w*h` straight RGBA8 bytes in `Surface` layout (row-major, top-down).
-## `fillSolid` / `fillLinear` run one MSL compute kernel each over the
-## buffer; `readback` copies it to CPU for comparison against the scalar
-## oracle. Paints assume an identity map for now (map support later).
+## Paint/composite kernels run over the buffer; `readback` copies it to
+## CPU for comparison against the scalar oracle. Paints assume an
+## identity map for now (map support later).
+##
+## Layout rule for new kernels: MSL follows C++ alignment, so every
+## `float4` member sits at a 16-byte offset and every `float2`/`uint2`
+## at an 8-byte offset; the Nim mirror struct must place fields at the
+## same offsets (the `sizeof` asserts catch size but NOT field drift, so
+## keep explicit `_pad` members — see `BoxP`/`PatP`). A misaligned
+## `float4` silently reads zeros (M6 lesson).
 ##
 ## Environment notes (AMD RX 570, macOS Sonoma), verified by throwaway
 ## ObjC probes before this file existed:
@@ -23,6 +30,7 @@ when defined(macosx):
   {.passL: "-framework Metal -framework Foundation".}
 
 import ./types
+import ./images
 
 type MetalCtx* = ref object
   p: pointer
@@ -36,6 +44,7 @@ const
   MSlotBox* = 4
   MSlotBlend* = 5
   MSlotShadeSolidOver* = 6
+  MSlotPattern* = 7
 
 const solidMsl* = """
 #include <metal_stdlib>
@@ -326,12 +335,66 @@ type ShadeParams* = object
   col*: array[4, cfloat]
   alpha*: cfloat
 
+const patternMsl* = """
+#include <metal_stdlib>
+using namespace metal;
+// Nearest-filter pattern fill mirroring scalar `sample` for pkPattern
+// with ifNearest at pixel centers, identity map. texel fetch via
+// texture.read needs no sampler. flags bit 0 = repeatX, 1 = repeatY,
+// 2 = flipY.
+struct PatP {
+  float2 o; float2 e; float4 tint; float ang; float _p0; uint2 img;
+  uint flags;
+};
+kernel void fill_pattern_nearest(device uchar4 *out [[buffer(0)]],
+                                 constant PatP &u [[buffer(1)]],
+                                 constant uint2 &dims [[buffer(2)]],
+                                 texture2d<float, access::read> img [[texture(0)]],
+                                 uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= dims.x || gid.y >= dims.y) return;
+  float2 q = float2(gid) + 0.5 - u.o;
+  float ca = cos(u.ang);
+  float sa = sin(u.ang);
+  float uu = (ca * q.x + sa * q.y) / u.e.x;
+  float vv = (-sa * q.x + ca * q.y) / u.e.y;
+  if ((u.flags & 4u) != 0u) vv = 1.0 - vv;
+  int W = int(u.img.x);
+  int H = int(u.img.y);
+  int xi = int(floor(uu * float(W)));
+  int yi = int(floor(vv * float(H)));
+  if ((u.flags & 1u) != 0u) {
+    xi = ((xi % W) + W) % W;
+  } else {
+    xi = clamp(xi, 0, W - 1);
+  }
+  if ((u.flags & 2u) != 0u) {
+    yi = ((yi % H) + H) % H;
+  } else {
+    yi = clamp(yi, 0, H - 1);
+  }
+  float4 t = img.read(uint2(uint(xi), uint(yi)));
+  float4 c = float4(t.rgb * u.tint.rgb, t.a * u.tint.a);
+  out[gid.y * dims.x + gid.x] = uchar4(saturate(c) * 255.0 + 0.5);
+}
+"""
+
+type PatternParams* = object
+  ## Must match MSL `PatP` layout: o, e, tint (16-aligned), ang, pad,
+  ## img, flags (52 bytes used; MSL pads the struct to 64).
+  ox*, oy*, ex*, ey*: cfloat
+  tint*: array[4, cfloat]
+  angle*: cfloat
+  pad*: cfloat
+  imgW*, imgH*: cuint
+  flags*: cuint
+
 static:
   doAssert sizeof(LinearParams) == 48
   doAssert sizeof(RadialParams) == 48
   doAssert sizeof(BoxParams) == 64
   doAssert sizeof(BlendParams) == 24
   doAssert sizeof(ShadeParams) == 20
+  doAssert sizeof(PatternParams) == 52
 
 when defined(macosx):
   proc nvgmtl_device_count(): cint {.importc.}
@@ -343,6 +406,8 @@ when defined(macosx):
       paramslen: cint) {.importc.}
   proc nvgmtl_upload(p: pointer, slot: cint,
       src: ptr uint8) {.importc.}
+  proc nvgmtl_pattern(p: pointer, px: ptr uint8, w,
+      h: cint): cint {.importc.}
   proc nvgmtl_readback(p: pointer, slot: cint,
       dst: ptr uint8) {.importc.}
   proc nvgmtl_device_name(p: pointer, dst: cstring,
@@ -381,6 +446,7 @@ proc newMetalCtx*(w, h: int): MetalCtx =
       result.buildSlot(MSlotBlend, blendMsl, "comp_blend")
       result.buildSlot(MSlotShadeSolidOver, shadeSolidOverMsl,
         "shade_solid_over")
+      result.buildSlot(MSlotPattern, patternMsl, "fill_pattern_nearest")
     except IOError:
       nvgmtl_destroy(p)
       result.p = nil
@@ -450,6 +516,39 @@ proc shadeSolidOver*(ctx: MetalCtx, col: Color, alpha: float64) =
       alpha: cfloat(alpha))
     nvgmtl_fill(ctx.p, cint(MSlotShadeSolidOver), addr u,
       cint(sizeof(u)))
+
+proc setPattern*(ctx: MetalCtx, img: Image) =
+  ## Upload `img` pixels as the pattern texture. Nearest-filter images
+  ## only for now (bilinear sampling arrives with its kernel).
+  when defined(macosx):
+    if img == nil or img.w <= 0 or img.h <= 0:
+      raise newException(ValueError, "pattern image needs size")
+    if img.pixels.len != img.w * img.h * 4:
+      raise newException(ValueError, "pattern pixels size mismatch")
+    let rc = nvgmtl_pattern(ctx.p, unsafeAddr img.pixels[0],
+      cint(img.w), cint(img.h))
+    if rc != 0:
+      raise newException(IOError, "pattern upload failed: " & $rc)
+
+proc fillPatternNearest*(ctx: MetalCtx, ox, oy, ex, ey,
+    angle: float64, tint: Color, img: Image) =
+  ## Nearest pattern fill mirroring scalar `sample` at pixel centers,
+  ## identity map. Requires `setPattern(img)` first; `img` supplies
+  ## size and flags.
+  when defined(macosx):
+    if abs(ex) < 1e-12 or abs(ey) < 1e-12:
+      raise newException(ValueError, "pattern extent needs size")
+    var flags = 0u32
+    if ifRepeatX in img.flags: flags = flags or 1u32
+    if ifRepeatY in img.flags: flags = flags or 2u32
+    if ifFlipY in img.flags: flags = flags or 4u32
+    var u = PatternParams(ox: cfloat(ox), oy: cfloat(oy),
+      ex: cfloat(ex), ey: cfloat(ey),
+      tint: [cfloat(tint.r), cfloat(tint.g), cfloat(tint.b),
+        cfloat(tint.a)],
+      angle: cfloat(angle), pad: cfloat(0),
+      imgW: cuint(img.w), imgH: cuint(img.h), flags: cuint(flags))
+    nvgmtl_fill(ctx.p, cint(MSlotPattern), addr u, cint(sizeof(u)))
 
 proc compBlend*(ctx: MetalCtx, op: CompOp, r, g, b, a,
     cov: float64) =
