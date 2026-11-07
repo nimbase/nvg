@@ -112,11 +112,12 @@ when defined(nvgJit):
               b.covJit, aa, rule, op)
             return
       of pkBox:
-        let fn = b.kern.getBox(op)
-        if fn != nil:
-          fillBoxJit(surf, polys, paint, alpha, clip, fn,
-            b.covJit, aa, rule, op)
-          return
+        if isBasicTwoStop(paint.box.stops):
+          let fn = b.kern.getBox(op)
+          if fn != nil:
+            fillBoxJit(surf, polys, paint, alpha, clip, fn,
+              b.covJit, aa, rule, op)
+            return
       of pkPattern:
         if patternRunnable(paint):
           if paint.pattern.img != nil and
@@ -178,12 +179,13 @@ when defined(nvgJit):
               b.covJit, aa, frEvenOdd, op)
             return
       of pkBox:
-        let fn = b.kern.getBox(op)
-        if fn != nil:
-          let expanded = expandStroke(polys, width, cap, join, miterLimit)
-          fillBoxJit(surf, expanded, paint, alpha, clip, fn,
-            b.covJit, aa, frEvenOdd, op)
-          return
+        if isBasicTwoStop(paint.box.stops):
+          let fn = b.kern.getBox(op)
+          if fn != nil:
+            let expanded = expandStroke(polys, width, cap, join, miterLimit)
+            fillBoxJit(surf, expanded, paint, alpha, clip, fn,
+              b.covJit, aa, frEvenOdd, op)
+            return
       of pkPattern:
         if patternRunnable(paint):
           if paint.pattern.img != nil and

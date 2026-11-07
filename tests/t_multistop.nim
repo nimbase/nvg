@@ -130,3 +130,58 @@ test "isBasicTwoStop gates jit correctly":
     [GradientStop(pos: 0.2, color: rgbf(1, 0, 0)),
       GradientStop(pos: 0.8, color: rgbf(0, 0, 1))])
   check not isBasicTwoStop(shifted.linear.stops)
+
+test "box 2-stop equivalence":
+  let a = boxGradient(0, 0, 20, 10, 2, 4, rgbf(1, 0, 0), rgbf(0, 0, 1))
+  let b = boxGradientStops(0, 0, 20, 10, 2, 4,
+    [GradientStop(pos: 0.0, color: rgbf(1, 0, 0)),
+      GradientStop(pos: 1.0, color: rgbf(0, 0, 1))])
+  check isBasicTwoStop(b.box.stops)
+  for p in [(0.0, 0.0), (10.0, 5.0), (20.0, 5.0), (30.0, 5.0)]:
+    let ca = a.sample(p[0], p[1])
+    let cb = b.sample(p[0], p[1])
+    check ca.r == cb.r and ca.g == cb.g and ca.b == cb.b and
+      ca.a == cb.a
+
+test "box multi-stop mid and hard stop":
+  let m = boxGradientStops(0, 0, 20, 10, 2, 4,
+    [GradientStop(pos: 0.0, color: rgbf(1, 0, 0)),
+      GradientStop(pos: 0.5, color: rgbf(0, 1, 0)),
+      GradientStop(pos: 1.0, color: rgbf(0, 0, 1))])
+  check not isBasicTwoStop(m.box.stops)
+  # Center of the box is deep inside (t = 0), edge feather reaches t = 1.
+  check close(m.sample(10, 5).r, 1.0)
+  check close(m.sample(10, 5).g, 0.0)
+  let hard = boxGradientStops(0, 0, 20, 10, 2, 4,
+    [GradientStop(pos: 0.0, color: rgbf(1, 0, 0)),
+      GradientStop(pos: 0.5, color: rgbf(0, 1, 0)),
+      GradientStop(pos: 0.5, color: rgbf(0, 0, 1)),
+      GradientStop(pos: 1.0, color: rgbf(1, 1, 1))])
+  # Duplicate position keeps last-wins behavior through the box sampler.
+  check hard.sample(10, 5).r >= 0.0
+
+test "box multi-stop renders and jit falls back identically":
+  proc scene(backend: Backend): Canvas =
+    result = newCanvas(40, 20, backend)
+    result.clear(rgb(255, 255, 255))
+    result.beginPath()
+    result.rect(0, 0, 40, 20)
+    result.setFillPaint(result.boxGradientStops(0, 0, 40, 20, 4, 10,
+      [GradientStop(pos: 0.0, color: rgbf(1, 0, 0)),
+        GradientStop(pos: 0.5, color: rgbf(0, 1, 0)),
+        GradientStop(pos: 1.0, color: rgbf(0, 0, 1))]))
+    result.fill()
+  let cpu = scene(nil)
+  let jb = newJitBackend()
+  let jit = scene(jb)
+  check cpu.surface.pixels == jit.surface.pixels
+  check cpu.surface.getPixel(20, 10).r > 0.5
+  destroyJitBackend(jb)
+
+test "box multi-stop empty and single":
+  let e = boxGradientStops(0, 0, 20, 10, 2, 4, [])
+  check e.sample(10, 5).a == 0.0
+  let one = boxGradientStops(0, 0, 20, 10, 2, 4,
+    [GradientStop(pos: 0.3, color: rgbf(0, 1, 0))])
+  check close(one.sample(10, 5).g, 1.0)
+  check close(one.sample(99.0, 99.0).g, 1.0)

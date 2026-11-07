@@ -83,3 +83,20 @@ test "mismatched combine sizes return a copy of a":
   let b = solidSurf(2, 2, rgbaf(1, 1, 1, 1.0))
   let c = maskCombine(a, b, mIntersect)
   check c.pixels == a.pixels
+
+test "difference of two rects is the symmetric remainder":
+  proc rectMask(x0, y0, x1, y1: int): Surface =
+    result = newSurface(10, 10)
+    result.clear(rgbaf(0, 0, 0, 0))
+    for y in y0 ..< y1:
+      for x in x0 ..< x1:
+        result.setPixel(x, y, rgbf(1, 1, 1))
+  let d = maskCombine(rectMask(0, 0, 6, 10), rectMask(4, 0, 10, 10),
+    mDifference)
+  check alphaAt(d, 1, 5) == 255
+  check alphaAt(d, 8, 5) == 255
+  check alphaAt(d, 5, 5) == 0
+  let same = maskCombine(rectMask(0, 0, 6, 10), rectMask(0, 0, 6, 10),
+    mDifference)
+  check alphaAt(same, 1, 5) == 0
+  check alphaAt(same, 8, 5) == 0

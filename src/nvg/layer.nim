@@ -18,6 +18,7 @@ type
     mAdd        ## Union of coverage (`max`).
     mSubtract   ## Cut `b` out of `a` (`a*(1-b)`).
     mIntersect  ## Overlap (`min`).
+    mDifference ## Symmetric difference (`abs(a-b)`).
 
 proc newLayer*(w, h: int): Surface =
   ## Transparent scratch surface for offscreen rendering.
@@ -64,6 +65,7 @@ proc maskCombine*(a, b: Surface, op: MaskOp): Surface =
       of mAdd: max(aa, ba)
       of mSubtract: aa * (1.0 - ba)
       of mIntersect: min(aa, ba)
+      of mDifference: abs(aa - ba)
     result.pixels[i * 4] = 255
     result.pixels[i * 4 + 1] = 255
     result.pixels[i * 4 + 2] = 255

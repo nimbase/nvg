@@ -56,6 +56,9 @@ type
     radius*: float64
     feather*: float64
     icol*, ocol*: Color
+    stops*: seq[GradientStop]
+      ## Normalized stop list, same semantics as linear and radial.
+      ## The 2-stop constructor stores `[0: icol, 1: ocol]`.
 
   Pattern* = object
     img*: Image
@@ -200,7 +203,19 @@ proc boxGradient*(cx, cy, ex, ey, radius, feather: float64, icol,
     ocol: Color): Paint =
   Paint(map: identity(), kind: pkBox,
     box: BoxGrad(cx: cx, cy: cy, ex: ex, ey: ey, radius: radius,
-      feather: feather, icol: icol, ocol: ocol))
+      feather: feather, icol: icol, ocol: ocol,
+      stops: @[GradientStop(pos: 0.0, color: icol),
+        GradientStop(pos: 1.0, color: ocol)]))
+
+proc boxGradientStops*(cx, cy, ex, ey, radius, feather: float64,
+    stops: openArray[GradientStop]): Paint =
+  ## Multi-stop box gradient (same stop semantics as linear).
+  let ns = normalizeStops(stops)
+  let ic = if ns.len > 0: ns[0].color else: rgbaf(0, 0, 0, 0)
+  let oc = if ns.len > 0: ns[^1].color else: rgbaf(0, 0, 0, 0)
+  Paint(map: identity(), kind: pkBox,
+    box: BoxGrad(cx: cx, cy: cy, ex: ex, ey: ey, radius: radius,
+      feather: feather, icol: ic, ocol: oc, stops: ns))
 
 proc imagePattern*(img: Image, ox, oy, ex, ey, angle: float64,
     tint = rgbf(1, 1, 1)): Paint =
@@ -248,7 +263,10 @@ proc sample*(p: Paint, x, y: float64): Color =
     let sd = sdRoundBox(q.x - p.box.cx, q.y - p.box.cy, p.box.ex,
       p.box.ey, p.box.radius)
     let f = max(1.0, p.box.feather)
-    lerpColor(p.box.icol, p.box.ocol, (sd + f * 0.5) / f)
+    if p.box.stops.len > 0:
+      sampleStops(p.box.stops, (sd + f * 0.5) / f)
+    else:
+      lerpColor(p.box.icol, p.box.ocol, (sd + f * 0.5) / f)
   of pkPattern:
     if p.pattern.img == nil or abs(p.pattern.ex) < 1e-12 or
         abs(p.pattern.ey) < 1e-12:

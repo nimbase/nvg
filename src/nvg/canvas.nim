@@ -296,6 +296,13 @@ proc boxGradient*(c: Canvas, x, y, w, h, r, f: float64, icol,
   boxGradient(x + w * 0.5, y + h * 0.5, w * 0.5, h * 0.5, r, f, icol,
     ocol).withMap(c.captureMap())
 
+proc boxGradientStops*(c: Canvas, x, y, w, h, r, f: float64,
+    stops: openArray[GradientStop]): Paint =
+  ## Multi-stop box gradient in user space (see `paint.sampleStops`
+  ## for interpolation/clamping). Transform baked now, like `boxGradient`.
+  boxGradientStops(x + w * 0.5, y + h * 0.5, w * 0.5, h * 0.5, r, f,
+    stops).withMap(c.captureMap())
+
 # --- Images ---
 
 proc createImageRGBA*(c: Canvas, w, h: int, flags: set[ImageFlag],
