@@ -637,7 +637,28 @@ when defined(amd64) or defined(arm64) or defined(aarch64):
     check totalDiff == 0
     kern.destroy()
 
-  test "linear generic-op kernel matches sample+blend":
+  test "non-separable kernels match on extreme backdrops":
+    # Pins the spilled W3C Lum immediates: white forces lumCb to ~1.0, so
+    # even a +0.002 weight error pushes x > 1 into the ClipColor 0/0
+    # singularity (returned black on ARM); primaries pin each weight.
+    let kernNs = JitKernels()
+    const nsOps = [coHue, coSaturation, coColor, coLuminosity]
+    const dsts = [@[255u8, 255u8, 255u8, 255u8], @[0u8, 0u8, 0u8, 255u8],
+      @[255u8, 0u8, 0u8, 255u8], @[0u8, 255u8, 0u8, 255u8],
+      @[0u8, 0u8, 255u8, 255u8], @[118u8, 162u8, 253u8, 132u8]]
+    for op in nsOps:
+      let fn = kernNs.getSolid(op)
+      check fn != nil
+      for dst in dsts:
+        var got = dst
+        var cv = [1.0]
+        var ctx = bakeSolidCtx(rgbaf(1, 0, 0, 1), 1.0)
+        fn(addr got[0], addr cv[0], int64(1), addr ctx)
+        var surf = newSurface(1, 1)
+        surf.pixels = dst
+        surf.blendPixel(0, 0, rgbaf(1, 0, 0, 1), 1.0, op)
+        check got == surf.pixels
+    kernNs.destroy()
     # Head+tail integration for one gradient shape; other shapes get
     # class coverage (Porter-Duff, blend, clearing) in the scene tests
     # above plus the solid sweep proving every tail branch.
