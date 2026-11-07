@@ -11,6 +11,8 @@ import ./surface
 import ./raster
 when defined(nvgJit):
   import ./jit
+when defined(nvgMetal):
+  import ./metal
 
 export types
 when defined(nvgJit):
@@ -37,6 +39,77 @@ when defined(nvgJit):
       covJit*: seq[float64]
 
 proc newCpuBackend*(): CpuBackend = CpuBackend()
+
+when defined(nvgMetal):
+  type MetalBackend* = ref object of Backend
+    ## GPU backend (compute path): geometry and coverage stay on the
+    ## CPU using the exact scalar code (`buildEdges`, `scanRowSpans`,
+    ## `coverageEdges`), so antialiasing matches by construction; paint
+    ## evaluation and compositing run in MSL over a shared buffer.
+    ## M5 shades solid x sourceOver on the GPU and falls back to the
+    ## scalar rasterizer for everything else, so output stays identical
+    ## to `CpuBackend`. Opt-in via
+    ## `newCanvas(w, h, newMetalBackend(w, h))`; call `close` when done.
+    ctx*: MetalCtx
+    covBuf*: seq[float32]
+
+  proc newMetalBackend*(w, h: int): MetalBackend =
+    MetalBackend(ctx: newMetalCtx(w, h),
+      covBuf: newSeq[float32](w * h))
+
+  proc close*(b: MetalBackend) =
+    b.ctx.close()
+
+  proc shadeFill(b: MetalBackend, surf: Surface, polys: seq[SubPoly],
+      paint: Paint, alpha: float64, clip: Clip, aa: bool,
+      rule: FillRule) =
+    ## Scalar `fillPolys` early-outs and coverage loop, GPU shade.
+    ## Falls back to scalar on size mismatch or non-solid paint.
+    if paint.kind != pkSolid:
+      fillPolys(surf, polys, paint, alpha, clip, aa, coSourceOver,
+        rule)
+      return
+    if polys.len == 0: return
+    let a = clamp01(alpha)
+    if a <= 0.0: return
+    if b.ctx.w != surf.w or b.ctx.h != surf.h or
+        b.covBuf.len != surf.w * surf.h:
+      fillPolys(surf, polys, paint, alpha, clip, aa, coSourceOver,
+        rule)
+      return
+    let edges = buildEdges(polys)
+    if edges.len == 0: return
+    let (x0, y0, x1, y1, ok) = fillBounds(polys, surf, clip)
+    if not ok: return
+    for i in 0 ..< b.covBuf.len: b.covBuf[i] = 0
+    let rowW = x1 - x0 + 1
+    var edgeMark = newSeq[bool](rowW)
+    var xs: seq[tuple[x: float64, dir: int]] = @[]
+    var spans: seq[tuple[a, b: float64]] = @[]
+    for y in y0 .. y1:
+      scanRowSpans(edges, x0, x1, y, edgeMark, xs, spans, rule)
+      for x in x0 .. x1:
+        let cx = float64(x) + 0.5
+        var inside = false
+        for sp in spans:
+          if cx >= sp.a and cx <= sp.b:
+            inside = true
+            break
+        let cov =
+          if not aa:
+            if inside: 1.0 else: 0.0
+          elif edgeMark[x - x0]:
+            coverageEdges(float64(x), float64(y), edges, rule)
+          elif inside:
+            1.0
+          else:
+            0.0
+        if cov > 0.0:
+          b.covBuf[y * surf.w + x] = float32(cov)
+    b.ctx.upload(surf.pixels)
+    b.ctx.uploadAux(b.covBuf)
+    b.ctx.shadeSolidOver(paint.solid, a)
+    surf.pixels = b.ctx.readback()
 
 when defined(nvgJit):
   proc newJitBackend*(): JitBackend =
@@ -221,4 +294,24 @@ when defined(nvgJit):
               return
     strokePolys(surf, polys, paint, width, cap, join, miterLimit, alpha,
       clip, aa, op)
+
+when defined(nvgMetal):
+  method fill*(b: MetalBackend, surf: Surface, polys: seq[SubPoly],
+      paint: Paint, alpha: float64, clip: Clip, aa = true,
+      op = coSourceOver, rule = frEvenOdd) =
+    if paint.kind != pkSolid or op != coSourceOver:
+      fillPolys(surf, polys, paint, alpha, clip, aa, op, rule)
+      return
+    b.shadeFill(surf, polys, paint, alpha, clip, aa, rule)
+
+  method stroke*(b: MetalBackend, surf: Surface, polys: seq[SubPoly],
+      paint: Paint, width: float64, cap: LineCap, join: LineJoin,
+      miterLimit: float64, alpha: float64, clip: Clip,
+      aa = true, op = coSourceOver) =
+    if paint.kind != pkSolid or op != coSourceOver:
+      strokePolys(surf, polys, paint, width, cap, join, miterLimit,
+        alpha, clip, aa, op)
+      return
+    let expanded = expandStroke(polys, width, cap, join, miterLimit)
+    b.shadeFill(surf, expanded, paint, alpha, clip, aa, frEvenOdd)
 

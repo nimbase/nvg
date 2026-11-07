@@ -12,7 +12,7 @@
   id<MTLDevice> dev;
   id<MTLCommandQueue> queue;
   id<MTLComputePipelineState> pipes[NVGMTL_SLOTS];
-  id<MTLBuffer> buf;
+  id<MTLBuffer> bufs[NVGMTL_NBUFS];
   int w;
   int h;
 }
@@ -36,11 +36,14 @@ void *nvgmtl_create(int w, int h) {
     c->dev = [[all objectAtIndex:0] retain];
     c->queue = [[c->dev newCommandQueue] retain];
     for (int i = 0; i < NVGMTL_SLOTS; i++) c->pipes[i] = nil;
-    c->buf = [[c->dev newBufferWithLength:(NSUInteger)(w * h * 4)
-                                 options:MTLResourceStorageModeShared] retain];
-    if (c->buf == nil) {
-      [c release];
-      return NULL;
+    for (int i = 0; i < NVGMTL_NBUFS; i++) c->bufs[i] = nil;
+    for (int i = 0; i < NVGMTL_NBUFS; i++) {
+      c->bufs[i] = [[c->dev newBufferWithLength:(NSUInteger)(w * h * 4)
+                                        options:MTLResourceStorageModeShared] retain];
+      if (c->bufs[i] == nil) {
+        [c release];
+        return NULL;
+      }
     }
     c->w = w;
     c->h = h;
@@ -55,7 +58,7 @@ void nvgmtl_destroy(void *p) {
     [c->dev release];
     [c->queue release];
     for (int i = 0; i < NVGMTL_SLOTS; i++) [c->pipes[i] release];
-    [c->buf release];
+    for (int i = 0; i < NVGMTL_NBUFS; i++) [c->bufs[i] release];
     [c release];
   }
 }
@@ -106,10 +109,11 @@ void nvgmtl_fill(void *p, int slot, const void *params, int paramslen) {
     id<MTLCommandBuffer> cb = [c->queue commandBuffer];
     id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
     [ce setComputePipelineState:c->pipes[slot]];
-    [ce setBuffer:c->buf offset:0 atIndex:0];
+    [ce setBuffer:c->bufs[0] offset:0 atIndex:0];
     if (params != NULL && paramslen > 0)
       [ce setBytes:params length:(NSUInteger)paramslen atIndex:1];
     [ce setBytes:dims length:sizeof(dims) atIndex:2];
+    [ce setBuffer:c->bufs[1] offset:0 atIndex:3];
     NSUInteger tx = (NSUInteger)c->w < 16 ? (NSUInteger)c->w : 16;
     NSUInteger ty = (NSUInteger)c->h < 16 ? (NSUInteger)c->h : 16;
     [ce dispatchThreads:MTLSizeMake((NSUInteger)c->w, (NSUInteger)c->h, 1)
@@ -120,16 +124,18 @@ void nvgmtl_fill(void *p, int slot, const void *params, int paramslen) {
   }
 }
 
-void nvgmtl_upload(void *p, const unsigned char *src) {
+void nvgmtl_upload(void *p, int slot, const unsigned char *src) {
   NvgMtlCtx *c = (NvgMtlCtx *)p;
   if (c == NULL || src == NULL) return;
-  memcpy([c->buf contents], src, (size_t)(c->w * c->h * 4));
+  if (slot < 0 || slot >= NVGMTL_NBUFS) return;
+  memcpy([c->bufs[slot] contents], src, (size_t)(c->w * c->h * 4));
 }
 
-void nvgmtl_readback(void *p, unsigned char *dst) {
+void nvgmtl_readback(void *p, int slot, unsigned char *dst) {
   NvgMtlCtx *c = (NvgMtlCtx *)p;
   if (c == NULL || dst == NULL) return;
-  memcpy(dst, [c->buf contents], (size_t)(c->w * c->h * 4));
+  if (slot < 0 || slot >= NVGMTL_NBUFS) return;
+  memcpy(dst, [c->bufs[slot] contents], (size_t)(c->w * c->h * 4));
 }
 
 int nvgmtl_device_name(void *p, char *dst, int cap) {

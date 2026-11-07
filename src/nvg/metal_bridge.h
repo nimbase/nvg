@@ -12,7 +12,10 @@ extern "C" {
 #endif
 
 // Pipeline slots (index into the context's pipeline table).
-#define NVGMTL_SLOTS 6
+#define NVGMTL_SLOTS 7
+
+// Buffer slots: 0 = pixels (RGBA8 bytes), 1 = aux (float32 coverage).
+#define NVGMTL_NBUFS 2
 
 // Number of Metal devices, or 0 when Metal is unavailable.
 int nvgmtl_device_count(void);
@@ -30,11 +33,13 @@ int nvgmtl_build(void *ctx, int slot, const char *src, int srclen,
 // NULL with 0) is visible as buffer(1), dims as buffer(2).
 void nvgmtl_fill(void *ctx, int slot, const void *params, int paramslen);
 
-// Copy w*h*4 bytes from src into the buffer. No-op on NULL.
-void nvgmtl_upload(void *ctx, const unsigned char *src);
+// Copy a full w*h*4-byte image into buffer `slot` (0 pixels, 1 aux).
+// No-op on NULL or bad slot.
+void nvgmtl_upload(void *ctx, int slot, const unsigned char *src);
 
-// Copy w*h*4 bytes into dst (must be large enough). No-op on NULL.
-void nvgmtl_readback(void *ctx, unsigned char *dst);
+// Copy buffer `slot` out into dst (must hold w*h*4 bytes).
+// No-op on NULL or bad slot.
+void nvgmtl_readback(void *ctx, int slot, unsigned char *dst);
 
 // Device name into dst (NUL-terminated, truncated to cap). Returns length.
 int nvgmtl_device_name(void *ctx, char *dst, int cap);

@@ -35,6 +35,7 @@ const
   MSlotRadial* = 3
   MSlotBox* = 4
   MSlotBlend* = 5
+  MSlotShadeSolidOver* = 6
 
 const solidMsl* = """
 #include <metal_stdlib>
@@ -287,17 +288,50 @@ kernel void comp_blend(device uchar4 *io [[buffer(0)]],
 }
 """
 
+const shadeSolidOverMsl* = """
+#include <metal_stdlib>
+using namespace metal;
+// Coverage-driven solid source-over: coverage arrives per pixel as
+// float32 in buffer(3) (exact k/16 steps, written by the CPU coverage
+// loop), so AA matches the scalar rasterizer by construction. Mirrors
+// scalar fillPolys with a solid paint: sa = clamp(col.a*alpha) * cov.
+struct ShadeP { float4 col; float alpha; };
+kernel void shade_solid_over(device uchar4 *io [[buffer(0)]],
+                             constant ShadeP &u [[buffer(1)]],
+                             constant uint2 &dims [[buffer(2)]],
+                             device float *cov [[buffer(3)]],
+                             uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= dims.x || gid.y >= dims.y) return;
+  uint i = gid.y * dims.x + gid.x;
+  float c = cov[i];
+  if (c <= 0.0) return;
+  float4 dd = float4(io[i]) * (1.0 / 255.0);
+  float sa = clamp(u.col.a * u.alpha, 0.0, 1.0) * clamp(c, 0.0, 1.0);
+  if (sa <= 0.0) return;
+  float inv = 1.0 - sa;
+  float3 rgb = u.col.rgb * sa + dd.rgb * inv;
+  float a = sa + dd.a * inv;
+  io[i] = uchar4(saturate(float4(rgb, a)) * 255.0 + 0.5);
+}
+"""
+
 type BlendParams* = object
   ## Must match MSL `BlendP` layout: col, op, cov (24 bytes).
   col*: array[4, cfloat]
   op*: cuint
   cov*: cfloat
 
+type ShadeParams* = object
+  ## Must match MSL `ShadeP` layout: col, alpha (20 bytes).
+  col*: array[4, cfloat]
+  alpha*: cfloat
+
 static:
   doAssert sizeof(LinearParams) == 48
   doAssert sizeof(RadialParams) == 48
   doAssert sizeof(BoxParams) == 64
   doAssert sizeof(BlendParams) == 24
+  doAssert sizeof(ShadeParams) == 20
 
 when defined(macosx):
   proc nvgmtl_device_count(): cint {.importc.}
@@ -307,8 +341,10 @@ when defined(macosx):
       srclen: cint, name: cstring, namelen: cint): cint {.importc.}
   proc nvgmtl_fill(p: pointer, slot: cint, params: pointer,
       paramslen: cint) {.importc.}
-  proc nvgmtl_upload(p: pointer, src: ptr uint8) {.importc.}
-  proc nvgmtl_readback(p: pointer, dst: ptr uint8) {.importc.}
+  proc nvgmtl_upload(p: pointer, slot: cint,
+      src: ptr uint8) {.importc.}
+  proc nvgmtl_readback(p: pointer, slot: cint,
+      dst: ptr uint8) {.importc.}
   proc nvgmtl_device_name(p: pointer, dst: cstring,
       cap: cint): cint {.importc.}
 
@@ -343,6 +379,8 @@ proc newMetalCtx*(w, h: int): MetalCtx =
       result.buildSlot(MSlotRadial, radialMsl, "fill_radial")
       result.buildSlot(MSlotBox, boxMsl, "fill_box")
       result.buildSlot(MSlotBlend, blendMsl, "comp_blend")
+      result.buildSlot(MSlotShadeSolidOver, shadeSolidOverMsl,
+        "shade_solid_over")
     except IOError:
       nvgmtl_destroy(p)
       result.p = nil
@@ -386,16 +424,32 @@ proc readback*(ctx: MetalCtx): seq[uint8] =
   when defined(macosx):
     result = newSeq[uint8](ctx.w * ctx.h * 4)
     if result.len > 0:
-      nvgmtl_readback(ctx.p, addr result[0])
+      nvgmtl_readback(ctx.p, 0, addr result[0])
   else:
     result = @[]
 
 proc upload*(ctx: MetalCtx, pixels: openArray[uint8]) =
-  ## Copy straight RGBA8 bytes into the buffer (Surface layout).
+  ## Copy straight RGBA8 bytes into the pixel buffer (Surface layout).
   when defined(macosx):
     if pixels.len != ctx.w * ctx.h * 4:
       raise newException(ValueError, "upload size mismatch")
-    nvgmtl_upload(ctx.p, unsafeAddr pixels[0])
+    nvgmtl_upload(ctx.p, 0, unsafeAddr pixels[0])
+
+proc uploadAux*(ctx: MetalCtx, cov: openArray[float32]) =
+  ## Copy per-pixel float32 coverage into the aux buffer.
+  when defined(macosx):
+    if cov.len != ctx.w * ctx.h:
+      raise newException(ValueError, "aux upload size mismatch")
+    nvgmtl_upload(ctx.p, 1, cast[ptr uint8](unsafeAddr cov[0]))
+
+proc shadeSolidOver*(ctx: MetalCtx, col: Color, alpha: float64) =
+  ## Coverage-driven solid source-over (see `shadeSolidOverMsl` docs).
+  when defined(macosx):
+    var u = ShadeParams(
+      col: [cfloat(col.r), cfloat(col.g), cfloat(col.b), cfloat(col.a)],
+      alpha: cfloat(alpha))
+    nvgmtl_fill(ctx.p, cint(MSlotShadeSolidOver), addr u,
+      cint(sizeof(u)))
 
 proc compBlend*(ctx: MetalCtx, op: CompOp, r, g, b, a,
     cov: float64) =

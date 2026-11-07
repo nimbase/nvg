@@ -155,6 +155,78 @@ test "compute all blend ops match cpu":
   else:
     skip()
 
+test "metal backend canvas fill matches cpu":
+  when defined(macosx) and defined(nvgMetal):
+    const W = 24
+    const H = 24
+    var cpu = newCanvas(W, H)
+    cpu.setFillColor(rgbf(1, 0, 0))
+    cpu.rect(2.5, 3.5, 10, 7)
+    cpu.fill()
+    let mb = newMetalBackend(W, H)
+    defer: mb.close()
+    var gpu = newCanvas(W, H, mb)
+    gpu.setFillColor(rgbf(1, 0, 0))
+    gpu.rect(2.5, 3.5, 10, 7)
+    gpu.fill()
+    let a = cpu.surf.pixels
+    let g = gpu.surf.pixels
+    check a.len == g.len
+    var maxDiff = 0
+    for i in 0 ..< a.len:
+      let d = abs(int(a[i]) - int(g[i]))
+      if d > maxDiff:
+        maxDiff = d
+    check maxDiff <= 1
+  else:
+    skip()
+
+test "metal backend canvas stroke matches cpu":
+  when defined(macosx) and defined(nvgMetal):
+    const W = 24
+    const H = 24
+    var cpu = newCanvas(W, H)
+    cpu.setStrokeColor(rgbf(0, 0, 1))
+    cpu.setStrokeWidth(3.0)
+    cpu.rect(4.5, 4.5, 12, 12)
+    cpu.stroke()
+    let mb = newMetalBackend(W, H)
+    defer: mb.close()
+    var gpu = newCanvas(W, H, mb)
+    gpu.setStrokeColor(rgbf(0, 0, 1))
+    gpu.setStrokeWidth(3.0)
+    gpu.rect(4.5, 4.5, 12, 12)
+    gpu.stroke()
+    let a = cpu.surf.pixels
+    let g = gpu.surf.pixels
+    var maxDiff = 0
+    for i in 0 ..< a.len:
+      let d = abs(int(a[i]) - int(g[i]))
+      if d > maxDiff:
+        maxDiff = d
+    check maxDiff <= 1
+  else:
+    skip()
+
+test "metal backend falls back on linear paint":
+  when defined(macosx) and defined(nvgMetal):
+    const W = 16
+    const H = 16
+    let p = linearGradient(0, 0, 16, 0, rgbf(0, 0, 0), rgbf(1, 1, 1))
+    var cpu = newCanvas(W, H)
+    cpu.setFillPaint(p)
+    cpu.rect(0, 0, 16, 16)
+    cpu.fill()
+    let mb = newMetalBackend(W, H)
+    defer: mb.close()
+    var gpu = newCanvas(W, H, mb)
+    gpu.setFillPaint(p)
+    gpu.rect(0, 0, 16, 16)
+    gpu.fill()
+    check gpu.surf.pixels == cpu.surf.pixels
+  else:
+    skip()
+
 test "compute radial gradient matches cpu within 1 lsb":
   when defined(macosx):
     if not mtlAvailable():
