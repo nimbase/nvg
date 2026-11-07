@@ -78,6 +78,9 @@ when defined(nvgMetal):
       return
     var kind = -1
     var w: array[16, cfloat]
+    var multiKind = -1
+    var mg0, mg1, mg2: array[2, float64]
+    var mstops: seq[GradientStop] = @[]
     if paint.map == identity():
       case paint.kind
       of pkSolid:
@@ -102,6 +105,12 @@ when defined(nvgMetal):
           w[9] = cfloat(g.ocol.g)
           w[10] = cfloat(g.ocol.b)
           w[11] = cfloat(g.ocol.a)
+        elif paint.linear.stops.len <= MaxShadeStops:
+          let g = paint.linear
+          multiKind = ShadeLinear
+          mg0 = [g.sx, g.sy]
+          mg1 = [g.ex, g.ey]
+          mstops = paint.linear.stops
       of pkRadial:
         if isBasicTwoStop(paint.radial.stops):
           let g = paint.radial
@@ -118,6 +127,12 @@ when defined(nvgMetal):
           w[9] = cfloat(g.ocol.g)
           w[10] = cfloat(g.ocol.b)
           w[11] = cfloat(g.ocol.a)
+        elif paint.radial.stops.len <= MaxShadeStops:
+          let g = paint.radial
+          multiKind = ShadeRadial
+          mg0 = [g.cx, g.cy]
+          mg1 = [g.inr, g.outr]
+          mstops = paint.radial.stops
       of pkBox:
         if isBasicTwoStop(paint.box.stops):
           let g = paint.box
@@ -136,6 +151,13 @@ when defined(nvgMetal):
           w[13] = cfloat(g.ocol.g)
           w[14] = cfloat(g.ocol.b)
           w[15] = cfloat(g.ocol.a)
+        elif paint.box.stops.len <= MaxShadeStops:
+          let g = paint.box
+          multiKind = ShadeBox
+          mg0 = [g.cx, g.cy]
+          mg1 = [g.ex, g.ey]
+          mg2 = [g.radius, g.feather]
+          mstops = paint.box.stops
       of pkPattern:
         let pt = paint.pattern
         if pt.img != nil and abs(pt.ex) >= 1e-12 and
@@ -159,7 +181,7 @@ when defined(nvgMetal):
           w[12] = cfloat(pt.img.w)
           w[13] = cfloat(pt.img.h)
           w[14] = cfloat(flags)
-    if kind < 0:
+    if kind < 0 and multiKind < 0:
       fillPolys(surf, polys, paint, alpha, clip, aa, coSourceOver,
         rule)
       return
@@ -194,7 +216,10 @@ when defined(nvgMetal):
           b.covBuf[y * surf.w + x] = float32(cov)
     b.ctx.upload(surf.pixels)
     b.ctx.uploadAux(b.covBuf)
-    b.ctx.shadeOver(kind, a, w)
+    if kind >= 0:
+      b.ctx.shadeOver(kind, a, w)
+    else:
+      b.ctx.shadeMulti(multiKind, a, mg0, mg1, mg2, mstops)
     surf.pixels = b.ctx.readback()
 
 when defined(nvgJit):

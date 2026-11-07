@@ -232,7 +232,7 @@ test "metal backend shades linear paint on gpu":
   else:
     skip()
 
-test "metal backend falls back on multi-stop paint":
+test "metal backend shades multi-stop linear on gpu":
   when defined(macosx) and defined(nvgMetal):
     const W = 16
     const H = 16
@@ -241,6 +241,100 @@ test "metal backend falls back on multi-stop paint":
       GradientStop(pos: 0.5, color: rgbf(1, 0, 0)),
       GradientStop(pos: 1.0, color: rgbf(1, 1, 1)),
     ])
+    var cpu = newCanvas(W, H)
+    cpu.setFillPaint(p)
+    cpu.rect(0, 0, 16, 16)
+    cpu.fill()
+    let mb = newMetalBackend(W, H)
+    defer: mb.close()
+    var gpu = newCanvas(W, H, mb)
+    gpu.setFillPaint(p)
+    gpu.rect(0, 0, 16, 16)
+    gpu.fill()
+    var maxDiff = 0
+    for i in 0 ..< cpu.surf.pixels.len:
+      let d = abs(int(gpu.surf.pixels[i]) - int(cpu.surf.pixels[i]))
+      if d > maxDiff:
+        maxDiff = d
+    check maxDiff <= 2
+  else:
+    skip()
+
+test "metal backend shades multi-stop radial and box on gpu":
+  when defined(macosx) and defined(nvgMetal):
+    const W = 16
+    const H = 16
+    let paints = [
+      radialGradientStops(8, 8, 0, 8, [
+        GradientStop(pos: 0.0, color: rgbf(1, 0, 0)),
+        GradientStop(pos: 0.4, color: rgbf(0, 1, 0)),
+        GradientStop(pos: 0.7, color: rgbf(0, 0, 1)),
+        GradientStop(pos: 1.0, color: rgbf(1, 1, 1)),
+      ]),
+      boxGradientStops(8, 8, 5, 5, 2, 3, [
+        GradientStop(pos: 0.0, color: rgbf(0, 0, 0)),
+        GradientStop(pos: 0.6, color: rgbf(1, 1, 0)),
+        GradientStop(pos: 1.0, color: rgbf(1, 1, 1)),
+      ]),
+    ]
+    for p in paints:
+      var cpu = newCanvas(W, H)
+      cpu.setFillPaint(p)
+      cpu.rect(0, 0, 16, 16)
+      cpu.fill()
+      let mb = newMetalBackend(W, H)
+      defer: mb.close()
+      var gpu = newCanvas(W, H, mb)
+      gpu.setFillPaint(p)
+      gpu.rect(0, 0, 16, 16)
+      gpu.fill()
+      var maxDiff = 0
+      for i in 0 ..< cpu.surf.pixels.len:
+        let d = abs(int(gpu.surf.pixels[i]) - int(cpu.surf.pixels[i]))
+        if d > maxDiff:
+          maxDiff = d
+      check maxDiff <= 2
+  else:
+    skip()
+
+test "metal backend shades hard stops on gpu":
+  when defined(macosx) and defined(nvgMetal):
+    const W = 16
+    const H = 16
+    let p = linearGradientStops(0, 0, 16, 0, [
+      GradientStop(pos: 0.0, color: rgbf(0, 0, 0)),
+      GradientStop(pos: 0.5, color: rgbf(1, 0, 0)),
+      GradientStop(pos: 0.5, color: rgbf(0, 0, 1)),
+      GradientStop(pos: 1.0, color: rgbf(1, 1, 1)),
+    ])
+    var cpu = newCanvas(W, H)
+    cpu.setFillPaint(p)
+    cpu.rect(0, 0, 16, 16)
+    cpu.fill()
+    let mb = newMetalBackend(W, H)
+    defer: mb.close()
+    var gpu = newCanvas(W, H, mb)
+    gpu.setFillPaint(p)
+    gpu.rect(0, 0, 16, 16)
+    gpu.fill()
+    var maxDiff = 0
+    for i in 0 ..< cpu.surf.pixels.len:
+      let d = abs(int(gpu.surf.pixels[i]) - int(cpu.surf.pixels[i]))
+      if d > maxDiff:
+        maxDiff = d
+    check maxDiff <= 2
+  else:
+    skip()
+
+test "metal backend falls back past 8 stops":
+  when defined(macosx) and defined(nvgMetal):
+    const W = 16
+    const H = 16
+    var stops: array[9, GradientStop]
+    for i in 0 ..< 9:
+      stops[i] = GradientStop(pos: float64(i) / 8.0,
+        color: rgbf(float64(i) / 8.0, 0.2, 0.8))
+    let p = linearGradientStops(0, 0, 16, 0, stops)
     var cpu = newCanvas(W, H)
     cpu.setFillPaint(p)
     cpu.rect(0, 0, 16, 16)

@@ -31,6 +31,7 @@ when defined(macosx):
 
 import ./types
 import ./images
+import ./paint
 
 type MetalCtx* = ref object
   p: pointer
@@ -48,6 +49,7 @@ const
   MSlotBlurV* = 8
   MSlotPatternBilinear* = 9
   MSlotShadeOver* = 10
+  MSlotShadeMulti* = 11
 
 const solidMsl* = """
 #include <metal_stdlib>
@@ -421,6 +423,104 @@ kernel void shade_over(device uchar4 *io [[buffer(0)]],
 }
 """
 
+const
+  ShadeSolid* = 0
+  ShadeLinear* = 1
+  ShadeRadial* = 2
+  ShadeBox* = 3
+  ShadePattern* = 4
+
+const MaxShadeStops* = 8
+
+const shadeMultiMsl* = """
+#include <metal_stdlib>
+using namespace metal;
+// Multi-stop coverage-driven source-over for linear (kind 1), radial
+// (kind 2) and box (kind 3) gradients with up to 8 normalized stops.
+// Stop lookup mirrors scalar `sampleStops` (last-wins duplicates,
+// degenerate end segments); geometry matches `shade_over`.
+struct MultiP {
+  uint kind;
+  float alpha;
+  float2 g0;
+  float2 g1;
+  float2 g2;
+  uint nstops;
+  float pos[8];
+  float _mpad[3];
+  float4 col[8];
+};
+float4 msample_stops(float t, constant MultiP &u) {
+  int n = int(u.nstops);
+  if (n <= 0) return float4(0.0);
+  if (n == 1) return u.col[0];
+  float tc = clamp(t, 0.0, 1.0);
+  if (tc < u.pos[0]) {
+    int k = 0;
+    while (k + 1 < n && u.pos[k + 1] == u.pos[0]) k++;
+    return u.col[k];
+  }
+  if (tc >= u.pos[n - 1]) {
+    int j = n - 1;
+    while (j > 0 && u.pos[j - 1] == u.pos[n - 1]) j--;
+    if (j == 0) return u.col[n - 1];
+    j--;
+    float uu = (tc - u.pos[j]) / (u.pos[n - 1] - u.pos[j]);
+    return mix(u.col[j], u.col[n - 1], clamp(uu, 0.0, 1.0));
+  }
+  int L = 0;
+  for (int i = 0; i < n; i++) {
+    if (u.pos[i] <= tc) L = i;
+    else break;
+  }
+  int R = L + 1;
+  float uu = (tc - u.pos[L]) / (u.pos[R] - u.pos[L]);
+  return mix(u.col[L], u.col[R], clamp(uu, 0.0, 1.0));
+}
+kernel void shade_multi(device uchar4 *io [[buffer(0)]],
+                        constant MultiP &u [[buffer(1)]],
+                        constant uint2 &dims [[buffer(2)]],
+                        device float *cov [[buffer(3)]],
+                        uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= dims.x || gid.y >= dims.y) return;
+  uint i = gid.y * dims.x + gid.x;
+  float c = cov[i];
+  if (c <= 0.0) return;
+  float2 pc = float2(gid) + 0.5;
+  float t = 0.0;
+  switch (u.kind) {
+    case 1: {
+      float2 d = u.g1 - u.g0;
+      float len2 = dot(d, d);
+      if (len2 > 1e-12) t = dot(pc - u.g0, d) / len2;
+      break;
+    }
+    case 2: {
+      float dist = length(pc - u.g0);
+      float f = max(1.0, u.g1.y - u.g1.x);
+      t = (dist - u.g1.x) / f;
+      break;
+    }
+    default: {
+      float2 p = pc - u.g0;
+      float2 q = abs(p) - (u.g1 - u.g2.x);
+      float sd = min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - u.g2.x;
+      float f = max(1.0, u.g2.y);
+      t = (sd + f * 0.5) / f;
+      break;
+    }
+  }
+  float4 src = msample_stops(t, u);
+  float4 dd = float4(io[i]) * (1.0 / 255.0);
+  float sa = clamp(src.a * u.alpha, 0.0, 1.0) * clamp(c, 0.0, 1.0);
+  if (sa <= 0.0) return;
+  float inv = 1.0 - sa;
+  float3 rgb = src.rgb * sa + dd.rgb * inv;
+  float a = sa + dd.a * inv;
+  io[i] = uchar4(saturate(float4(rgb, a)) * 255.0 + 0.5);
+}
+"""
+
 type BlendParams* = object
   ## Must match MSL `BlendP` layout: col, op, cov (24 bytes).
   col*: array[4, cfloat]
@@ -434,6 +534,19 @@ type ShadeJob* = object
   alpha*: cfloat
   pad*: array[2, cfloat]
   w*: array[16, cfloat]
+
+type MultiParams* = object
+  ## Must match MSL `MultiP` layout: kind, alpha, g0..g2, nstops,
+  ## pos, _mpad, col (208 bytes).
+  kind*: cuint
+  alpha*: cfloat
+  g0*: array[2, cfloat]
+  g1*: array[2, cfloat]
+  g2*: array[2, cfloat]
+  nstops*: cuint
+  pos*: array[8, cfloat]
+  mpad*: array[3, cfloat]
+  col*: array[8, array[4, cfloat]]
 
 const patternMsl* = """
 #include <metal_stdlib>
@@ -611,6 +724,7 @@ static:
   doAssert sizeof(BoxParams) == 64
   doAssert sizeof(BlendParams) == 24
   doAssert sizeof(ShadeJob) == 80
+  doAssert sizeof(MultiParams) == 208
   doAssert sizeof(PatternParams) == 52
   doAssert sizeof(BlurParams) == 4
 
@@ -663,6 +777,7 @@ proc newMetalCtx*(w, h: int): MetalCtx =
       result.buildSlot(MSlotBox, boxMsl, "fill_box")
       result.buildSlot(MSlotBlend, blendMsl, "comp_blend")
       result.buildSlot(MSlotShadeOver, shadeMsl, "shade_over")
+      result.buildSlot(MSlotShadeMulti, shadeMultiMsl, "shade_multi")
       result.buildSlot(MSlotPattern, patternMsl, "fill_pattern_nearest")
       result.buildSlot(MSlotBlurH, blurMsl, "blur_h")
       result.buildSlot(MSlotBlurV, blurMsl, "blur_v")
@@ -729,13 +844,6 @@ proc uploadAux*(ctx: MetalCtx, cov: openArray[float32]) =
       raise newException(ValueError, "aux upload size mismatch")
     nvgmtl_upload(ctx.p, 1, cast[ptr uint8](unsafeAddr cov[0]))
 
-const
-  ShadeSolid* = 0
-  ShadeLinear* = 1
-  ShadeRadial* = 2
-  ShadeBox* = 3
-  ShadePattern* = 4
-
 proc shadeOver*(ctx: MetalCtx, kind: int, alpha: float64,
     w: array[16, cfloat]) =
   ## Coverage-driven source-over for any paint kind (see `shadeMsl`).
@@ -749,6 +857,23 @@ proc shadeOver*(ctx: MetalCtx, kind: int, alpha: float64,
     var u = ShadeJob(kind: cuint(kind), alpha: cfloat(alpha),
       pad: [cfloat(0), cfloat(0)], w: w)
     nvgmtl_fill(ctx.p, cint(MSlotShadeOver), addr u, cint(sizeof(u)))
+
+proc shadeMulti*(ctx: MetalCtx, kind: int, alpha: float64,
+    g0, g1, g2: array[2, float64], stops: openArray[GradientStop]) =
+  ## Multi-stop shade for linear (1), radial (2) and box (3) paints
+  ## (see `shadeMultiMsl`). Geometry like `shadeOver`; `stops` are the
+  ## normalized constructor lists, capped at `MaxShadeStops`.
+  when defined(macosx):
+    var u = MultiParams(kind: cuint(kind), alpha: cfloat(alpha),
+      g0: [cfloat(g0[0]), cfloat(g0[1])],
+      g1: [cfloat(g1[0]), cfloat(g1[1])],
+      g2: [cfloat(g2[0]), cfloat(g2[1])],
+      nstops: cuint(stops.len))
+    for i in 0 ..< stops.len:
+      u.pos[i] = cfloat(stops[i].pos)
+      u.col[i] = [cfloat(stops[i].color.r), cfloat(stops[i].color.g),
+        cfloat(stops[i].color.b), cfloat(stops[i].color.a)]
+    nvgmtl_fill(ctx.p, cint(MSlotShadeMulti), addr u, cint(sizeof(u)))
 
 proc setPattern*(ctx: MetalCtx, img: Image) =
   ## Upload `img` pixels as the pattern texture.
