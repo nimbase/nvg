@@ -66,7 +66,41 @@ test "zz fixed-pixel kernel-vs-scalar echoes":
     rgbaf(0.2, 0.4, 0.8, 0.5), 0.25, coSourceOver)
   check true
 
-test "zz hue kernel curve over G byte":
+test "zz scalar sweep hashes":
+  # Replicates the generic-op sweep's SCALAR side exactly (same ops,
+  # srcs, seeds, draws, bake, blendPixel; no kernel calls). FNV hashes
+  # per op prove/disprove scalar equality across legs. If these match
+  # everywhere, the ARM divergence is kernel-side, full stop.
+  randomize(91827)
+  const ops = [coSourceIn, coSourceOut, coAtop, coDestinationOver,
+    coDestinationIn, coDestinationOut, coDestinationAtop, coLighter,
+    coCopy, coXor, coMultiply, coScreen, coOverlay, coDarken,
+    coLighten, coColorDodge, coColorBurn, coHardLight, coSoftLight,
+    coDifference, coExclusion, coHue, coSaturation, coColor,
+    coLuminosity]
+  let srcs = [rgbaf(1, 0, 0, 1), rgbaf(0, 1, 0, 0.5),
+    rgbaf(0.2, 0.4, 0.8, 0.0), rgbaf(2.0, -0.5, 0.5, 0.75),
+    rgbaf(0.33, 0.66, 0.99, 0.01), rgbaf(0, 0, 0, 1),
+    rgbaf(1, 1, 1, 1), rgbaf(1.0 / 255.0, 0, 0, 1.0 / 255.0),
+    rgbaf(0.5, 0.5, 0.5, 0.003)]
+  for op in ops:
+    var h = 1469598103934665603u64
+    for src in srcs:
+      for n in [1, 3, 7, 32]:
+        var dst = newSeq[uint8](n * 4)
+        var cov = newSeq[float64](n)
+        for i in 0 ..< dst.len: dst[i] = uint8(rand(255))
+        for i in 0 ..< n:
+          cov[i] = [0.0, 0.02, 0.25, 0.5, 1.0][rand(4)]
+        var surf = newSurface(max(n, 1), 1)
+        surf.pixels.setLen(dst.len)
+        for i, b in dst: surf.pixels[i] = b
+        for x in 0 ..< n:
+          surf.blendPixel(x, 0, src, cov[x], op)
+        for b in surf.pixels:
+          h = (h xor uint64(b)) * 1099511628211u64
+    echo "zz-scalarhash ", op, " ", h.toHex(16)
+  check true
   # Pure kernel characterization (no rand, no scalar): G byte 0..255,
   # fixed R/B/A/src/cov. Diffs vs the x86 curve pinpoint triggers.
   let kern = JitKernels()
