@@ -5,9 +5,12 @@
 ##
 ## Entry contract: d0/1/2 = straight CLAMPED paint r/g/b, d22 = sa,
 ## x9 = dst cursor, x13 = div-table, d16/17/18/19 = c255/zero/one/half,
-## d20 = x (preserved). Frame is 64 bytes; rgb spills to
+## d20 = x (preserved). Frame is 96 bytes; rgb spills to
 ## `[sp+32/40/48]`, d25 holds 1e-6 (builder prologue materializes it via
 ## movz/movk + fmov). Clobbers d0-d4/d23/d24/d26/d27, x4-x7, flags.
+## Non-separable tails (Hue..Luminosity) also use W3C Lum weights at
+## `[sp+0/8/16]` (spilled per row by the prologue), scratch `[sp+80]`,
+## and the Bout triple at `[sp+56/64/72]`.
 
 import dynasm
 import ./types
@@ -172,6 +175,38 @@ proc emitBlendTailAarch64Static*(op: static CompOp, a: var Assembler) =
       fsub d26, d18, d22
       fmul d26, d26, d24
       fadd d23, d22, d26 # sa + da*(1-sa)
+  elif op == coHue:
+    dynasm a:
+      arch aarch64
+      ldrb w4, [x9, 3]
+      ldr d24, [x13, x4, lsl, 3]
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      fadd d23, d22, d26 # sa + da*(1-sa)
+  elif op == coSaturation:
+    dynasm a:
+      arch aarch64
+      ldrb w4, [x9, 3]
+      ldr d24, [x13, x4, lsl, 3]
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      fadd d23, d22, d26 # sa + da*(1-sa)
+  elif op == coColor:
+    dynasm a:
+      arch aarch64
+      ldrb w4, [x9, 3]
+      ldr d24, [x13, x4, lsl, 3]
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      fadd d23, d22, d26 # sa + da*(1-sa)
+  elif op == coLuminosity:
+    dynasm a:
+      arch aarch64
+      ldrb w4, [x9, 3]
+      ldr d24, [x13, x4, lsl, 3]
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      fadd d23, d22, d26 # sa + da*(1-sa)
   else:
     {.error: "blend tail: sourceOver uses the dedicated fast path".}
 
@@ -183,6 +218,701 @@ proc emitBlendTailAarch64Static*(op: static CompOp, a: var Assembler) =
     str d0, [sp, 32]
     str d1, [sp, 40]
     str d2, [sp, 48]
+
+  # --- NS: non-separable Bout triple to [sp, 56/64/72] ---
+  # Same structure as the x64 NS section: W3C SetSat/SetLum/ClipColor
+  # with Lum weights spilled per row at [sp, 0/8/16], scratch park at
+  # [sp, 80]. d22 (sa), d23 (ao), d24 (da) are live into C and
+  # preserved. Assemble-verified only, like the other a64 tails.
+  when op == coHue:
+    dynasm a:
+      arch aarch64
+      # satCb -> d26 (Cb loads; max3/min3 need no stores)
+      ldrb w4, [x9]
+      ldr d0, [x13, x4, lsl, 3] # dr
+      ldrb w4, [x9, 1]
+      ldr d1, [x13, x4, lsl, 3] # dg
+      ldrb w4, [x9, 2]
+      ldr d2, [x13, x4, lsl, 3] # db
+      fmov d26, d0
+      fmax d26, d26, d1
+      fmax d26, d26, d2 # cmaxCb
+      fmin d0, d0, d1
+      fmin d0, d0, d2 # cminCb
+      fsub d26, d26, d0 # satCb
+      # scmin -> d27 (persistent through setSat)
+      ldr d27, [sp, 32]
+      ldr d0, [sp, 40]
+      fmin d27, d27, d0
+      ldr d0, [sp, 48]
+      fmin d27, d27, d0
+      # scmax == scmin? (gray source -> st = black)
+      ldr d0, [sp, 32]
+      ldr d1, [sp, 40]
+      fmax d0, d0, d1
+      ldr d1, [sp, 48]
+      fmax d0, d0, d1
+      fcmp d0, d27
+      b.eq fwd("nshueZero")
+      # R: st_r -> [sp, 56]
+      ldr d0, [sp, 32]
+      ldr d1, [sp, 40]
+      fmax d0, d0, d1
+      ldr d1, [sp, 48]
+      fmax d0, d0, d1 # scmax
+      ldr d2, [sp, 32] # csr
+      fcmp d2, d0 # ch == cmax?
+      b.eq fwd("nshueRmax")
+      fcmp d2, d27 # ch == cmin?
+      b.eq fwd("nshueRmin")
+      fsub d2, d2, d27 # ch-cmin
+      fmul d2, d2, d26 # *s
+      fsub d0, d0, d27 # denom
+      fdiv d2, d2, d0
+      b fwd("nshueRdone")
+      label nshueRmax
+      fmov d2, d26 # s
+      b fwd("nshueRdone")
+      label nshueRmin
+      fmov d2, d17 # 0
+      label nshueRdone
+      str d2, [sp, 56]
+      # G: st_g -> [sp, 64]
+      ldr d0, [sp, 32]
+      ldr d1, [sp, 40]
+      fmax d0, d0, d1
+      ldr d1, [sp, 48]
+      fmax d0, d0, d1
+      ldr d2, [sp, 40] # csg
+      fcmp d2, d0
+      b.eq fwd("nshueGmax")
+      fcmp d2, d27
+      b.eq fwd("nshueGmin")
+      fsub d2, d2, d27
+      fmul d2, d2, d26
+      fsub d0, d0, d27
+      fdiv d2, d2, d0
+      b fwd("nshueGdone")
+      label nshueGmax
+      fmov d2, d26
+      b fwd("nshueGdone")
+      label nshueGmin
+      fmov d2, d17
+      label nshueGdone
+      str d2, [sp, 64]
+      # B: st_b -> [sp, 72]
+      ldr d0, [sp, 32]
+      ldr d1, [sp, 40]
+      fmax d0, d0, d1
+      ldr d1, [sp, 48]
+      fmax d0, d0, d1
+      ldr d2, [sp, 48] # csb
+      fcmp d2, d0
+      b.eq fwd("nshueBmax")
+      fcmp d2, d27
+      b.eq fwd("nshueBmin")
+      fsub d2, d2, d27
+      fmul d2, d2, d26
+      fsub d0, d0, d27
+      fdiv d2, d2, d0
+      b fwd("nshueBdone")
+      label nshueBmax
+      fmov d2, d26
+      b fwd("nshueBdone")
+      label nshueBmin
+      fmov d2, d17
+      label nshueBdone
+      str d2, [sp, 72]
+      b fwd("nshueLum")
+      label nshueZero
+      str d17, [sp, 56]
+      str d17, [sp, 64]
+      str d17, [sp, 72]
+      label nshueLum
+      # lumCb -> park [sp, 80]
+      ldrb w4, [x9]
+      ldr d0, [x13, x4, lsl, 3]
+      ldr d1, [sp, 0]
+      fmul d0, d0, d1
+      ldrb w4, [x9, 1]
+      ldr d1, [x13, x4, lsl, 3]
+      ldr d2, [sp, 8]
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+      ldrb w4, [x9, 2]
+      ldr d1, [x13, x4, lsl, 3]
+      ldr d2, [sp, 16]
+      fmul d1, d1, d2
+      fadd d0, d0, d1 # lumCb
+      str d0, [sp, 80] # park l
+      # lumSt -> d0; d = l - lumSt -> d26
+      ldr d0, [sp, 56]
+      ldr d1, [sp, 0]
+      fmul d0, d0, d1
+      ldr d1, [sp, 64]
+      ldr d2, [sp, 8]
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+      ldr d1, [sp, 72]
+      ldr d2, [sp, 16]
+      fmul d1, d1, d2
+      fadd d0, d0, d1 # lumSt
+      ldr d26, [sp, 80]
+      fsub d26, d26, d0 # d
+      # shift st slots by d
+      ldr d0, [sp, 56]
+      fadd d0, d0, d26
+      str d0, [sp, 56]
+      ldr d0, [sp, 64]
+      fadd d0, d0, d26
+      str d0, [sp, 64]
+      ldr d0, [sp, 72]
+      fadd d0, d0, d26
+      str d0, [sp, 72]
+      # n = min3 -> d0, x = max3 -> d1 (shifted values)
+      ldr d0, [sp, 56]
+      ldr d1, [sp, 64]
+      fmin d0, d0, d1
+      ldr d1, [sp, 72]
+      fmin d0, d0, d1 # n
+      ldr d1, [sp, 56]
+      ldr d2, [sp, 64]
+      fmax d1, d1, d2
+      ldr d2, [sp, 72]
+      fmax d1, d1, d2 # x
+      fcmp d0, d17 # n < 0?
+      b.lo fwd("nshueAdj1")
+      b fwd("nshueChk2")
+      label nshueAdj1
+      ldr d2, [sp, 80]
+      fsub d2, d2, d0 # l-n -> denom d2
+      ldr d1, [sp, 56]
+      ldr d27, [sp, 80]
+      fsub d1, d1, d27
+      fmul d1, d1, d27
+      fdiv d1, d1, d2
+      fadd d1, d1, d27
+      str d1, [sp, 56]
+      ldr d1, [sp, 64]
+      ldr d27, [sp, 80]
+      fsub d1, d1, d27
+      fmul d1, d1, d27
+      fdiv d1, d1, d2
+      fadd d1, d1, d27
+      str d1, [sp, 64]
+      ldr d1, [sp, 72]
+      ldr d27, [sp, 80]
+      fsub d1, d1, d27
+      fmul d1, d1, d27
+      fdiv d1, d1, d2
+      fadd d1, d1, d27
+      str d1, [sp, 72]
+      label nshueChk2
+      ldr d1, [sp, 56]
+      ldr d2, [sp, 64]
+      fmax d1, d1, d2
+      ldr d2, [sp, 72]
+      fmax d1, d1, d2 # x (current values)
+      fcmp d1, d18 # x > 1?
+      b.hi fwd("nshueAdj2")
+      b fwd("nshueDone")
+      label nshueAdj2
+      ldr d0, [sp, 80] # l
+      fsub d1, d1, d0 # x-l -> denom d1
+      fmov d0, d18
+      ldr d2, [sp, 80]
+      fsub d0, d0, d2 # 1-l -> d0
+      ldr d2, [sp, 56]
+      ldr d27, [sp, 80]
+      fsub d2, d2, d27
+      fmul d2, d2, d0
+      fdiv d2, d2, d1
+      fadd d2, d2, d27
+      str d2, [sp, 56]
+      ldr d2, [sp, 64]
+      ldr d27, [sp, 80]
+      fsub d2, d2, d27
+      fmul d2, d2, d0
+      fdiv d2, d2, d1
+      fadd d2, d2, d27
+      str d2, [sp, 64]
+      ldr d2, [sp, 72]
+      ldr d27, [sp, 80]
+      fsub d2, d2, d27
+      fmul d2, d2, d0
+      fdiv d2, d2, d1
+      fadd d2, d2, d27
+      str d2, [sp, 72]
+      label nshueDone
+  elif op == coSaturation:
+    dynasm a:
+      arch aarch64
+      # satCs -> d26 (Cs spills only)
+      ldr d0, [sp, 32]
+      ldr d1, [sp, 40]
+      fmax d0, d0, d1
+      ldr d1, [sp, 48]
+      fmax d0, d0, d1 # cmaxCs
+      ldr d1, [sp, 32]
+      ldr d2, [sp, 40]
+      fmin d1, d1, d2
+      ldr d2, [sp, 48]
+      fmin d1, d1, d2 # cminCs
+      fmov d26, d0
+      fsub d26, d26, d1 # satCs
+      # Cb triple -> slots (future st home)
+      ldrb w4, [x9]
+      ldr d0, [x13, x4, lsl, 3]
+      str d0, [sp, 56]
+      ldrb w4, [x9, 1]
+      ldr d0, [x13, x4, lsl, 3]
+      str d0, [sp, 64]
+      ldrb w4, [x9, 2]
+      ldr d0, [x13, x4, lsl, 3]
+      str d0, [sp, 72]
+      # cbmin -> d27 (persistent through setSat)
+      ldr d27, [sp, 56]
+      ldr d0, [sp, 64]
+      fmin d27, d27, d0
+      ldr d0, [sp, 72]
+      fmin d27, d27, d0
+      # cbmax == cbmin? (gray backdrop -> st = black)
+      ldr d0, [sp, 56]
+      ldr d1, [sp, 64]
+      fmax d0, d0, d1
+      ldr d1, [sp, 72]
+      fmax d0, d0, d1
+      fcmp d0, d27
+      b.eq fwd("nssatZero")
+      str d0, [sp, 80] # park cbmax
+      # R: st_r -> [sp, 56]
+      ldr d0, [sp, 80] # cbmax
+      ldr d2, [sp, 56] # cbr
+      fcmp d2, d0
+      b.eq fwd("nssatRmax")
+      fcmp d2, d27
+      b.eq fwd("nssatRmin")
+      fsub d2, d2, d27
+      fmul d2, d2, d26
+      fsub d0, d0, d27
+      fdiv d2, d2, d0
+      b fwd("nssatRdone")
+      label nssatRmax
+      fmov d2, d26
+      b fwd("nssatRdone")
+      label nssatRmin
+      fmov d2, d17
+      label nssatRdone
+      str d2, [sp, 56]
+      # G: st_g -> [sp, 64]
+      ldr d0, [sp, 80]
+      ldr d2, [sp, 64] # cbg
+      fcmp d2, d0
+      b.eq fwd("nssatGmax")
+      fcmp d2, d27
+      b.eq fwd("nssatGmin")
+      fsub d2, d2, d27
+      fmul d2, d2, d26
+      fsub d0, d0, d27
+      fdiv d2, d2, d0
+      b fwd("nssatGdone")
+      label nssatGmax
+      fmov d2, d26
+      b fwd("nssatGdone")
+      label nssatGmin
+      fmov d2, d17
+      label nssatGdone
+      str d2, [sp, 64]
+      # B: st_b -> [sp, 72]
+      ldr d0, [sp, 80]
+      ldr d2, [sp, 72] # cbb
+      fcmp d2, d0
+      b.eq fwd("nssatBmax")
+      fcmp d2, d27
+      b.eq fwd("nssatBmin")
+      fsub d2, d2, d27
+      fmul d2, d2, d26
+      fsub d0, d0, d27
+      fdiv d2, d2, d0
+      b fwd("nssatBdone")
+      label nssatBmax
+      fmov d2, d26
+      b fwd("nssatBdone")
+      label nssatBmin
+      fmov d2, d17
+      label nssatBdone
+      str d2, [sp, 72]
+      b fwd("nssatLum")
+      label nssatZero
+      str d17, [sp, 56]
+      str d17, [sp, 64]
+      str d17, [sp, 72]
+      label nssatLum
+      # lumCb (reload Cb; st owns the slots) -> park [sp, 80]
+      ldrb w4, [x9]
+      ldr d0, [x13, x4, lsl, 3]
+      ldr d1, [sp, 0]
+      fmul d0, d0, d1
+      ldrb w4, [x9, 1]
+      ldr d1, [x13, x4, lsl, 3]
+      ldr d2, [sp, 8]
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+      ldrb w4, [x9, 2]
+      ldr d1, [x13, x4, lsl, 3]
+      ldr d2, [sp, 16]
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+      str d0, [sp, 80] # park l
+      # lumSt -> d0; d = l - lumSt -> d26
+      ldr d0, [sp, 56]
+      ldr d1, [sp, 0]
+      fmul d0, d0, d1
+      ldr d1, [sp, 64]
+      ldr d2, [sp, 8]
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+      ldr d1, [sp, 72]
+      ldr d2, [sp, 16]
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+      ldr d26, [sp, 80]
+      fsub d26, d26, d0 # d
+      # shift st slots by d
+      ldr d0, [sp, 56]
+      fadd d0, d0, d26
+      str d0, [sp, 56]
+      ldr d0, [sp, 64]
+      fadd d0, d0, d26
+      str d0, [sp, 64]
+      ldr d0, [sp, 72]
+      fadd d0, d0, d26
+      str d0, [sp, 72]
+      # n = min3 -> d0, x = max3 -> d1 (shifted values)
+      ldr d0, [sp, 56]
+      ldr d1, [sp, 64]
+      fmin d0, d0, d1
+      ldr d1, [sp, 72]
+      fmin d0, d0, d1 # n
+      ldr d1, [sp, 56]
+      ldr d2, [sp, 64]
+      fmax d1, d1, d2
+      ldr d2, [sp, 72]
+      fmax d1, d1, d2 # x
+      fcmp d0, d17 # n < 0?
+      b.lo fwd("nssatAdj1")
+      b fwd("nssatChk2")
+      label nssatAdj1
+      ldr d2, [sp, 80]
+      fsub d2, d2, d0
+      ldr d1, [sp, 56]
+      ldr d27, [sp, 80]
+      fsub d1, d1, d27
+      fmul d1, d1, d27
+      fdiv d1, d1, d2
+      fadd d1, d1, d27
+      str d1, [sp, 56]
+      ldr d1, [sp, 64]
+      ldr d27, [sp, 80]
+      fsub d1, d1, d27
+      fmul d1, d1, d27
+      fdiv d1, d1, d2
+      fadd d1, d1, d27
+      str d1, [sp, 64]
+      ldr d1, [sp, 72]
+      ldr d27, [sp, 80]
+      fsub d1, d1, d27
+      fmul d1, d1, d27
+      fdiv d1, d1, d2
+      fadd d1, d1, d27
+      str d1, [sp, 72]
+      label nssatChk2
+      ldr d1, [sp, 56]
+      ldr d2, [sp, 64]
+      fmax d1, d1, d2
+      ldr d2, [sp, 72]
+      fmax d1, d1, d2
+      fcmp d1, d18 # x > 1?
+      b.hi fwd("nssatAdj2")
+      b fwd("nssatDone")
+      label nssatAdj2
+      ldr d0, [sp, 80]
+      fsub d1, d1, d0
+      fmov d0, d18
+      ldr d2, [sp, 80]
+      fsub d0, d0, d2
+      ldr d2, [sp, 56]
+      ldr d27, [sp, 80]
+      fsub d2, d2, d27
+      fmul d2, d2, d0
+      fdiv d2, d2, d1
+      fadd d2, d2, d27
+      str d2, [sp, 56]
+      ldr d2, [sp, 64]
+      ldr d27, [sp, 80]
+      fsub d2, d2, d27
+      fmul d2, d2, d0
+      fdiv d2, d2, d1
+      fadd d2, d2, d27
+      str d2, [sp, 64]
+      ldr d2, [sp, 72]
+      ldr d27, [sp, 80]
+      fsub d2, d2, d27
+      fmul d2, d2, d0
+      fdiv d2, d2, d1
+      fadd d2, d2, d27
+      str d2, [sp, 72]
+      label nssatDone
+  elif op == coColor:
+    dynasm a:
+      arch aarch64
+      # lumCb -> park [sp, 80]
+      ldrb w4, [x9]
+      ldr d0, [x13, x4, lsl, 3]
+      ldr d1, [sp, 0]
+      fmul d0, d0, d1
+      ldrb w4, [x9, 1]
+      ldr d1, [x13, x4, lsl, 3]
+      ldr d2, [sp, 8]
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+      ldrb w4, [x9, 2]
+      ldr d1, [x13, x4, lsl, 3]
+      ldr d2, [sp, 16]
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+      str d0, [sp, 80] # park l
+      # st = Cs -> slots
+      ldr d0, [sp, 32]
+      str d0, [sp, 56]
+      ldr d0, [sp, 40]
+      str d0, [sp, 64]
+      ldr d0, [sp, 48]
+      str d0, [sp, 72]
+      # lumSt -> d0; d = l - lumSt -> d26
+      ldr d0, [sp, 56]
+      ldr d1, [sp, 0]
+      fmul d0, d0, d1
+      ldr d1, [sp, 64]
+      ldr d2, [sp, 8]
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+      ldr d1, [sp, 72]
+      ldr d2, [sp, 16]
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+      ldr d26, [sp, 80]
+      fsub d26, d26, d0 # d
+      # shift st slots by d
+      ldr d0, [sp, 56]
+      fadd d0, d0, d26
+      str d0, [sp, 56]
+      ldr d0, [sp, 64]
+      fadd d0, d0, d26
+      str d0, [sp, 64]
+      ldr d0, [sp, 72]
+      fadd d0, d0, d26
+      str d0, [sp, 72]
+      # n = min3 -> d0, x = max3 -> d1 (shifted values)
+      ldr d0, [sp, 56]
+      ldr d1, [sp, 64]
+      fmin d0, d0, d1
+      ldr d1, [sp, 72]
+      fmin d0, d0, d1 # n
+      ldr d1, [sp, 56]
+      ldr d2, [sp, 64]
+      fmax d1, d1, d2
+      ldr d2, [sp, 72]
+      fmax d1, d1, d2 # x
+      fcmp d0, d17 # n < 0?
+      b.lo fwd("nscolAdj1")
+      b fwd("nscolChk2")
+      label nscolAdj1
+      ldr d2, [sp, 80]
+      fsub d2, d2, d0
+      ldr d1, [sp, 56]
+      ldr d27, [sp, 80]
+      fsub d1, d1, d27
+      fmul d1, d1, d27
+      fdiv d1, d1, d2
+      fadd d1, d1, d27
+      str d1, [sp, 56]
+      ldr d1, [sp, 64]
+      ldr d27, [sp, 80]
+      fsub d1, d1, d27
+      fmul d1, d1, d27
+      fdiv d1, d1, d2
+      fadd d1, d1, d27
+      str d1, [sp, 64]
+      ldr d1, [sp, 72]
+      ldr d27, [sp, 80]
+      fsub d1, d1, d27
+      fmul d1, d1, d27
+      fdiv d1, d1, d2
+      fadd d1, d1, d27
+      str d1, [sp, 72]
+      label nscolChk2
+      ldr d1, [sp, 56]
+      ldr d2, [sp, 64]
+      fmax d1, d1, d2
+      ldr d2, [sp, 72]
+      fmax d1, d1, d2
+      fcmp d1, d18 # x > 1?
+      b.hi fwd("nscolAdj2")
+      b fwd("nscolDone")
+      label nscolAdj2
+      ldr d0, [sp, 80]
+      fsub d1, d1, d0
+      fmov d0, d18
+      ldr d2, [sp, 80]
+      fsub d0, d0, d2
+      ldr d2, [sp, 56]
+      ldr d27, [sp, 80]
+      fsub d2, d2, d27
+      fmul d2, d2, d0
+      fdiv d2, d2, d1
+      fadd d2, d2, d27
+      str d2, [sp, 56]
+      ldr d2, [sp, 64]
+      ldr d27, [sp, 80]
+      fsub d2, d2, d27
+      fmul d2, d2, d0
+      fdiv d2, d2, d1
+      fadd d2, d2, d27
+      str d2, [sp, 64]
+      ldr d2, [sp, 72]
+      ldr d27, [sp, 80]
+      fsub d2, d2, d27
+      fmul d2, d2, d0
+      fdiv d2, d2, d1
+      fadd d2, d2, d27
+      str d2, [sp, 72]
+      label nscolDone
+  elif op == coLuminosity:
+    dynasm a:
+      arch aarch64
+      # lumCs -> park [sp, 80]
+      ldr d0, [sp, 32]
+      ldr d1, [sp, 0]
+      fmul d0, d0, d1
+      ldr d1, [sp, 40]
+      ldr d2, [sp, 8]
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+      ldr d1, [sp, 48]
+      ldr d2, [sp, 16]
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+      str d0, [sp, 80] # park l
+      # st = Cb -> slots
+      ldrb w4, [x9]
+      ldr d0, [x13, x4, lsl, 3]
+      str d0, [sp, 56]
+      ldrb w4, [x9, 1]
+      ldr d0, [x13, x4, lsl, 3]
+      str d0, [sp, 64]
+      ldrb w4, [x9, 2]
+      ldr d0, [x13, x4, lsl, 3]
+      str d0, [sp, 72]
+      # lumSt -> d0; d = l - lumSt -> d26
+      ldr d0, [sp, 56]
+      ldr d1, [sp, 0]
+      fmul d0, d0, d1
+      ldr d1, [sp, 64]
+      ldr d2, [sp, 8]
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+      ldr d1, [sp, 72]
+      ldr d2, [sp, 16]
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+      ldr d26, [sp, 80]
+      fsub d26, d26, d0 # d
+      # shift st slots by d
+      ldr d0, [sp, 56]
+      fadd d0, d0, d26
+      str d0, [sp, 56]
+      ldr d0, [sp, 64]
+      fadd d0, d0, d26
+      str d0, [sp, 64]
+      ldr d0, [sp, 72]
+      fadd d0, d0, d26
+      str d0, [sp, 72]
+      # n = min3 -> d0, x = max3 -> d1 (shifted values)
+      ldr d0, [sp, 56]
+      ldr d1, [sp, 64]
+      fmin d0, d0, d1
+      ldr d1, [sp, 72]
+      fmin d0, d0, d1 # n
+      ldr d1, [sp, 56]
+      ldr d2, [sp, 64]
+      fmax d1, d1, d2
+      ldr d2, [sp, 72]
+      fmax d1, d1, d2 # x
+      fcmp d0, d17 # n < 0?
+      b.lo fwd("nslumAdj1")
+      b fwd("nslumChk2")
+      label nslumAdj1
+      ldr d2, [sp, 80]
+      fsub d2, d2, d0
+      ldr d1, [sp, 56]
+      ldr d27, [sp, 80]
+      fsub d1, d1, d27
+      fmul d1, d1, d27
+      fdiv d1, d1, d2
+      fadd d1, d1, d27
+      str d1, [sp, 56]
+      ldr d1, [sp, 64]
+      ldr d27, [sp, 80]
+      fsub d1, d1, d27
+      fmul d1, d1, d27
+      fdiv d1, d1, d2
+      fadd d1, d1, d27
+      str d1, [sp, 64]
+      ldr d1, [sp, 72]
+      ldr d27, [sp, 80]
+      fsub d1, d1, d27
+      fmul d1, d1, d27
+      fdiv d1, d1, d2
+      fadd d1, d1, d27
+      str d1, [sp, 72]
+      label nslumChk2
+      ldr d1, [sp, 56]
+      ldr d2, [sp, 64]
+      fmax d1, d1, d2
+      ldr d2, [sp, 72]
+      fmax d1, d1, d2
+      fcmp d1, d18 # x > 1?
+      b.hi fwd("nslumAdj2")
+      b fwd("nslumDone")
+      label nslumAdj2
+      ldr d0, [sp, 80]
+      fsub d1, d1, d0
+      fmov d0, d18
+      ldr d2, [sp, 80]
+      fsub d0, d0, d2
+      ldr d2, [sp, 56]
+      ldr d27, [sp, 80]
+      fsub d2, d2, d27
+      fmul d2, d2, d0
+      fdiv d2, d2, d1
+      fadd d2, d2, d27
+      str d2, [sp, 56]
+      ldr d2, [sp, 64]
+      ldr d27, [sp, 80]
+      fsub d2, d2, d27
+      fmul d2, d2, d0
+      fdiv d2, d2, d1
+      fadd d2, d2, d27
+      str d2, [sp, 64]
+      ldr d2, [sp, 72]
+      ldr d27, [sp, 80]
+      fsub d2, d2, d27
+      fmul d2, d2, d0
+      fdiv d2, d2, d1
+      fadd d2, d2, d27
+      str d2, [sp, 72]
+      label nslumDone
 
   # --- C1: R channel ---
   when op == coSourceIn:
@@ -585,6 +1315,74 @@ proc emitBlendTailAarch64Static*(op: static CompOp, a: var Assembler) =
       fadd d27, d27, d27 # 2*cs*cb
       fsub d2, d2, d27 # Bout
       fmul d1, d1, d2 # t3
+      fadd d0, d0, d1
+  elif op == coHue:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24 # 1-da
+      fmul d26, d26, d22
+      ldr d0, [sp, 32]
+      fmul d0, d0, d26 # t1
+      fsub d26, d18, d22 # 1-sa
+      fmul d26, d26, d24
+      ldrb w4, [x9]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26 # t2
+      fadd d0, d0, d1
+      fmul d1, d22, d24 # sa*da
+      ldr d2, [sp, 56] # br (non-sep triple)
+      fmul d1, d1, d2 # t3
+      fadd d0, d0, d1
+  elif op == coSaturation:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 32]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24
+      ldr d2, [sp, 56]
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+  elif op == coColor:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 32]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24
+      ldr d2, [sp, 56]
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+  elif op == coLuminosity:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 32]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24
+      ldr d2, [sp, 56]
+      fmul d1, d1, d2
       fadd d0, d0, d1
   dynasm a:
     arch aarch64
@@ -998,6 +1796,74 @@ proc emitBlendTailAarch64Static*(op: static CompOp, a: var Assembler) =
       fsub d2, d2, d27 # Bout
       fmul d1, d1, d2 # t3
       fadd d0, d0, d1
+  elif op == coHue:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 40]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9, 1]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24
+      ldr d2, [sp, 64] # bg (non-sep triple)
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+  elif op == coSaturation:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 40]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9, 1]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24
+      ldr d2, [sp, 64]
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+  elif op == coColor:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 40]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9, 1]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24
+      ldr d2, [sp, 64]
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+  elif op == coLuminosity:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 40]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9, 1]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24
+      ldr d2, [sp, 64]
+      fmul d1, d1, d2
+      fadd d0, d0, d1
   dynasm a:
     arch aarch64
     fdiv d0, d0, d23
@@ -1410,6 +2276,74 @@ proc emitBlendTailAarch64Static*(op: static CompOp, a: var Assembler) =
       fsub d2, d2, d27 # Bout
       fmul d1, d1, d2 # t3
       fadd d0, d0, d1
+  elif op == coHue:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 48]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9, 2]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24
+      ldr d2, [sp, 72] # bb (non-sep triple)
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+  elif op == coSaturation:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 48]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9, 2]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24
+      ldr d2, [sp, 72]
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+  elif op == coColor:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 48]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9, 2]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24
+      ldr d2, [sp, 72]
+      fmul d1, d1, d2
+      fadd d0, d0, d1
+  elif op == coLuminosity:
+    dynasm a:
+      arch aarch64
+      fsub d26, d18, d24
+      fmul d26, d26, d22
+      ldr d0, [sp, 48]
+      fmul d0, d0, d26
+      fsub d26, d18, d22
+      fmul d26, d26, d24
+      ldrb w4, [x9, 2]
+      ldr d1, [x13, x4, lsl, 3]
+      fmul d1, d1, d26
+      fadd d0, d0, d1
+      fmul d1, d22, d24
+      ldr d2, [sp, 72]
+      fmul d1, d1, d2
+      fadd d0, d0, d1
   dynasm a:
     arch aarch64
     fdiv d0, d0, d23
@@ -1462,6 +2396,7 @@ proc emitBlendTailAarch64*(op: CompOp, a: var Assembler) =
   of coSoftLight: emitBlendTailAarch64Static(coSoftLight, a)
   of coDifference: emitBlendTailAarch64Static(coDifference, a)
   of coExclusion: emitBlendTailAarch64Static(coExclusion, a)
-  else:
-    raise newException(Defect,
-      "emitBlendTailAarch64: scalar-only op has no JIT tail")
+  of coHue: emitBlendTailAarch64Static(coHue, a)
+  of coSaturation: emitBlendTailAarch64Static(coSaturation, a)
+  of coColor: emitBlendTailAarch64Static(coColor, a)
+  of coLuminosity: emitBlendTailAarch64Static(coLuminosity, a)

@@ -60,6 +60,7 @@ destroyJitBackend(c.backend.JitBackend)
 - [x] Mask and layer compositing primitives
 - [x] Stars, polygons, path measurement and splitting
 - [x] JIT backend, pixel-identical to scalar
+- [x] All 26 blend modes on the JIT fast path (separable + non-separable)
 - [x] PNG export without dependencies
 - [ ] Text rendering (shaping + glyph outlines)
 - [x] Bilinear and multi-stop paints on the JIT fast path

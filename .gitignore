@@ -12,4 +12,5 @@ bin/
 bench/
 clue.lock
 plans/
+/examples/out/
 

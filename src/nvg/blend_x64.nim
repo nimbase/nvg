@@ -13,9 +13,15 @@
 ## - xmm10 = sa (coverage-scaled source alpha)
 ## - r10 = dst cursor, r9 = div-table
 ## - xmm4/5/6/7 = c255/zero/one/half, xmm8 = x (preserved)
-## Frame is 160 bytes; rgb spills to `[rsp+128/136/144]`, the 1e-6
+## Frame is 192 bytes; rgb spills to `[rsp+128/136/144]`, the 1e-6
 ## threshold (bit pattern via `movabs`, matching `blendPixel`'s
-## `ao <= 1e-6`) to `[rsp+152]` by the builder prologue.
+## `ao <= 1e-6`) to `[rsp+176]` by the builder prologue (it cannot live
+## at 152: the non-sep Bout triple overwrites that slot per pixel).
+## Non-separable tails (Hue..Luminosity) also use W3C Lum weights at
+## `[rsp+96/104/112]` (spilled per row, per pixel for bilinear whose
+## taps own that range during the head), scratch `[rsp+120]`, and the
+## Bout triple at `[rsp+152/160/168]` (bilinear thresholds there are
+## dead past geneval).
 ## Clobbers xmm0/1/2/3/9/11, eax/ecx/edx, flags. Preserves xmm4-8,
 ## xmm10, r8-r12. Op order replicates `surface.blendPixel` exactly
 ## (finite colors only, as elsewhere).
@@ -216,18 +222,661 @@ proc emitBlendTailX64Static*(op: static CompOp, a: var Assembler) =
       subsd xmm9, xmm10
       mulsd xmm9, xmm3
       addsd xmm11, xmm9 # sa + da*(1-sa)
+  elif op == coHue:
+    dynasm a:
+      arch x64
+      movzx edx, byte [r10 + 3]
+      movsd xmm3, [r9 + rdx*8]
+      movsd xmm11, xmm10
+      movsd xmm9, xmm6
+      subsd xmm9, xmm10
+      mulsd xmm9, xmm3
+      addsd xmm11, xmm9 # sa + da*(1-sa)
+  elif op == coSaturation:
+    dynasm a:
+      arch x64
+      movzx edx, byte [r10 + 3]
+      movsd xmm3, [r9 + rdx*8]
+      movsd xmm11, xmm10
+      movsd xmm9, xmm6
+      subsd xmm9, xmm10
+      mulsd xmm9, xmm3
+      addsd xmm11, xmm9 # sa + da*(1-sa)
+  elif op == coColor:
+    dynasm a:
+      arch x64
+      movzx edx, byte [r10 + 3]
+      movsd xmm3, [r9 + rdx*8]
+      movsd xmm11, xmm10
+      movsd xmm9, xmm6
+      subsd xmm9, xmm10
+      mulsd xmm9, xmm3
+      addsd xmm11, xmm9 # sa + da*(1-sa)
+  elif op == coLuminosity:
+    dynasm a:
+      arch x64
+      movzx edx, byte [r10 + 3]
+      movsd xmm3, [r9 + rdx*8]
+      movsd xmm11, xmm10
+      movsd xmm9, xmm6
+      subsd xmm9, xmm10
+      mulsd xmm9, xmm3
+      addsd xmm11, xmm9 # sa + da*(1-sa)
   else:
     {.error: "blend tail: sourceOver uses the dedicated fast path".}
 
   # --- B: ao threshold branch + rgb spill (shared) ---
   dynasm a:
     arch x64
-    movsd xmm9, [rsp + 152] # 1e-6
+    movsd xmm9, [rsp + 176] # 1e-6
     ucomisd xmm11, xmm9
     jbe fwd("pxzero") # ao <= 1e-6 -> transparent black
     movsd [rsp + 128], xmm0 # spill clamped paint rgb
     movsd [rsp + 136], xmm1
     movsd [rsp + 144], xmm2
+
+  # --- NS: non-separable Bout triple to [rsp+152/160/168] ---
+  # Hue/Saturation/Color/Luminosity blend the full Cs/Cb vectors
+  # (W3C SetSat/SetLum/ClipColor, Lum = 0.3R+0.59G+0.11B with weights
+  # spilled per row at [rsp+96/104/112]), then the C sections composite
+  # per channel like the separable ops. [rsp+120] is scratch (free in
+  # all Gen frames; bilinear taps are dead past geneval). xmm3 (da)
+  # and xmm11 (ao) are live into C and preserved. Finite colors only.
+  when op == coHue:
+    dynasm a:
+      arch x64
+      # satCb -> xmm9 (Cb loads; max3/min3 need no stores)
+      movzx edx, byte [r10]
+      movsd xmm0, [r9 + rdx*8] # dr
+      movzx edx, byte [r10 + 1]
+      movsd xmm1, [r9 + rdx*8] # dg
+      movzx edx, byte [r10 + 2]
+      movsd xmm2, [r9 + rdx*8] # db
+      movsd xmm9, xmm0
+      maxpd xmm9, xmm1
+      maxpd xmm9, xmm2 # cmaxCb
+      minpd xmm0, xmm1
+      minpd xmm0, xmm2 # cminCb
+      subsd xmm9, xmm0 # satCb
+      # scmin -> xmm1 (persistent through setSat)
+      movsd xmm1, [rsp + 128]
+      minsd xmm1, [rsp + 136]
+      minsd xmm1, [rsp + 144]
+      # scmax == scmin? (gray source -> st = black)
+      movsd xmm0, [rsp + 128]
+      maxsd xmm0, [rsp + 136]
+      maxsd xmm0, [rsp + 144]
+      ucomisd xmm0, xmm1
+      je fwd("nshueZero")
+      # R: st_r -> [rsp + 152]
+      movsd xmm0, [rsp + 128]
+      maxsd xmm0, [rsp + 136]
+      maxsd xmm0, [rsp + 144] # scmax
+      movsd xmm2, [rsp + 128] # csr
+      ucomisd xmm2, xmm0 # ch == cmax?
+      je fwd("nshueRmax")
+      ucomisd xmm2, xmm1 # ch == cmin?
+      je fwd("nshueRmin")
+      subsd xmm2, xmm1 # ch-cmin
+      mulsd xmm2, xmm9 # *s
+      subsd xmm0, xmm1 # denom
+      divsd xmm2, xmm0 # ((ch-cmin)*s)/(cmax-cmin)
+      jmp fwd("nshueRdone")
+      label nshueRmax
+      movsd xmm2, xmm9 # s
+      jmp fwd("nshueRdone")
+      label nshueRmin
+      movsd xmm2, xmm5 # 0
+      label nshueRdone
+      movsd [rsp + 152], xmm2
+      # G: st_g -> [rsp + 160]
+      movsd xmm0, [rsp + 128]
+      maxsd xmm0, [rsp + 136]
+      maxsd xmm0, [rsp + 144]
+      movsd xmm2, [rsp + 136] # csg
+      ucomisd xmm2, xmm0
+      je fwd("nshueGmax")
+      ucomisd xmm2, xmm1
+      je fwd("nshueGmin")
+      subsd xmm2, xmm1
+      mulsd xmm2, xmm9
+      subsd xmm0, xmm1
+      divsd xmm2, xmm0
+      jmp fwd("nshueGdone")
+      label nshueGmax
+      movsd xmm2, xmm9
+      jmp fwd("nshueGdone")
+      label nshueGmin
+      movsd xmm2, xmm5
+      label nshueGdone
+      movsd [rsp + 160], xmm2
+      # B: st_b -> [rsp + 168]
+      movsd xmm0, [rsp + 128]
+      maxsd xmm0, [rsp + 136]
+      maxsd xmm0, [rsp + 144]
+      movsd xmm2, [rsp + 144] # csb
+      ucomisd xmm2, xmm0
+      je fwd("nshueBmax")
+      ucomisd xmm2, xmm1
+      je fwd("nshueBmin")
+      subsd xmm2, xmm1
+      mulsd xmm2, xmm9
+      subsd xmm0, xmm1
+      divsd xmm2, xmm0
+      jmp fwd("nshueBdone")
+      label nshueBmax
+      movsd xmm2, xmm9
+      jmp fwd("nshueBdone")
+      label nshueBmin
+      movsd xmm2, xmm5
+      label nshueBdone
+      movsd [rsp + 168], xmm2
+      jmp fwd("nshueLum")
+      label nshueZero
+      movsd [rsp + 152], xmm5
+      movsd [rsp + 160], xmm5
+      movsd [rsp + 168], xmm5
+      label nshueLum
+      # lumCb -> park [rsp + 120]
+      movzx edx, byte [r10]
+      movsd xmm0, [r9 + rdx*8]
+      mulsd xmm0, [rsp + 96]
+      movzx edx, byte [r10 + 1]
+      movsd xmm1, [r9 + rdx*8]
+      mulsd xmm1, [rsp + 104]
+      addsd xmm0, xmm1
+      movzx edx, byte [r10 + 2]
+      movsd xmm1, [r9 + rdx*8]
+      mulsd xmm1, [rsp + 112]
+      addsd xmm0, xmm1 # lumCb
+      movsd [rsp + 120], xmm0 # park l
+      # lumSt -> xmm0; d = l - lumSt -> xmm9
+      movsd xmm0, [rsp + 152]
+      mulsd xmm0, [rsp + 96]
+      movsd xmm1, [rsp + 160]
+      mulsd xmm1, [rsp + 104]
+      addsd xmm0, xmm1
+      movsd xmm1, [rsp + 168]
+      mulsd xmm1, [rsp + 112]
+      addsd xmm0, xmm1 # lumSt
+      movsd xmm9, [rsp + 120]
+      subsd xmm9, xmm0 # d
+      # shift st slots by d
+      movsd xmm0, [rsp + 152]
+      addsd xmm0, xmm9
+      movsd [rsp + 152], xmm0
+      movsd xmm0, [rsp + 160]
+      addsd xmm0, xmm9
+      movsd [rsp + 160], xmm0
+      movsd xmm0, [rsp + 168]
+      addsd xmm0, xmm9
+      movsd [rsp + 168], xmm0
+      # n = min3, x = max3 (shifted values)
+      movsd xmm0, [rsp + 152]
+      minsd xmm0, [rsp + 160]
+      minsd xmm0, [rsp + 168] # n
+      movsd xmm1, [rsp + 152]
+      maxsd xmm1, [rsp + 160]
+      maxsd xmm1, [rsp + 168] # x
+      ucomisd xmm0, xmm5 # n < 0? (NaN takes branch, finite-only)
+      jb fwd("nshueAdj1")
+      jmp fwd("nshueChk2")
+      label nshueAdj1
+      movsd xmm2, [rsp + 120]
+      subsd xmm2, xmm0 # l-n -> denom xmm2
+      movsd xmm1, [rsp + 152]
+      subsd xmm1, [rsp + 120]
+      mulsd xmm1, [rsp + 120]
+      divsd xmm1, xmm2
+      addsd xmm1, [rsp + 120]
+      movsd [rsp + 152], xmm1
+      movsd xmm1, [rsp + 160]
+      subsd xmm1, [rsp + 120]
+      mulsd xmm1, [rsp + 120]
+      divsd xmm1, xmm2
+      addsd xmm1, [rsp + 120]
+      movsd [rsp + 160], xmm1
+      movsd xmm1, [rsp + 168]
+      subsd xmm1, [rsp + 120]
+      mulsd xmm1, [rsp + 120]
+      divsd xmm1, xmm2
+      addsd xmm1, [rsp + 120]
+      movsd [rsp + 168], xmm1
+      label nshueChk2
+      movsd xmm1, [rsp + 152]
+      maxsd xmm1, [rsp + 160]
+      maxsd xmm1, [rsp + 168] # x (current values)
+      ucomisd xmm1, xmm6 # x > 1?
+      ja fwd("nshueAdj2")
+      jmp fwd("nshueDone")
+      label nshueAdj2
+      movsd xmm0, [rsp + 120] # l
+      subsd xmm1, xmm0 # x-l -> denom xmm1
+      movsd xmm0, xmm6
+      subsd xmm0, [rsp + 120] # 1-l -> xmm0
+      movsd xmm2, [rsp + 152]
+      subsd xmm2, [rsp + 120]
+      mulsd xmm2, xmm0
+      divsd xmm2, xmm1
+      addsd xmm2, [rsp + 120]
+      movsd [rsp + 152], xmm2
+      movsd xmm2, [rsp + 160]
+      subsd xmm2, [rsp + 120]
+      mulsd xmm2, xmm0
+      divsd xmm2, xmm1
+      addsd xmm2, [rsp + 120]
+      movsd [rsp + 160], xmm2
+      movsd xmm2, [rsp + 168]
+      subsd xmm2, [rsp + 120]
+      mulsd xmm2, xmm0
+      divsd xmm2, xmm1
+      addsd xmm2, [rsp + 120]
+      movsd [rsp + 168], xmm2
+      label nshueDone
+  elif op == coSaturation:
+    dynasm a:
+      arch x64
+      # satCs -> xmm9 (Cs spills only)
+      movsd xmm0, [rsp + 128]
+      maxsd xmm0, [rsp + 136]
+      maxsd xmm0, [rsp + 144] # cmaxCs
+      movsd xmm1, [rsp + 128]
+      minsd xmm1, [rsp + 136]
+      minsd xmm1, [rsp + 144] # cminCs
+      movsd xmm9, xmm0
+      subsd xmm9, xmm1 # satCs
+      # Cb triple -> slots (future st home)
+      movzx edx, byte [r10]
+      movsd xmm0, [r9 + rdx*8]
+      movsd [rsp + 152], xmm0
+      movzx edx, byte [r10 + 1]
+      movsd xmm0, [r9 + rdx*8]
+      movsd [rsp + 160], xmm0
+      movzx edx, byte [r10 + 2]
+      movsd xmm0, [r9 + rdx*8]
+      movsd [rsp + 168], xmm0
+      # cbmin -> xmm1 (persistent through setSat)
+      movsd xmm1, [rsp + 152]
+      minsd xmm1, [rsp + 160]
+      minsd xmm1, [rsp + 168]
+      # cbmax == cbmin? (gray backdrop -> st = black)
+      movsd xmm0, [rsp + 152]
+      maxsd xmm0, [rsp + 160]
+      maxsd xmm0, [rsp + 168]
+      ucomisd xmm0, xmm1
+      je fwd("nssatZero")
+      movsd [rsp + 120], xmm0 # park cbmax
+      # R: st_r -> [rsp + 152]
+      movsd xmm0, [rsp + 120] # cbmax
+      movsd xmm2, [rsp + 152] # cbr
+      ucomisd xmm2, xmm0
+      je fwd("nssatRmax")
+      ucomisd xmm2, xmm1
+      je fwd("nssatRmin")
+      subsd xmm2, xmm1
+      mulsd xmm2, xmm9
+      subsd xmm0, xmm1
+      divsd xmm2, xmm0
+      jmp fwd("nssatRdone")
+      label nssatRmax
+      movsd xmm2, xmm9
+      jmp fwd("nssatRdone")
+      label nssatRmin
+      movsd xmm2, xmm5
+      label nssatRdone
+      movsd [rsp + 152], xmm2
+      # G: st_g -> [rsp + 160]
+      movsd xmm0, [rsp + 120]
+      movsd xmm2, [rsp + 160] # cbg
+      ucomisd xmm2, xmm0
+      je fwd("nssatGmax")
+      ucomisd xmm2, xmm1
+      je fwd("nssatGmin")
+      subsd xmm2, xmm1
+      mulsd xmm2, xmm9
+      subsd xmm0, xmm1
+      divsd xmm2, xmm0
+      jmp fwd("nssatGdone")
+      label nssatGmax
+      movsd xmm2, xmm9
+      jmp fwd("nssatGdone")
+      label nssatGmin
+      movsd xmm2, xmm5
+      label nssatGdone
+      movsd [rsp + 160], xmm2
+      # B: st_b -> [rsp + 168]
+      movsd xmm0, [rsp + 120]
+      movsd xmm2, [rsp + 168] # cbb
+      ucomisd xmm2, xmm0
+      je fwd("nssatBmax")
+      ucomisd xmm2, xmm1
+      je fwd("nssatBmin")
+      subsd xmm2, xmm1
+      mulsd xmm2, xmm9
+      subsd xmm0, xmm1
+      divsd xmm2, xmm0
+      jmp fwd("nssatBdone")
+      label nssatBmax
+      movsd xmm2, xmm9
+      jmp fwd("nssatBdone")
+      label nssatBmin
+      movsd xmm2, xmm5
+      label nssatBdone
+      movsd [rsp + 168], xmm2
+      jmp fwd("nssatLum")
+      label nssatZero
+      movsd [rsp + 152], xmm5
+      movsd [rsp + 160], xmm5
+      movsd [rsp + 168], xmm5
+      label nssatLum
+      # lumCb (reload Cb; st owns the slots) -> park [rsp + 120]
+      movzx edx, byte [r10]
+      movsd xmm0, [r9 + rdx*8]
+      mulsd xmm0, [rsp + 96]
+      movzx edx, byte [r10 + 1]
+      movsd xmm1, [r9 + rdx*8]
+      mulsd xmm1, [rsp + 104]
+      addsd xmm0, xmm1
+      movzx edx, byte [r10 + 2]
+      movsd xmm1, [r9 + rdx*8]
+      mulsd xmm1, [rsp + 112]
+      addsd xmm0, xmm1
+      movsd [rsp + 120], xmm0 # park l
+      # lumSt -> xmm0; d = l - lumSt -> xmm9
+      movsd xmm0, [rsp + 152]
+      mulsd xmm0, [rsp + 96]
+      movsd xmm1, [rsp + 160]
+      mulsd xmm1, [rsp + 104]
+      addsd xmm0, xmm1
+      movsd xmm1, [rsp + 168]
+      mulsd xmm1, [rsp + 112]
+      addsd xmm0, xmm1
+      movsd xmm9, [rsp + 120]
+      subsd xmm9, xmm0 # d
+      # shift st slots by d
+      movsd xmm0, [rsp + 152]
+      addsd xmm0, xmm9
+      movsd [rsp + 152], xmm0
+      movsd xmm0, [rsp + 160]
+      addsd xmm0, xmm9
+      movsd [rsp + 160], xmm0
+      movsd xmm0, [rsp + 168]
+      addsd xmm0, xmm9
+      movsd [rsp + 168], xmm0
+      # n = min3, x = max3 (shifted values)
+      movsd xmm0, [rsp + 152]
+      minsd xmm0, [rsp + 160]
+      minsd xmm0, [rsp + 168]
+      movsd xmm1, [rsp + 152]
+      maxsd xmm1, [rsp + 160]
+      maxsd xmm1, [rsp + 168]
+      ucomisd xmm0, xmm5 # n < 0?
+      jb fwd("nssatAdj1")
+      jmp fwd("nssatChk2")
+      label nssatAdj1
+      movsd xmm2, [rsp + 120]
+      subsd xmm2, xmm0
+      movsd xmm1, [rsp + 152]
+      subsd xmm1, [rsp + 120]
+      mulsd xmm1, [rsp + 120]
+      divsd xmm1, xmm2
+      addsd xmm1, [rsp + 120]
+      movsd [rsp + 152], xmm1
+      movsd xmm1, [rsp + 160]
+      subsd xmm1, [rsp + 120]
+      mulsd xmm1, [rsp + 120]
+      divsd xmm1, xmm2
+      addsd xmm1, [rsp + 120]
+      movsd [rsp + 160], xmm1
+      movsd xmm1, [rsp + 168]
+      subsd xmm1, [rsp + 120]
+      mulsd xmm1, [rsp + 120]
+      divsd xmm1, xmm2
+      addsd xmm1, [rsp + 120]
+      movsd [rsp + 168], xmm1
+      label nssatChk2
+      movsd xmm1, [rsp + 152]
+      maxsd xmm1, [rsp + 160]
+      maxsd xmm1, [rsp + 168]
+      ucomisd xmm1, xmm6 # x > 1?
+      ja fwd("nssatAdj2")
+      jmp fwd("nssatDone")
+      label nssatAdj2
+      movsd xmm0, [rsp + 120]
+      subsd xmm1, xmm0
+      movsd xmm0, xmm6
+      subsd xmm0, [rsp + 120]
+      movsd xmm2, [rsp + 152]
+      subsd xmm2, [rsp + 120]
+      mulsd xmm2, xmm0
+      divsd xmm2, xmm1
+      addsd xmm2, [rsp + 120]
+      movsd [rsp + 152], xmm2
+      movsd xmm2, [rsp + 160]
+      subsd xmm2, [rsp + 120]
+      mulsd xmm2, xmm0
+      divsd xmm2, xmm1
+      addsd xmm2, [rsp + 120]
+      movsd [rsp + 160], xmm2
+      movsd xmm2, [rsp + 168]
+      subsd xmm2, [rsp + 120]
+      mulsd xmm2, xmm0
+      divsd xmm2, xmm1
+      addsd xmm2, [rsp + 120]
+      movsd [rsp + 168], xmm2
+      label nssatDone
+  elif op == coColor:
+    dynasm a:
+      arch x64
+      # lumCb -> park [rsp + 120]
+      movzx edx, byte [r10]
+      movsd xmm0, [r9 + rdx*8]
+      mulsd xmm0, [rsp + 96]
+      movzx edx, byte [r10 + 1]
+      movsd xmm1, [r9 + rdx*8]
+      mulsd xmm1, [rsp + 104]
+      addsd xmm0, xmm1
+      movzx edx, byte [r10 + 2]
+      movsd xmm1, [r9 + rdx*8]
+      mulsd xmm1, [rsp + 112]
+      addsd xmm0, xmm1
+      movsd [rsp + 120], xmm0 # park l
+      # st = Cs -> slots
+      movsd xmm0, [rsp + 128]
+      movsd [rsp + 152], xmm0
+      movsd xmm0, [rsp + 136]
+      movsd [rsp + 160], xmm0
+      movsd xmm0, [rsp + 144]
+      movsd [rsp + 168], xmm0
+      # lumSt -> xmm0; d = l - lumSt -> xmm9
+      movsd xmm0, [rsp + 152]
+      mulsd xmm0, [rsp + 96]
+      movsd xmm1, [rsp + 160]
+      mulsd xmm1, [rsp + 104]
+      addsd xmm0, xmm1
+      movsd xmm1, [rsp + 168]
+      mulsd xmm1, [rsp + 112]
+      addsd xmm0, xmm1
+      movsd xmm9, [rsp + 120]
+      subsd xmm9, xmm0 # d
+      # shift st slots by d
+      movsd xmm0, [rsp + 152]
+      addsd xmm0, xmm9
+      movsd [rsp + 152], xmm0
+      movsd xmm0, [rsp + 160]
+      addsd xmm0, xmm9
+      movsd [rsp + 160], xmm0
+      movsd xmm0, [rsp + 168]
+      addsd xmm0, xmm9
+      movsd [rsp + 168], xmm0
+      # n = min3, x = max3 (shifted values)
+      movsd xmm0, [rsp + 152]
+      minsd xmm0, [rsp + 160]
+      minsd xmm0, [rsp + 168]
+      movsd xmm1, [rsp + 152]
+      maxsd xmm1, [rsp + 160]
+      maxsd xmm1, [rsp + 168]
+      ucomisd xmm0, xmm5 # n < 0?
+      jb fwd("nscolAdj1")
+      jmp fwd("nscolChk2")
+      label nscolAdj1
+      movsd xmm2, [rsp + 120]
+      subsd xmm2, xmm0
+      movsd xmm1, [rsp + 152]
+      subsd xmm1, [rsp + 120]
+      mulsd xmm1, [rsp + 120]
+      divsd xmm1, xmm2
+      addsd xmm1, [rsp + 120]
+      movsd [rsp + 152], xmm1
+      movsd xmm1, [rsp + 160]
+      subsd xmm1, [rsp + 120]
+      mulsd xmm1, [rsp + 120]
+      divsd xmm1, xmm2
+      addsd xmm1, [rsp + 120]
+      movsd [rsp + 160], xmm1
+      movsd xmm1, [rsp + 168]
+      subsd xmm1, [rsp + 120]
+      mulsd xmm1, [rsp + 120]
+      divsd xmm1, xmm2
+      addsd xmm1, [rsp + 120]
+      movsd [rsp + 168], xmm1
+      label nscolChk2
+      movsd xmm1, [rsp + 152]
+      maxsd xmm1, [rsp + 160]
+      maxsd xmm1, [rsp + 168]
+      ucomisd xmm1, xmm6 # x > 1?
+      ja fwd("nscolAdj2")
+      jmp fwd("nscolDone")
+      label nscolAdj2
+      movsd xmm0, [rsp + 120]
+      subsd xmm1, xmm0
+      movsd xmm0, xmm6
+      subsd xmm0, [rsp + 120]
+      movsd xmm2, [rsp + 152]
+      subsd xmm2, [rsp + 120]
+      mulsd xmm2, xmm0
+      divsd xmm2, xmm1
+      addsd xmm2, [rsp + 120]
+      movsd [rsp + 152], xmm2
+      movsd xmm2, [rsp + 160]
+      subsd xmm2, [rsp + 120]
+      mulsd xmm2, xmm0
+      divsd xmm2, xmm1
+      addsd xmm2, [rsp + 120]
+      movsd [rsp + 160], xmm2
+      movsd xmm2, [rsp + 168]
+      subsd xmm2, [rsp + 120]
+      mulsd xmm2, xmm0
+      divsd xmm2, xmm1
+      addsd xmm2, [rsp + 120]
+      movsd [rsp + 168], xmm2
+      label nscolDone
+  elif op == coLuminosity:
+    dynasm a:
+      arch x64
+      # lumCs -> park [rsp + 120]
+      movsd xmm0, [rsp + 128]
+      mulsd xmm0, [rsp + 96]
+      movsd xmm1, [rsp + 136]
+      mulsd xmm1, [rsp + 104]
+      addsd xmm0, xmm1
+      movsd xmm1, [rsp + 144]
+      mulsd xmm1, [rsp + 112]
+      addsd xmm0, xmm1
+      movsd [rsp + 120], xmm0 # park l
+      # st = Cb -> slots
+      movzx edx, byte [r10]
+      movsd xmm0, [r9 + rdx*8]
+      movsd [rsp + 152], xmm0
+      movzx edx, byte [r10 + 1]
+      movsd xmm0, [r9 + rdx*8]
+      movsd [rsp + 160], xmm0
+      movzx edx, byte [r10 + 2]
+      movsd xmm0, [r9 + rdx*8]
+      movsd [rsp + 168], xmm0
+      # lumSt -> xmm0; d = l - lumSt -> xmm9
+      movsd xmm0, [rsp + 152]
+      mulsd xmm0, [rsp + 96]
+      movsd xmm1, [rsp + 160]
+      mulsd xmm1, [rsp + 104]
+      addsd xmm0, xmm1
+      movsd xmm1, [rsp + 168]
+      mulsd xmm1, [rsp + 112]
+      addsd xmm0, xmm1
+      movsd xmm9, [rsp + 120]
+      subsd xmm9, xmm0 # d
+      # shift st slots by d
+      movsd xmm0, [rsp + 152]
+      addsd xmm0, xmm9
+      movsd [rsp + 152], xmm0
+      movsd xmm0, [rsp + 160]
+      addsd xmm0, xmm9
+      movsd [rsp + 160], xmm0
+      movsd xmm0, [rsp + 168]
+      addsd xmm0, xmm9
+      movsd [rsp + 168], xmm0
+      # n = min3, x = max3 (shifted values)
+      movsd xmm0, [rsp + 152]
+      minsd xmm0, [rsp + 160]
+      minsd xmm0, [rsp + 168]
+      movsd xmm1, [rsp + 152]
+      maxsd xmm1, [rsp + 160]
+      maxsd xmm1, [rsp + 168]
+      ucomisd xmm0, xmm5 # n < 0?
+      jb fwd("nslumAdj1")
+      jmp fwd("nslumChk2")
+      label nslumAdj1
+      movsd xmm2, [rsp + 120]
+      subsd xmm2, xmm0
+      movsd xmm1, [rsp + 152]
+      subsd xmm1, [rsp + 120]
+      mulsd xmm1, [rsp + 120]
+      divsd xmm1, xmm2
+      addsd xmm1, [rsp + 120]
+      movsd [rsp + 152], xmm1
+      movsd xmm1, [rsp + 160]
+      subsd xmm1, [rsp + 120]
+      mulsd xmm1, [rsp + 120]
+      divsd xmm1, xmm2
+      addsd xmm1, [rsp + 120]
+      movsd [rsp + 160], xmm1
+      movsd xmm1, [rsp + 168]
+      subsd xmm1, [rsp + 120]
+      mulsd xmm1, [rsp + 120]
+      divsd xmm1, xmm2
+      addsd xmm1, [rsp + 120]
+      movsd [rsp + 168], xmm1
+      label nslumChk2
+      movsd xmm1, [rsp + 152]
+      maxsd xmm1, [rsp + 160]
+      maxsd xmm1, [rsp + 168]
+      ucomisd xmm1, xmm6 # x > 1?
+      ja fwd("nslumAdj2")
+      jmp fwd("nslumDone")
+      label nslumAdj2
+      movsd xmm0, [rsp + 120]
+      subsd xmm1, xmm0
+      movsd xmm0, xmm6
+      subsd xmm0, [rsp + 120]
+      movsd xmm2, [rsp + 152]
+      subsd xmm2, [rsp + 120]
+      mulsd xmm2, xmm0
+      divsd xmm2, xmm1
+      addsd xmm2, [rsp + 120]
+      movsd [rsp + 152], xmm2
+      movsd xmm2, [rsp + 160]
+      subsd xmm2, [rsp + 120]
+      mulsd xmm2, xmm0
+      divsd xmm2, xmm1
+      addsd xmm2, [rsp + 120]
+      movsd [rsp + 160], xmm2
+      movsd xmm2, [rsp + 168]
+      subsd xmm2, [rsp + 120]
+      mulsd xmm2, xmm0
+      divsd xmm2, xmm1
+      addsd xmm2, [rsp + 120]
+      movsd [rsp + 168], xmm2
+      label nslumDone
 
   # --- C1: R channel (combine per op, then shared div/quant/store) ---
   when op == coSourceIn:
@@ -691,6 +1340,86 @@ proc emitBlendTailX64Static*(op: static CompOp, a: var Assembler) =
       addsd xmm9, xmm9 # 2*cs*cb
       subsd xmm2, xmm9 # Bout
       mulsd xmm1, xmm2 # t3
+      addsd xmm0, xmm1
+  elif op == coHue:
+    dynasm a:
+      arch x64
+      movsd xmm9, xmm6
+      subsd xmm9, xmm3 # 1-da
+      mulsd xmm9, xmm10 # (1-da)*sa
+      movsd xmm0, [rsp + 128] # sr
+      mulsd xmm0, xmm9 # t1
+      movsd xmm9, xmm6
+      subsd xmm9, xmm10 # 1-sa
+      mulsd xmm9, xmm3 # (1-sa)*da
+      movzx edx, byte [r10]
+      movsd xmm1, [r9 + rdx*8] # dr
+      mulsd xmm1, xmm9 # t2
+      addsd xmm0, xmm1 # t1+t2
+      movsd xmm1, xmm10
+      mulsd xmm1, xmm3 # sa*da
+      movsd xmm2, [rsp + 152] # br (non-sep triple)
+      mulsd xmm1, xmm2 # t3
+      addsd xmm0, xmm1
+  elif op == coSaturation:
+    dynasm a:
+      arch x64
+      movsd xmm9, xmm6
+      subsd xmm9, xmm3
+      mulsd xmm9, xmm10
+      movsd xmm0, [rsp + 128]
+      mulsd xmm0, xmm9
+      movsd xmm9, xmm6
+      subsd xmm9, xmm10
+      mulsd xmm9, xmm3
+      movzx edx, byte [r10]
+      movsd xmm1, [r9 + rdx*8]
+      mulsd xmm1, xmm9
+      addsd xmm0, xmm1
+      movsd xmm1, xmm10
+      mulsd xmm1, xmm3
+      movsd xmm2, [rsp + 152]
+      mulsd xmm1, xmm2
+      addsd xmm0, xmm1
+  elif op == coColor:
+    dynasm a:
+      arch x64
+      movsd xmm9, xmm6
+      subsd xmm9, xmm3
+      mulsd xmm9, xmm10
+      movsd xmm0, [rsp + 128]
+      mulsd xmm0, xmm9
+      movsd xmm9, xmm6
+      subsd xmm9, xmm10
+      mulsd xmm9, xmm3
+      movzx edx, byte [r10]
+      movsd xmm1, [r9 + rdx*8]
+      mulsd xmm1, xmm9
+      addsd xmm0, xmm1
+      movsd xmm1, xmm10
+      mulsd xmm1, xmm3
+      movsd xmm2, [rsp + 152]
+      mulsd xmm1, xmm2
+      addsd xmm0, xmm1
+  elif op == coLuminosity:
+    dynasm a:
+      arch x64
+      movsd xmm9, xmm6
+      subsd xmm9, xmm3
+      mulsd xmm9, xmm10
+      movsd xmm0, [rsp + 128]
+      mulsd xmm0, xmm9
+      movsd xmm9, xmm6
+      subsd xmm9, xmm10
+      mulsd xmm9, xmm3
+      movzx edx, byte [r10]
+      movsd xmm1, [r9 + rdx*8]
+      mulsd xmm1, xmm9
+      addsd xmm0, xmm1
+      movsd xmm1, xmm10
+      mulsd xmm1, xmm3
+      movsd xmm2, [rsp + 152]
+      mulsd xmm1, xmm2
       addsd xmm0, xmm1
   dynasm a:
     arch x64
@@ -1165,6 +1894,86 @@ proc emitBlendTailX64Static*(op: static CompOp, a: var Assembler) =
       subsd xmm2, xmm9 # Bout
       mulsd xmm1, xmm2 # t3
       addsd xmm0, xmm1
+  elif op == coHue:
+    dynasm a:
+      arch x64
+      movsd xmm9, xmm6
+      subsd xmm9, xmm3
+      mulsd xmm9, xmm10
+      movsd xmm0, [rsp + 136]
+      mulsd xmm0, xmm9
+      movsd xmm9, xmm6
+      subsd xmm9, xmm10
+      mulsd xmm9, xmm3
+      movzx edx, byte [r10 + 1]
+      movsd xmm1, [r9 + rdx*8]
+      mulsd xmm1, xmm9
+      addsd xmm0, xmm1
+      movsd xmm1, xmm10
+      mulsd xmm1, xmm3
+      movsd xmm2, [rsp + 160] # bg (non-sep triple)
+      mulsd xmm1, xmm2
+      addsd xmm0, xmm1
+  elif op == coSaturation:
+    dynasm a:
+      arch x64
+      movsd xmm9, xmm6
+      subsd xmm9, xmm3
+      mulsd xmm9, xmm10
+      movsd xmm0, [rsp + 136]
+      mulsd xmm0, xmm9
+      movsd xmm9, xmm6
+      subsd xmm9, xmm10
+      mulsd xmm9, xmm3
+      movzx edx, byte [r10 + 1]
+      movsd xmm1, [r9 + rdx*8]
+      mulsd xmm1, xmm9
+      addsd xmm0, xmm1
+      movsd xmm1, xmm10
+      mulsd xmm1, xmm3
+      movsd xmm2, [rsp + 160]
+      mulsd xmm1, xmm2
+      addsd xmm0, xmm1
+  elif op == coColor:
+    dynasm a:
+      arch x64
+      movsd xmm9, xmm6
+      subsd xmm9, xmm3
+      mulsd xmm9, xmm10
+      movsd xmm0, [rsp + 136]
+      mulsd xmm0, xmm9
+      movsd xmm9, xmm6
+      subsd xmm9, xmm10
+      mulsd xmm9, xmm3
+      movzx edx, byte [r10 + 1]
+      movsd xmm1, [r9 + rdx*8]
+      mulsd xmm1, xmm9
+      addsd xmm0, xmm1
+      movsd xmm1, xmm10
+      mulsd xmm1, xmm3
+      movsd xmm2, [rsp + 160]
+      mulsd xmm1, xmm2
+      addsd xmm0, xmm1
+  elif op == coLuminosity:
+    dynasm a:
+      arch x64
+      movsd xmm9, xmm6
+      subsd xmm9, xmm3
+      mulsd xmm9, xmm10
+      movsd xmm0, [rsp + 136]
+      mulsd xmm0, xmm9
+      movsd xmm9, xmm6
+      subsd xmm9, xmm10
+      mulsd xmm9, xmm3
+      movzx edx, byte [r10 + 1]
+      movsd xmm1, [r9 + rdx*8]
+      mulsd xmm1, xmm9
+      addsd xmm0, xmm1
+      movsd xmm1, xmm10
+      mulsd xmm1, xmm3
+      movsd xmm2, [rsp + 160]
+      mulsd xmm1, xmm2
+      addsd xmm0, xmm1
   dynasm a:
     arch x64
     divsd xmm0, xmm11
@@ -1638,6 +2447,86 @@ proc emitBlendTailX64Static*(op: static CompOp, a: var Assembler) =
       subsd xmm2, xmm9 # Bout
       mulsd xmm1, xmm2 # t3
       addsd xmm0, xmm1
+  elif op == coHue:
+    dynasm a:
+      arch x64
+      movsd xmm9, xmm6
+      subsd xmm9, xmm3
+      mulsd xmm9, xmm10
+      movsd xmm0, [rsp + 144]
+      mulsd xmm0, xmm9
+      movsd xmm9, xmm6
+      subsd xmm9, xmm10
+      mulsd xmm9, xmm3
+      movzx edx, byte [r10 + 2]
+      movsd xmm1, [r9 + rdx*8]
+      mulsd xmm1, xmm9
+      addsd xmm0, xmm1
+      movsd xmm1, xmm10
+      mulsd xmm1, xmm3
+      movsd xmm2, [rsp + 168] # bb (non-sep triple)
+      mulsd xmm1, xmm2
+      addsd xmm0, xmm1
+  elif op == coSaturation:
+    dynasm a:
+      arch x64
+      movsd xmm9, xmm6
+      subsd xmm9, xmm3
+      mulsd xmm9, xmm10
+      movsd xmm0, [rsp + 144]
+      mulsd xmm0, xmm9
+      movsd xmm9, xmm6
+      subsd xmm9, xmm10
+      mulsd xmm9, xmm3
+      movzx edx, byte [r10 + 2]
+      movsd xmm1, [r9 + rdx*8]
+      mulsd xmm1, xmm9
+      addsd xmm0, xmm1
+      movsd xmm1, xmm10
+      mulsd xmm1, xmm3
+      movsd xmm2, [rsp + 168]
+      mulsd xmm1, xmm2
+      addsd xmm0, xmm1
+  elif op == coColor:
+    dynasm a:
+      arch x64
+      movsd xmm9, xmm6
+      subsd xmm9, xmm3
+      mulsd xmm9, xmm10
+      movsd xmm0, [rsp + 144]
+      mulsd xmm0, xmm9
+      movsd xmm9, xmm6
+      subsd xmm9, xmm10
+      mulsd xmm9, xmm3
+      movzx edx, byte [r10 + 2]
+      movsd xmm1, [r9 + rdx*8]
+      mulsd xmm1, xmm9
+      addsd xmm0, xmm1
+      movsd xmm1, xmm10
+      mulsd xmm1, xmm3
+      movsd xmm2, [rsp + 168]
+      mulsd xmm1, xmm2
+      addsd xmm0, xmm1
+  elif op == coLuminosity:
+    dynasm a:
+      arch x64
+      movsd xmm9, xmm6
+      subsd xmm9, xmm3
+      mulsd xmm9, xmm10
+      movsd xmm0, [rsp + 144]
+      mulsd xmm0, xmm9
+      movsd xmm9, xmm6
+      subsd xmm9, xmm10
+      mulsd xmm9, xmm3
+      movzx edx, byte [r10 + 2]
+      movsd xmm1, [r9 + rdx*8]
+      mulsd xmm1, xmm9
+      addsd xmm0, xmm1
+      movsd xmm1, xmm10
+      mulsd xmm1, xmm3
+      movsd xmm2, [rsp + 168]
+      mulsd xmm1, xmm2
+      addsd xmm0, xmm1
   dynasm a:
     arch x64
     divsd xmm0, xmm11
@@ -1697,6 +2586,7 @@ proc emitBlendTailX64*(op: CompOp, a: var Assembler) =
   of coSoftLight: emitBlendTailX64Static(coSoftLight, a)
   of coDifference: emitBlendTailX64Static(coDifference, a)
   of coExclusion: emitBlendTailX64Static(coExclusion, a)
-  else:
-    raise newException(Defect,
-      "emitBlendTailX64: scalar-only op has no JIT tail")
+  of coHue: emitBlendTailX64Static(coHue, a)
+  of coSaturation: emitBlendTailX64Static(coSaturation, a)
+  of coColor: emitBlendTailX64Static(coColor, a)
+  of coLuminosity: emitBlendTailX64Static(coLuminosity, a)
