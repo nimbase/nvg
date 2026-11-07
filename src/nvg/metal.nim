@@ -47,6 +47,7 @@ const
   MSlotPattern* = 7
   MSlotBlurH* = 8
   MSlotBlurV* = 9
+  MSlotPatternBilinear* = 10
 
 const solidMsl* = """
 #include <metal_stdlib>
@@ -446,6 +447,67 @@ type BlurParams* = object
   ## Must match MSL `BlurP` layout (4 bytes).
   radius*: cint
 
+const patternBilinearMsl* = """
+#include <metal_stdlib>
+using namespace metal;
+// Bilinear pattern fill mirroring scalar `sampleImage`: premultiplied
+// accumulation with the transparent guard, then tint. Same `PatP`
+// params as the nearest kernel; requires a non-nearest image.
+struct PatP {
+  float2 o; float2 e; float4 tint; float ang; float _p0; uint2 img;
+  uint flags;
+};
+kernel void fill_pattern_bilinear(device uchar4 *out [[buffer(0)]],
+                                  constant PatP &u [[buffer(1)]],
+                                  constant uint2 &dims [[buffer(2)]],
+                                  texture2d<float, access::read> img [[texture(0)]],
+                                  uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= dims.x || gid.y >= dims.y) return;
+  float2 q = float2(gid) + 0.5 - u.o;
+  float ca = cos(u.ang);
+  float sa = sin(u.ang);
+  float uu = (ca * q.x + sa * q.y) / u.e.x;
+  float vv = (-sa * q.x + ca * q.y) / u.e.y;
+  if ((u.flags & 4u) != 0u) vv = 1.0 - vv;
+  int W = int(u.img.x);
+  int H = int(u.img.y);
+  float fx = uu * float(W) - 0.5;
+  float fy = vv * float(H) - 0.5;
+  int x0 = int(floor(fx));
+  int y0 = int(floor(fy));
+  float tx = clamp(fx - float(x0), 0.0, 1.0);
+  float ty = clamp(fy - float(y0), 0.0, 1.0);
+  float4 acc = float4(0.0);
+  for (int j = 0; j <= 1; j++) {
+    for (int i = 0; i <= 1; i++) {
+      int xi = x0 + i;
+      int yi = y0 + j;
+      if ((u.flags & 1u) != 0u) {
+        xi = ((xi % W) + W) % W;
+      } else {
+        xi = clamp(xi, 0, W - 1);
+      }
+      if ((u.flags & 2u) != 0u) {
+        yi = ((yi % H) + H) % H;
+      } else {
+        yi = clamp(yi, 0, H - 1);
+      }
+      float4 t = img.read(uint2(uint(xi), uint(yi)));
+      float w = (i == 0 ? 1.0 - tx : tx) * (j == 0 ? 1.0 - ty : ty);
+      acc += float4(t.rgb * t.a, t.a) * w;
+    }
+  }
+  float4 c;
+  if (acc.a > 1e-6) {
+    c = float4(acc.rgb / acc.a, acc.a);
+  } else {
+    c = float4(0.0);
+  }
+  c = float4(c.rgb * u.tint.rgb, c.a * u.tint.a);
+  out[gid.y * dims.x + gid.x] = uchar4(saturate(c) * 255.0 + 0.5);
+}
+"""
+
 static:
   doAssert sizeof(LinearParams) == 48
   doAssert sizeof(RadialParams) == 48
@@ -508,6 +570,8 @@ proc newMetalCtx*(w, h: int): MetalCtx =
       result.buildSlot(MSlotPattern, patternMsl, "fill_pattern_nearest")
       result.buildSlot(MSlotBlurH, blurMsl, "blur_h")
       result.buildSlot(MSlotBlurV, blurMsl, "blur_v")
+      result.buildSlot(MSlotPatternBilinear, patternBilinearMsl,
+        "fill_pattern_bilinear")
     except IOError:
       nvgmtl_destroy(p)
       result.p = nil
@@ -579,8 +643,7 @@ proc shadeSolidOver*(ctx: MetalCtx, col: Color, alpha: float64) =
       cint(sizeof(u)))
 
 proc setPattern*(ctx: MetalCtx, img: Image) =
-  ## Upload `img` pixels as the pattern texture. Nearest-filter images
-  ## only for now (bilinear sampling arrives with its kernel).
+  ## Upload `img` pixels as the pattern texture.
   when defined(macosx):
     if img == nil or img.w <= 0 or img.h <= 0:
       raise newException(ValueError, "pattern image needs size")
@@ -597,6 +660,8 @@ proc fillPatternNearest*(ctx: MetalCtx, ox, oy, ex, ey,
   ## identity map. Requires `setPattern(img)` first; `img` supplies
   ## size and flags.
   when defined(macosx):
+    if ifNearest notin img.flags:
+      raise newException(ValueError, "nearest kernel needs ifNearest")
     if abs(ex) < 1e-12 or abs(ey) < 1e-12:
       raise newException(ValueError, "pattern extent needs size")
     var flags = 0u32
@@ -610,6 +675,29 @@ proc fillPatternNearest*(ctx: MetalCtx, ox, oy, ex, ey,
       angle: cfloat(angle), pad: cfloat(0),
       imgW: cuint(img.w), imgH: cuint(img.h), flags: cuint(flags))
     nvgmtl_fill(ctx.p, cint(MSlotPattern), addr u, cint(sizeof(u)))
+
+proc fillPatternBilinear*(ctx: MetalCtx, ox, oy, ex, ey,
+    angle: float64, tint: Color, img: Image) =
+  ## Bilinear pattern fill mirroring scalar `sampleImage` at pixel
+  ## centers, identity map. Requires `setPattern(img)` first; `img`
+  ## supplies size and flags and must not set ifNearest.
+  when defined(macosx):
+    if ifNearest in img.flags:
+      raise newException(ValueError, "bilinear kernel needs filtering")
+    if abs(ex) < 1e-12 or abs(ey) < 1e-12:
+      raise newException(ValueError, "pattern extent needs size")
+    var flags = 0u32
+    if ifRepeatX in img.flags: flags = flags or 1u32
+    if ifRepeatY in img.flags: flags = flags or 2u32
+    if ifFlipY in img.flags: flags = flags or 4u32
+    var u = PatternParams(ox: cfloat(ox), oy: cfloat(oy),
+      ex: cfloat(ex), ey: cfloat(ey),
+      tint: [cfloat(tint.r), cfloat(tint.g), cfloat(tint.b),
+        cfloat(tint.a)],
+      angle: cfloat(angle), pad: cfloat(0),
+      imgW: cuint(img.w), imgH: cuint(img.h), flags: cuint(flags))
+    nvgmtl_fill(ctx.p, cint(MSlotPatternBilinear), addr u,
+      cint(sizeof(u)))
 
 proc boxBlur*(ctx: MetalCtx, radius: int) =
   ## Separable box blur mirroring scalar `boxBlur`: horizontal pass

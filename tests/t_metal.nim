@@ -383,3 +383,56 @@ test "compute box blur is byte-identical to cpu":
       check ctx.readback() == cpu.pixels
   else:
     skip()
+
+test "compute bilinear pattern matches cpu within 1 lsb":
+  when defined(macosx):
+    if not mtlAvailable():
+      skip()
+    const W = 8
+    const H = 8
+    var px = newSeq[uint8](4 * 4 * 4)
+    for y in 0 ..< 4:
+      for x in 0 ..< 4:
+        let i = (y * 4 + x) * 4
+        px[i] = uint8(x * 85)
+        px[i + 1] = uint8(y * 85)
+        px[i + 2] = 170u8
+        px[i + 3] = 255u8
+    px[(3 * 4 + 3) * 4 + 0] = 0u8
+    px[(3 * 4 + 3) * 4 + 1] = 0u8
+    px[(3 * 4 + 3) * 4 + 2] = 0u8
+    px[(3 * 4 + 3) * 4 + 3] = 0u8
+    px[(2 * 4 + 1) * 4 + 3] = 128u8
+    let flagSets: array[3, set[ImageFlag]] = [
+      {},
+      {ifRepeatX, ifRepeatY},
+      {ifFlipY},
+    ]
+    let geoms = [
+      (0.0, 0.0, 4.0, 4.0, rgbf(1, 1, 1)),
+      (0.0, 0.0, 2.0, 2.0, rgbf(1, 1, 1)),
+      (1.5, 0.5, 4.0, 4.0, rgbaf(0.5, 0.5, 0.5, 1.0)),
+    ]
+    var ctx = newMetalCtx(W, H)
+    defer: ctx.close()
+    for flags in flagSets:
+      let img = newImage(4, 4, flags, px)
+      ctx.setPattern(img)
+      for (ox, oy, ex, ey, tint) in geoms:
+        let paint = imagePattern(img, ox, oy, ex, ey, 0.0, tint)
+        ctx.fillPatternBilinear(ox, oy, ex, ey, 0.0, tint, img)
+        let got = ctx.readback()
+        var maxDiff = 0
+        for y in 0 ..< H:
+          for x in 0 ..< W:
+            let (r, g, b, a) = paint.sample(
+              float64(x) + 0.5, float64(y) + 0.5).toRgba8()
+            let i = (y * W + x) * 4
+            for k in 0 ..< 4:
+              let want = [r, g, b, a][k]
+              let d = abs(int(got[i + k]) - int(want))
+              if d > maxDiff:
+                maxDiff = d
+        check maxDiff <= 1
+  else:
+    skip()
