@@ -4,9 +4,24 @@
 ## the ARM divergence lives in the kernel or the scalar.
 import std/unittest
 import std/random
+import std/strutils
 import nvg/types
 import nvg/surface
 import nvg/jit
+import dynasm/exec
+
+test "zz hue kernel bytes":
+  # Proves/disproves identical emitted bytes across legs (dynasm
+  # version skew would show here). 1300 bytes hex.
+  var buf = buildSolidRowGenAarch64(coHue)
+  var s = ""
+  for i in 0 ..< buf.length:
+    s.add(buf[i].toHex(2))
+  echo "zz-bytes len=", buf.length
+  echo "zz-bytes ", s[0 ..< 400]
+  echo "zz-bytes ", s[s.len - 400 ..< s.len]
+  buf.destroy()
+  check true
 
 test "zz rand stream check":
   # Proves/disproves identical rand streams across legs (load-bearing
