@@ -534,7 +534,7 @@ test "destroy is safe and idempotent":
   destroyJitBackend(b) # second call must not crash
   check true
 
-when defined(amd64):
+when defined(amd64) or defined(arm64) or defined(aarch64):
   test "row kernel matches blendPixel over colors x coverages":
     randomize(20240)
     let kern = JitKernels()
@@ -991,6 +991,9 @@ when defined(amd64):
     check patternSkippable(imagePattern(img, 0, 0, 8, 8, 0.0), 0.0)
     check not patternSkippable(imagePattern(img, 0, 0, 8, 8, 0.0), 1.0)
 
+when defined(amd64):
+  # Multi-stop and bilinear kernels exist for x64 only; AArch64 uses
+  # the scalar fallback (covered by the CPU-side suites).
   test "multi-linear row kernel matches sample+blend":
     randomize(31415)
     let kern = JitKernels()
@@ -1478,8 +1481,8 @@ when defined(amd64):
     check totalDiff == 0
 
 test "aarch64 kernel assembles":
-  # Bytes-only on non-ARM hosts; execution is amd64-gated above until
-  # an ARM hardware run signs the kernel off.
+  # Bytes-only on non-ARM hosts; on AArch64 the sweep tests above
+  # execute these kernels against the scalar oracle.
   var buf = buildSolidRowAarch64()
   let ok = buf.len > 100
   buf.destroy()

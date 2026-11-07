@@ -28,7 +28,9 @@ when defined(nvgJit):
       ## solid, linear-, radial-, box-gradient (2-stop and multi-stop)
       ## and nearest/bilinear-pattern fills and strokes; everything else
       ## falls back to the scalar rasterizer, so output is identical to
-      ## `CpuBackend`. Opt-in via `newCanvas(w, h, newJitBackend())`;
+      ## `CpuBackend`. Multi-stop and bilinear kernels are amd64-only
+      ## for now (AArch64 runs those paints through the scalar
+      ## fallback). Opt-in via `newCanvas(w, h, newJitBackend())`;
       ## call `destroyJitBackend` when done (mappings are also released
       ## by GC).
       kern*: JitKernels
@@ -76,8 +78,9 @@ when defined(nvgJit):
     ## guaranteed opposite orientations and still mis-fills
     ## self-intersections), so only `fill` takes a rule; `stroke` below
     ## keeps the default. Kernels are op-specialized (`get*(op)`); the
-    ## scalar fallback covers non-runnable patterns and non-amd64 hosts.
-    when defined(amd64):
+    ## scalar fallback covers non-runnable patterns, multi-stop and
+    ## bilinear paints on AArch64, and hosts with no JIT builders.
+    when defined(amd64) or defined(arm64) or defined(aarch64):
       case paint.kind
       of pkSolid:
         let fn = b.kern.getSolid(op)
@@ -145,7 +148,7 @@ when defined(nvgJit):
       paint: Paint, width: float64, cap: LineCap, join: LineJoin,
       miterLimit: float64, alpha: float64, clip: Clip,
       aa = true, op = coSourceOver) =
-    when defined(amd64):
+    when defined(amd64) or defined(arm64) or defined(aarch64):
       case paint.kind
       of pkSolid:
         let fn = b.kern.getSolid(op)

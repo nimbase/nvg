@@ -1,7 +1,8 @@
 ## Generic-op blend tail emitters for the AArch64 row kernels.
 ## Same structure as `blend_x64`: one emitter per comp op shared by all
 ## builders (was an `include` fragment expanded per (shape, op) pair).
-## Assemble-verified only until an ARM run signs off execution.
+## Executed on AArch64 hosts (the ARM CI runners check byte-identity
+## against the scalar oracle); multi-stop/bilinear tails stay x64-only.
 ##
 ## Entry contract: d0/1/2 = straight CLAMPED paint r/g/b, d22 = sa,
 ## x9 = dst cursor, x13 = div-table, d16/17/18/19 = c255/zero/one/half,
@@ -223,7 +224,7 @@ proc emitBlendTailAarch64Static*(op: static CompOp, a: var Assembler) =
   # Same structure as the x64 NS section: W3C SetSat/SetLum/ClipColor
   # with Lum weights spilled per row at [sp, 0/8/16], scratch park at
   # [sp, 80]. d22 (sa), d23 (ao), d24 (da) are live into C and
-  # preserved. Assemble-verified only, like the other a64 tails.
+  # preserved. Executed on AArch64 hosts like the other a64 tails.
   when op == coHue:
     dynasm a:
       arch aarch64

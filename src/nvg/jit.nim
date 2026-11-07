@@ -196,8 +196,8 @@ proc buildSolidRowGenX64*(op: CompOp): ExecutableBuffer =
 proc buildSolidRowAarch64*(): ExecutableBuffer =
   ## Same algorithm for AArch64. Upper d-regs hoist all constants;
   ## no int<->float conversions anywhere (table + f64 coverage).
-  ## NOTE: execution not yet verified on hardware; the backend runs
-  ## this kernel only on amd64 until an ARM run signs it off.
+  ## Executes on AArch64 hosts via the `getSolid` arm64 branch (the
+  ## ARM CI runners sign off byte-identity against the scalar path).
   var a = newAssembler(akAarch64)
   dynasm a:
     arch aarch64
@@ -278,7 +278,7 @@ proc buildSolidRowAarch64*(): ExecutableBuffer =
 
 proc buildSolidRowGenAarch64*(op: CompOp): ExecutableBuffer =
   ## Solid head with the generic-op tail (`blend_a64`, same contract as
-  ## x64). Assemble-verified only, like the kernel above.
+  ## x64). Executes on AArch64 hosts via the arm64 getter branch, like the kernel above.
   var a = newAssembler(akAarch64)
   dynasm a:
     arch aarch64
@@ -609,8 +609,8 @@ proc buildLinearRowGenX64*(op: CompOp): ExecutableBuffer =
 
 proc buildLinearRowAarch64*(): ExecutableBuffer =
   ## Same algorithm for AArch64 (d16-23 hoist consts + loop-carried;
-  ## paint streams from ctx). Assemble-verified only until an ARM
-  ## hardware run signs off execution; the backend stays amd64-gated.
+  ## paint streams from ctx). Executes on AArch64 hosts via the
+  ## `getLinear` arm64 branch.
   var a = newAssembler(akAarch64)
   dynasm a:
     arch aarch64
@@ -738,7 +738,7 @@ proc buildLinearRowAarch64*(): ExecutableBuffer =
 
 proc buildLinearRowGenAarch64*(op: CompOp): ExecutableBuffer =
   ## Linear head with the generic-op tail (`blend_a64`, same contract
-  ## as x64). Assemble-verified only, like the kernel above.
+  ## as x64). Executes on AArch64 hosts via the arm64 getter branch, like the kernel above.
   var a = newAssembler(akAarch64)
   dynasm a:
     arch aarch64
@@ -1113,7 +1113,7 @@ proc buildRadialRowGenX64*(op: CompOp): ExecutableBuffer =
 
 proc buildRadialRowAarch64*(): ExecutableBuffer =
   ## Same algorithm for AArch64 (`fsqrt` for the distance).
-  ## Assemble-verified only; the backend stays amd64-gated.
+  ## Executes on AArch64 hosts via the arm64 getter branch.
   var a = newAssembler(akAarch64)
   dynasm a:
     arch aarch64
@@ -1243,7 +1243,7 @@ proc buildRadialRowAarch64*(): ExecutableBuffer =
 
 proc buildRadialRowGenAarch64*(op: CompOp): ExecutableBuffer =
   ## Radial head with the generic-op tail (`blend_a64`, same contract
-  ## as x64). Assemble-verified only, like the kernel above.
+  ## as x64). Executes on AArch64 hosts via the arm64 getter branch, like the kernel above.
   var a = newAssembler(akAarch64)
   dynasm a:
     arch aarch64
@@ -1655,7 +1655,7 @@ proc buildBoxRowGenX64*(op: CompOp): ExecutableBuffer =
 
 proc buildBoxRowAarch64*(): ExecutableBuffer =
   ## Same algorithm for AArch64 (`|.|` via `0-x` + `fmax`, mirroring
-  ## x64). Assemble-verified only; the backend stays amd64-gated.
+  ## x64). Executes on AArch64 hosts via the arm64 getter branch.
   var a = newAssembler(akAarch64)
   dynasm a:
     arch aarch64
@@ -1804,7 +1804,7 @@ proc buildBoxRowAarch64*(): ExecutableBuffer =
 
 proc buildBoxRowGenAarch64*(op: CompOp): ExecutableBuffer =
   ## Box head with the generic-op tail (`blend_a64`, same contract as
-  ## x64). Assemble-verified only, like the kernel above.
+  ## x64). Executes on AArch64 hosts via the arm64 getter branch, like the kernel above.
   var a = newAssembler(akAarch64)
   dynasm a:
     arch aarch64
@@ -2395,8 +2395,8 @@ proc buildPatternRowGenX64*(op: CompOp): ExecutableBuffer =
 
 proc buildPatternRowAarch64*(): ExecutableBuffer =
   ## Same algorithm for AArch64 (`sdiv`+`msub` repeat-wrap, `fcvtzs`
-  ## trunc-convert with the same saturation guard). Assemble-verified
-  ## only; the backend stays amd64-gated.
+  ## trunc-convert with the same saturation guard). Executes on AArch64
+  ## hosts via the `getPattern` arm64 branch.
   var a = newAssembler(akAarch64)
   dynasm a:
     arch aarch64
@@ -2613,7 +2613,7 @@ proc buildPatternRowAarch64*(): ExecutableBuffer =
 
 proc buildPatternRowGenAarch64*(op: CompOp): ExecutableBuffer =
   ## Nearest-pattern head with the generic-op tail (`blend_a64`, same
-  ## contract as x64). Assemble-verified only, like the kernel above.
+  ## contract as x64). Executes on AArch64 hosts via the arm64 getter branch, like the kernel above.
   var a = newAssembler(akAarch64)
   dynasm a:
     arch aarch64
@@ -5780,9 +5780,8 @@ type
 
 proc getSolid*(k: JitKernels, op: CompOp = coSourceOver): SolidRowFn =
   ## Return the solid row kernel for `op`, building it on first use.
-  ## Non-amd64 hosts get nil (callers fall back to the scalar
-  ## rasterizer; the AArch64 kernels are assemble-verified until an ARM
-  ## run signs off execution).
+  ## amd64 and AArch64 hosts get machine code; anything else gets nil
+  ## (callers fall back to the scalar rasterizer).
   when defined(amd64):
     if not k.solidHas[op]:
       ensureDivTable()
@@ -5813,6 +5812,40 @@ proc getSolid*(k: JitKernels, op: CompOp = coSourceOver): SolidRowFn =
         of coSaturation: buildSolidRowGenX64(coSaturation)
         of coColor: buildSolidRowGenX64(coColor)
         of coLuminosity: buildSolidRowGenX64(coLuminosity)
+      k.solidFns[op] = cast[SolidRowFn](
+        k.solidBufs[op].ptrAt(AssemblyOffset(0)))
+      k.solidHas[op] = true
+    k.solidFns[op]
+  elif defined(arm64) or defined(aarch64):
+    if not k.solidHas[op]:
+      ensureDivTable()
+      k.solidBufs[op] = case op
+        of coSourceOver: buildSolidRowAarch64()
+        of coSourceIn: buildSolidRowGenAarch64(coSourceIn)
+        of coSourceOut: buildSolidRowGenAarch64(coSourceOut)
+        of coAtop: buildSolidRowGenAarch64(coAtop)
+        of coDestinationOver: buildSolidRowGenAarch64(coDestinationOver)
+        of coDestinationIn: buildSolidRowGenAarch64(coDestinationIn)
+        of coDestinationOut: buildSolidRowGenAarch64(coDestinationOut)
+        of coDestinationAtop: buildSolidRowGenAarch64(coDestinationAtop)
+        of coLighter: buildSolidRowGenAarch64(coLighter)
+        of coCopy: buildSolidRowGenAarch64(coCopy)
+        of coXor: buildSolidRowGenAarch64(coXor)
+        of coMultiply: buildSolidRowGenAarch64(coMultiply)
+        of coScreen: buildSolidRowGenAarch64(coScreen)
+        of coOverlay: buildSolidRowGenAarch64(coOverlay)
+        of coDarken: buildSolidRowGenAarch64(coDarken)
+        of coLighten: buildSolidRowGenAarch64(coLighten)
+        of coColorDodge: buildSolidRowGenAarch64(coColorDodge)
+        of coColorBurn: buildSolidRowGenAarch64(coColorBurn)
+        of coHardLight: buildSolidRowGenAarch64(coHardLight)
+        of coSoftLight: buildSolidRowGenAarch64(coSoftLight)
+        of coDifference: buildSolidRowGenAarch64(coDifference)
+        of coExclusion: buildSolidRowGenAarch64(coExclusion)
+        of coHue: buildSolidRowGenAarch64(coHue)
+        of coSaturation: buildSolidRowGenAarch64(coSaturation)
+        of coColor: buildSolidRowGenAarch64(coColor)
+        of coLuminosity: buildSolidRowGenAarch64(coLuminosity)
       k.solidFns[op] = cast[SolidRowFn](
         k.solidBufs[op].ptrAt(AssemblyOffset(0)))
       k.solidHas[op] = true
@@ -5857,6 +5890,40 @@ proc getLinear*(k: JitKernels, op: CompOp = coSourceOver): LinearRowFn =
         k.linearBufs[op].ptrAt(AssemblyOffset(0)))
       k.linearHas[op] = true
     k.linearFns[op]
+  elif defined(arm64) or defined(aarch64):
+    if not k.linearHas[op]:
+      ensureDivTable()
+      k.linearBufs[op] = case op
+        of coSourceOver: buildLinearRowAarch64()
+        of coSourceIn: buildLinearRowGenAarch64(coSourceIn)
+        of coSourceOut: buildLinearRowGenAarch64(coSourceOut)
+        of coAtop: buildLinearRowGenAarch64(coAtop)
+        of coDestinationOver: buildLinearRowGenAarch64(coDestinationOver)
+        of coDestinationIn: buildLinearRowGenAarch64(coDestinationIn)
+        of coDestinationOut: buildLinearRowGenAarch64(coDestinationOut)
+        of coDestinationAtop: buildLinearRowGenAarch64(coDestinationAtop)
+        of coLighter: buildLinearRowGenAarch64(coLighter)
+        of coCopy: buildLinearRowGenAarch64(coCopy)
+        of coXor: buildLinearRowGenAarch64(coXor)
+        of coMultiply: buildLinearRowGenAarch64(coMultiply)
+        of coScreen: buildLinearRowGenAarch64(coScreen)
+        of coOverlay: buildLinearRowGenAarch64(coOverlay)
+        of coDarken: buildLinearRowGenAarch64(coDarken)
+        of coLighten: buildLinearRowGenAarch64(coLighten)
+        of coColorDodge: buildLinearRowGenAarch64(coColorDodge)
+        of coColorBurn: buildLinearRowGenAarch64(coColorBurn)
+        of coHardLight: buildLinearRowGenAarch64(coHardLight)
+        of coSoftLight: buildLinearRowGenAarch64(coSoftLight)
+        of coDifference: buildLinearRowGenAarch64(coDifference)
+        of coExclusion: buildLinearRowGenAarch64(coExclusion)
+        of coHue: buildLinearRowGenAarch64(coHue)
+        of coSaturation: buildLinearRowGenAarch64(coSaturation)
+        of coColor: buildLinearRowGenAarch64(coColor)
+        of coLuminosity: buildLinearRowGenAarch64(coLuminosity)
+      k.linearFns[op] = cast[LinearRowFn](
+        k.linearBufs[op].ptrAt(AssemblyOffset(0)))
+      k.linearHas[op] = true
+    k.linearFns[op]
   else:
     nil
 
@@ -5893,6 +5960,40 @@ proc getRadial*(k: JitKernels, op: CompOp = coSourceOver): RadialRowFn =
         of coSaturation: buildRadialRowGenX64(coSaturation)
         of coColor: buildRadialRowGenX64(coColor)
         of coLuminosity: buildRadialRowGenX64(coLuminosity)
+      k.radialFns[op] = cast[RadialRowFn](
+        k.radialBufs[op].ptrAt(AssemblyOffset(0)))
+      k.radialHas[op] = true
+    k.radialFns[op]
+  elif defined(arm64) or defined(aarch64):
+    if not k.radialHas[op]:
+      ensureDivTable()
+      k.radialBufs[op] = case op
+        of coSourceOver: buildRadialRowAarch64()
+        of coSourceIn: buildRadialRowGenAarch64(coSourceIn)
+        of coSourceOut: buildRadialRowGenAarch64(coSourceOut)
+        of coAtop: buildRadialRowGenAarch64(coAtop)
+        of coDestinationOver: buildRadialRowGenAarch64(coDestinationOver)
+        of coDestinationIn: buildRadialRowGenAarch64(coDestinationIn)
+        of coDestinationOut: buildRadialRowGenAarch64(coDestinationOut)
+        of coDestinationAtop: buildRadialRowGenAarch64(coDestinationAtop)
+        of coLighter: buildRadialRowGenAarch64(coLighter)
+        of coCopy: buildRadialRowGenAarch64(coCopy)
+        of coXor: buildRadialRowGenAarch64(coXor)
+        of coMultiply: buildRadialRowGenAarch64(coMultiply)
+        of coScreen: buildRadialRowGenAarch64(coScreen)
+        of coOverlay: buildRadialRowGenAarch64(coOverlay)
+        of coDarken: buildRadialRowGenAarch64(coDarken)
+        of coLighten: buildRadialRowGenAarch64(coLighten)
+        of coColorDodge: buildRadialRowGenAarch64(coColorDodge)
+        of coColorBurn: buildRadialRowGenAarch64(coColorBurn)
+        of coHardLight: buildRadialRowGenAarch64(coHardLight)
+        of coSoftLight: buildRadialRowGenAarch64(coSoftLight)
+        of coDifference: buildRadialRowGenAarch64(coDifference)
+        of coExclusion: buildRadialRowGenAarch64(coExclusion)
+        of coHue: buildRadialRowGenAarch64(coHue)
+        of coSaturation: buildRadialRowGenAarch64(coSaturation)
+        of coColor: buildRadialRowGenAarch64(coColor)
+        of coLuminosity: buildRadialRowGenAarch64(coLuminosity)
       k.radialFns[op] = cast[RadialRowFn](
         k.radialBufs[op].ptrAt(AssemblyOffset(0)))
       k.radialHas[op] = true
@@ -5937,6 +6038,40 @@ proc getBox*(k: JitKernels, op: CompOp = coSourceOver): BoxRowFn =
         k.boxBufs[op].ptrAt(AssemblyOffset(0)))
       k.boxHas[op] = true
     k.boxFns[op]
+  elif defined(arm64) or defined(aarch64):
+    if not k.boxHas[op]:
+      ensureDivTable()
+      k.boxBufs[op] = case op
+        of coSourceOver: buildBoxRowAarch64()
+        of coSourceIn: buildBoxRowGenAarch64(coSourceIn)
+        of coSourceOut: buildBoxRowGenAarch64(coSourceOut)
+        of coAtop: buildBoxRowGenAarch64(coAtop)
+        of coDestinationOver: buildBoxRowGenAarch64(coDestinationOver)
+        of coDestinationIn: buildBoxRowGenAarch64(coDestinationIn)
+        of coDestinationOut: buildBoxRowGenAarch64(coDestinationOut)
+        of coDestinationAtop: buildBoxRowGenAarch64(coDestinationAtop)
+        of coLighter: buildBoxRowGenAarch64(coLighter)
+        of coCopy: buildBoxRowGenAarch64(coCopy)
+        of coXor: buildBoxRowGenAarch64(coXor)
+        of coMultiply: buildBoxRowGenAarch64(coMultiply)
+        of coScreen: buildBoxRowGenAarch64(coScreen)
+        of coOverlay: buildBoxRowGenAarch64(coOverlay)
+        of coDarken: buildBoxRowGenAarch64(coDarken)
+        of coLighten: buildBoxRowGenAarch64(coLighten)
+        of coColorDodge: buildBoxRowGenAarch64(coColorDodge)
+        of coColorBurn: buildBoxRowGenAarch64(coColorBurn)
+        of coHardLight: buildBoxRowGenAarch64(coHardLight)
+        of coSoftLight: buildBoxRowGenAarch64(coSoftLight)
+        of coDifference: buildBoxRowGenAarch64(coDifference)
+        of coExclusion: buildBoxRowGenAarch64(coExclusion)
+        of coHue: buildBoxRowGenAarch64(coHue)
+        of coSaturation: buildBoxRowGenAarch64(coSaturation)
+        of coColor: buildBoxRowGenAarch64(coColor)
+        of coLuminosity: buildBoxRowGenAarch64(coLuminosity)
+      k.boxFns[op] = cast[BoxRowFn](
+        k.boxBufs[op].ptrAt(AssemblyOffset(0)))
+      k.boxHas[op] = true
+    k.boxFns[op]
   else:
     nil
 
@@ -5977,12 +6112,47 @@ proc getPattern*(k: JitKernels, op: CompOp = coSourceOver): PatternRowFn =
         k.patBufs[op].ptrAt(AssemblyOffset(0)))
       k.patHas[op] = true
     k.patFns[op]
+  elif defined(arm64) or defined(aarch64):
+    if not k.patHas[op]:
+      ensureDivTable()
+      k.patBufs[op] = case op
+        of coSourceOver: buildPatternRowAarch64()
+        of coSourceIn: buildPatternRowGenAarch64(coSourceIn)
+        of coSourceOut: buildPatternRowGenAarch64(coSourceOut)
+        of coAtop: buildPatternRowGenAarch64(coAtop)
+        of coDestinationOver: buildPatternRowGenAarch64(coDestinationOver)
+        of coDestinationIn: buildPatternRowGenAarch64(coDestinationIn)
+        of coDestinationOut: buildPatternRowGenAarch64(coDestinationOut)
+        of coDestinationAtop: buildPatternRowGenAarch64(coDestinationAtop)
+        of coLighter: buildPatternRowGenAarch64(coLighter)
+        of coCopy: buildPatternRowGenAarch64(coCopy)
+        of coXor: buildPatternRowGenAarch64(coXor)
+        of coMultiply: buildPatternRowGenAarch64(coMultiply)
+        of coScreen: buildPatternRowGenAarch64(coScreen)
+        of coOverlay: buildPatternRowGenAarch64(coOverlay)
+        of coDarken: buildPatternRowGenAarch64(coDarken)
+        of coLighten: buildPatternRowGenAarch64(coLighten)
+        of coColorDodge: buildPatternRowGenAarch64(coColorDodge)
+        of coColorBurn: buildPatternRowGenAarch64(coColorBurn)
+        of coHardLight: buildPatternRowGenAarch64(coHardLight)
+        of coSoftLight: buildPatternRowGenAarch64(coSoftLight)
+        of coDifference: buildPatternRowGenAarch64(coDifference)
+        of coExclusion: buildPatternRowGenAarch64(coExclusion)
+        of coHue: buildPatternRowGenAarch64(coHue)
+        of coSaturation: buildPatternRowGenAarch64(coSaturation)
+        of coColor: buildPatternRowGenAarch64(coColor)
+        of coLuminosity: buildPatternRowGenAarch64(coLuminosity)
+      k.patFns[op] = cast[PatternRowFn](
+        k.patBufs[op].ptrAt(AssemblyOffset(0)))
+      k.patHas[op] = true
+    k.patFns[op]
   else:
     nil
 
 proc getMultiLinear*(k: JitKernels, op: CompOp = coSourceOver): MultiLinearRowFn =
   ## Return the multi-stop linear-gradient row kernel for `op`.
-  ## Same platform gate as `getSolid` (amd64 only; AArch64 not yet).
+  ## amd64 only; AArch64 has no multi-stop builders yet, so ARM hosts
+  ## get nil and fall back to the scalar rasterizer.
   when defined(amd64):
     if not k.mlinHas[op]:
       ensureDivTable()
@@ -6022,6 +6192,7 @@ proc getMultiLinear*(k: JitKernels, op: CompOp = coSourceOver): MultiLinearRowFn
 
 proc getMultiRadial*(k: JitKernels, op: CompOp = coSourceOver): MultiRadialRowFn =
   ## Return the multi-stop radial-gradient row kernel for `op`.
+  ## amd64 only (AArch64 falls back to scalar, like multi-linear).
   when defined(amd64):
     if not k.mradHas[op]:
       ensureDivTable()
@@ -6061,6 +6232,7 @@ proc getMultiRadial*(k: JitKernels, op: CompOp = coSourceOver): MultiRadialRowFn
 
 proc getMultiBox*(k: JitKernels, op: CompOp = coSourceOver): MultiBoxRowFn =
   ## Return the multi-stop box-gradient row kernel for `op`.
+  ## amd64 only (AArch64 falls back to scalar, like multi-linear).
   when defined(amd64):
     if not k.mboxHas[op]:
       ensureDivTable()
@@ -6100,6 +6272,7 @@ proc getMultiBox*(k: JitKernels, op: CompOp = coSourceOver): MultiBoxRowFn =
 
 proc getPatternBilinear*(k: JitKernels, op: CompOp = coSourceOver): PatternBilinearRowFn =
   ## Return the bilinear-pattern row kernel for `op`.
+  ## amd64 only (AArch64 falls back to scalar, like multi-linear).
   when defined(amd64):
     if not k.pbilHas[op]:
       ensureDivTable()

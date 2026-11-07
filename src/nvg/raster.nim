@@ -203,8 +203,7 @@ proc fillSolidJit*(surf: Surface, polys: seq[SubPoly], src: Color,
   ## Solid fill through an op-specialized JIT row kernel (`fn`, resolved by
   ## the caller from `JitKernels`). Span setup and coverage stay in Nim
   ## (identical values to `fillPolys`); only paint eval + blend run JIT.
-  ## amd64 only: other arches must use `fillPolys` (the AArch64 kernel
-  ## is assemble-verified but not execution-verified yet).
+  ## Arch-neutral: `fn` carries the host's machine code (x64/AArch64).
   if polys.len == 0 or surf.pixels.len == 0: return
   if clamp01(alpha) <= 0.0: return
   var ctx = bakeSolidCtx(src, alpha)
