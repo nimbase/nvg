@@ -208,7 +208,7 @@ test "metal backend canvas stroke matches cpu":
   else:
     skip()
 
-test "metal backend falls back on linear paint":
+test "metal backend shades linear paint on gpu":
   when defined(macosx) and defined(nvgMetal):
     const W = 16
     const H = 16
@@ -223,7 +223,118 @@ test "metal backend falls back on linear paint":
     gpu.setFillPaint(p)
     gpu.rect(0, 0, 16, 16)
     gpu.fill()
+    var maxDiff = 0
+    for i in 0 ..< cpu.surf.pixels.len:
+      let d = abs(int(gpu.surf.pixels[i]) - int(cpu.surf.pixels[i]))
+      if d > maxDiff:
+        maxDiff = d
+    check maxDiff <= 1
+  else:
+    skip()
+
+test "metal backend falls back on multi-stop paint":
+  when defined(macosx) and defined(nvgMetal):
+    const W = 16
+    const H = 16
+    let p = linearGradientStops(0, 0, 16, 0, [
+      GradientStop(pos: 0.0, color: rgbf(0, 0, 0)),
+      GradientStop(pos: 0.5, color: rgbf(1, 0, 0)),
+      GradientStop(pos: 1.0, color: rgbf(1, 1, 1)),
+    ])
+    var cpu = newCanvas(W, H)
+    cpu.setFillPaint(p)
+    cpu.rect(0, 0, 16, 16)
+    cpu.fill()
+    let mb = newMetalBackend(W, H)
+    defer: mb.close()
+    var gpu = newCanvas(W, H, mb)
+    gpu.setFillPaint(p)
+    gpu.rect(0, 0, 16, 16)
+    gpu.fill()
     check gpu.surf.pixels == cpu.surf.pixels
+  else:
+    skip()
+
+test "metal backend shades radial paint on gpu":
+  when defined(macosx) and defined(nvgMetal):
+    const W = 16
+    const H = 16
+    let p = radialGradient(8, 8, 1, 8, rgbf(0, 0, 0), rgbf(1, 1, 1))
+    var cpu = newCanvas(W, H)
+    cpu.setFillPaint(p)
+    cpu.rect(0, 0, 16, 16)
+    cpu.fill()
+    let mb = newMetalBackend(W, H)
+    defer: mb.close()
+    var gpu = newCanvas(W, H, mb)
+    gpu.setFillPaint(p)
+    gpu.rect(0, 0, 16, 16)
+    gpu.fill()
+    var maxDiff = 0
+    for i in 0 ..< cpu.surf.pixels.len:
+      let d = abs(int(gpu.surf.pixels[i]) - int(cpu.surf.pixels[i]))
+      if d > maxDiff:
+        maxDiff = d
+    check maxDiff <= 1
+  else:
+    skip()
+
+test "metal backend shades box paint on gpu":
+  when defined(macosx) and defined(nvgMetal):
+    const W = 16
+    const H = 16
+    let p = boxGradient(8, 8, 5, 5, 2, 3, rgbf(0, 0, 0), rgbf(1, 1, 1))
+    var cpu = newCanvas(W, H)
+    cpu.setFillPaint(p)
+    cpu.rect(2.5, 2.5, 11, 11)
+    cpu.fill()
+    let mb = newMetalBackend(W, H)
+    defer: mb.close()
+    var gpu = newCanvas(W, H, mb)
+    gpu.setFillPaint(p)
+    gpu.rect(2.5, 2.5, 11, 11)
+    gpu.fill()
+    var maxDiff = 0
+    for i in 0 ..< cpu.surf.pixels.len:
+      let d = abs(int(gpu.surf.pixels[i]) - int(cpu.surf.pixels[i]))
+      if d > maxDiff:
+        maxDiff = d
+    check maxDiff <= 1
+  else:
+    skip()
+
+test "metal backend shades pattern paints on gpu":
+  when defined(macosx) and defined(nvgMetal):
+    const W = 8
+    const H = 8
+    var px = newSeq[uint8](4 * 4 * 4)
+    for y in 0 ..< 4:
+      for x in 0 ..< 4:
+        let i = (y * 4 + x) * 4
+        px[i] = uint8(x * 85)
+        px[i + 1] = uint8(y * 85)
+        px[i + 2] = 170u8
+        px[i + 3] = 255u8
+    let flagSets2: array[2, set[ImageFlag]] = [{ifNearest}, {}]
+    for flags in flagSets2:
+      let img = newImage(4, 4, flags, px)
+      let p = imagePattern(img, 0, 0, 4, 4, 0.0, rgbf(1, 1, 1))
+      var cpu = newCanvas(W, H)
+      cpu.setFillPaint(p)
+      cpu.rect(0.5, 0.5, 7, 7)
+      cpu.fill()
+      let mb = newMetalBackend(W, H)
+      defer: mb.close()
+      var gpu = newCanvas(W, H, mb)
+      gpu.setFillPaint(p)
+      gpu.rect(0.5, 0.5, 7, 7)
+      gpu.fill()
+      var maxDiff = 0
+      for i in 0 ..< cpu.surf.pixels.len:
+        let d = abs(int(gpu.surf.pixels[i]) - int(cpu.surf.pixels[i]))
+        if d > maxDiff:
+          maxDiff = d
+      check maxDiff <= 1
   else:
     skip()
 

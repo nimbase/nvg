@@ -4,7 +4,9 @@
 ## `raster.nim`). A future GPU renderer implements the same `fill`/`stroke`
 ## signatures on a new `Backend` subtype so `canvas.nim` does not change.
 
+import std/math
 import ./types
+import ./transform
 import ./path
 import ./paint
 import ./surface
@@ -63,17 +65,101 @@ when defined(nvgMetal):
   proc shadeFill(b: MetalBackend, surf: Surface, polys: seq[SubPoly],
       paint: Paint, alpha: float64, clip: Clip, aa: bool,
       rule: FillRule) =
-    ## Scalar `fillPolys` early-outs and coverage loop, GPU shade.
-    ## Falls back to scalar on size mismatch or non-solid paint.
-    if paint.kind != pkSolid:
-      fillPolys(surf, polys, paint, alpha, clip, aa, coSourceOver,
-        rule)
-      return
+    ## Scalar `fillPolys` early-outs and coverage loop, GPU shade for
+    ## identity-map basic paints (solid, 2-stop gradients, patterns);
+    ## multi-stop, mapped, and degenerate paints fall back to scalar.
     if polys.len == 0: return
     let a = clamp01(alpha)
     if a <= 0.0: return
     if b.ctx.w != surf.w or b.ctx.h != surf.h or
         b.covBuf.len != surf.w * surf.h:
+      fillPolys(surf, polys, paint, alpha, clip, aa, coSourceOver,
+        rule)
+      return
+    var kind = -1
+    var w: array[16, cfloat]
+    if paint.map == identity():
+      case paint.kind
+      of pkSolid:
+        kind = ShadeSolid
+        w[0] = cfloat(paint.solid.r)
+        w[1] = cfloat(paint.solid.g)
+        w[2] = cfloat(paint.solid.b)
+        w[3] = cfloat(paint.solid.a)
+      of pkLinear:
+        if isBasicTwoStop(paint.linear.stops):
+          let g = paint.linear
+          kind = ShadeLinear
+          w[0] = cfloat(g.sx)
+          w[1] = cfloat(g.sy)
+          w[2] = cfloat(g.ex)
+          w[3] = cfloat(g.ey)
+          w[4] = cfloat(g.icol.r)
+          w[5] = cfloat(g.icol.g)
+          w[6] = cfloat(g.icol.b)
+          w[7] = cfloat(g.icol.a)
+          w[8] = cfloat(g.ocol.r)
+          w[9] = cfloat(g.ocol.g)
+          w[10] = cfloat(g.ocol.b)
+          w[11] = cfloat(g.ocol.a)
+      of pkRadial:
+        if isBasicTwoStop(paint.radial.stops):
+          let g = paint.radial
+          kind = ShadeRadial
+          w[0] = cfloat(g.cx)
+          w[1] = cfloat(g.cy)
+          w[2] = cfloat(g.inr)
+          w[3] = cfloat(g.outr)
+          w[4] = cfloat(g.icol.r)
+          w[5] = cfloat(g.icol.g)
+          w[6] = cfloat(g.icol.b)
+          w[7] = cfloat(g.icol.a)
+          w[8] = cfloat(g.ocol.r)
+          w[9] = cfloat(g.ocol.g)
+          w[10] = cfloat(g.ocol.b)
+          w[11] = cfloat(g.ocol.a)
+      of pkBox:
+        if isBasicTwoStop(paint.box.stops):
+          let g = paint.box
+          kind = ShadeBox
+          w[0] = cfloat(g.cx)
+          w[1] = cfloat(g.cy)
+          w[2] = cfloat(g.ex)
+          w[3] = cfloat(g.ey)
+          w[4] = cfloat(g.radius)
+          w[5] = cfloat(g.feather)
+          w[8] = cfloat(g.icol.r)
+          w[9] = cfloat(g.icol.g)
+          w[10] = cfloat(g.icol.b)
+          w[11] = cfloat(g.icol.a)
+          w[12] = cfloat(g.ocol.r)
+          w[13] = cfloat(g.ocol.g)
+          w[14] = cfloat(g.ocol.b)
+          w[15] = cfloat(g.ocol.a)
+      of pkPattern:
+        let pt = paint.pattern
+        if pt.img != nil and abs(pt.ex) >= 1e-12 and
+            abs(pt.ey) >= 1e-12:
+          b.ctx.setPattern(pt.img)
+          kind = ShadePattern
+          var flags = 0.0
+          if ifRepeatX in pt.img.flags: flags += 1.0
+          if ifRepeatY in pt.img.flags: flags += 2.0
+          if ifFlipY in pt.img.flags: flags += 4.0
+          if ifNearest notin pt.img.flags: flags += 8.0
+          w[0] = cfloat(pt.ox)
+          w[1] = cfloat(pt.oy)
+          w[2] = cfloat(pt.ex)
+          w[3] = cfloat(pt.ey)
+          w[4] = cfloat(pt.tint.r)
+          w[5] = cfloat(pt.tint.g)
+          w[6] = cfloat(pt.tint.b)
+          w[7] = cfloat(pt.tint.a)
+          w[8] = cfloat(pt.angle)
+          w[12] = cfloat(pt.img.w)
+          w[13] = cfloat(pt.img.h)
+          w[14] = cfloat(flags)
+    if kind < 0:
       fillPolys(surf, polys, paint, alpha, clip, aa, coSourceOver,
         rule)
       return
@@ -108,7 +194,7 @@ when defined(nvgMetal):
           b.covBuf[y * surf.w + x] = float32(cov)
     b.ctx.upload(surf.pixels)
     b.ctx.uploadAux(b.covBuf)
-    b.ctx.shadeSolidOver(paint.solid, a)
+    b.ctx.shadeOver(kind, a, w)
     surf.pixels = b.ctx.readback()
 
 when defined(nvgJit):
@@ -299,7 +385,7 @@ when defined(nvgMetal):
   method fill*(b: MetalBackend, surf: Surface, polys: seq[SubPoly],
       paint: Paint, alpha: float64, clip: Clip, aa = true,
       op = coSourceOver, rule = frEvenOdd) =
-    if paint.kind != pkSolid or op != coSourceOver:
+    if op != coSourceOver:
       fillPolys(surf, polys, paint, alpha, clip, aa, op, rule)
       return
     b.shadeFill(surf, polys, paint, alpha, clip, aa, rule)
@@ -308,7 +394,7 @@ when defined(nvgMetal):
       paint: Paint, width: float64, cap: LineCap, join: LineJoin,
       miterLimit: float64, alpha: float64, clip: Clip,
       aa = true, op = coSourceOver) =
-    if paint.kind != pkSolid or op != coSourceOver:
+    if op != coSourceOver:
       strokePolys(surf, polys, paint, width, cap, join, miterLimit,
         alpha, clip, aa, op)
       return

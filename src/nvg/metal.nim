@@ -43,11 +43,11 @@ const
   MSlotRadial* = 3
   MSlotBox* = 4
   MSlotBlend* = 5
-  MSlotShadeSolidOver* = 6
-  MSlotPattern* = 7
-  MSlotBlurH* = 8
-  MSlotBlurV* = 9
-  MSlotPatternBilinear* = 10
+  MSlotPattern* = 6
+  MSlotBlurH* = 7
+  MSlotBlurV* = 8
+  MSlotPatternBilinear* = 9
+  MSlotShadeOver* = 10
 
 const solidMsl* = """
 #include <metal_stdlib>
@@ -300,28 +300,122 @@ kernel void comp_blend(device uchar4 *io [[buffer(0)]],
 }
 """
 
-const shadeSolidOverMsl* = """
+const shadeMsl* = """
 #include <metal_stdlib>
 using namespace metal;
-// Coverage-driven solid source-over: coverage arrives per pixel as
-// float32 in buffer(3) (exact k/16 steps, written by the CPU coverage
-// loop), so AA matches the scalar rasterizer by construction. Mirrors
-// scalar fillPolys with a solid paint: sa = clamp(col.a*alpha) * cov.
-struct ShadeP { float4 col; float alpha; };
-kernel void shade_solid_over(device uchar4 *io [[buffer(0)]],
-                             constant ShadeP &u [[buffer(1)]],
-                             constant uint2 &dims [[buffer(2)]],
-                             device float *cov [[buffer(3)]],
-                             uint2 gid [[thread_position_in_grid]]) {
+// Generalized coverage-driven source-over: evaluates any paint kind at
+// pixel centers (identity map) and composites with per-pixel coverage
+// from buffer(3), mirroring scalar fillPolys. kind: 0 solid, 1 linear,
+// 2 radial, 3 box, 4 pattern (flags bit 3 selects bilinear). Payload
+// `w` packs each paint's params as documented on `shadeOver`.
+struct ShadeU {
+  uint kind;
+  float alpha;
+  float2 _p;
+  float4 w0; float4 w1; float4 w2; float4 w3;
+};
+float4 sheval(uint2 gid, ShadeU u,
+              texture2d<float, access::read> img) {
+  float2 pc = float2(gid) + 0.5;
+  switch (u.kind) {
+    case 0: return u.w0;
+    case 1: {
+      float2 d = u.w0.zw - u.w0.xy;
+      float len2 = dot(d, d);
+      float t = 0.0;
+      if (len2 > 1e-12) t = dot(pc - u.w0.xy, d) / len2;
+      return mix(u.w1, u.w2, clamp(t, 0.0, 1.0));
+    }
+    case 2: {
+      float dist = length(pc - u.w0.xy);
+      float f = max(1.0, u.w0.w - u.w0.z);
+      float t = (dist - u.w0.z) / f;
+      return mix(u.w1, u.w2, clamp(t, 0.0, 1.0));
+    }
+    case 3: {
+      float2 p = pc - u.w0.xy;
+      float2 q = abs(p) - (u.w0.zw - u.w1.x);
+      float sd = min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - u.w1.x;
+      float f = max(1.0, u.w1.y);
+      float t = (sd + f * 0.5) / f;
+      return mix(u.w2, u.w3, clamp(t, 0.0, 1.0));
+    }
+    default: {
+      float2 q = pc - u.w0.xy;
+      float ca = cos(u.w2.x);
+      float sa = sin(u.w2.x);
+      float uu = (ca * q.x + sa * q.y) / u.w0.z;
+      float vv = (-sa * q.x + ca * q.y) / u.w0.w;
+      uint flags = uint(u.w3.z);
+      if ((flags & 4u) != 0u) vv = 1.0 - vv;
+      int W = int(u.w3.x);
+      int H = int(u.w3.y);
+      float4 t;
+      if ((flags & 8u) != 0u) {
+        float fx = uu * float(W) - 0.5;
+        float fy = vv * float(H) - 0.5;
+        int x0 = int(floor(fx));
+        int y0 = int(floor(fy));
+        float tx = clamp(fx - float(x0), 0.0, 1.0);
+        float ty = clamp(fy - float(y0), 0.0, 1.0);
+        float4 acc = float4(0.0);
+        for (int j = 0; j <= 1; j++) {
+          for (int i = 0; i <= 1; i++) {
+            int xi = x0 + i;
+            int yi = y0 + j;
+            if ((flags & 1u) != 0u) {
+              xi = ((xi % W) + W) % W;
+            } else {
+              xi = clamp(xi, 0, W - 1);
+            }
+            if ((flags & 2u) != 0u) {
+              yi = ((yi % H) + H) % H;
+            } else {
+              yi = clamp(yi, 0, H - 1);
+            }
+            float4 s = img.read(uint2(uint(xi), uint(yi)));
+            float w = (i == 0 ? 1.0 - tx : tx) *
+                      (j == 0 ? 1.0 - ty : ty);
+            acc += float4(s.rgb * s.a, s.a) * w;
+          }
+        }
+        if (acc.a > 1e-6) t = float4(acc.rgb / acc.a, acc.a);
+        else t = float4(0.0);
+      } else {
+        int xi = int(floor(uu * float(W)));
+        int yi = int(floor(vv * float(H)));
+        if ((flags & 1u) != 0u) {
+          xi = ((xi % W) + W) % W;
+        } else {
+          xi = clamp(xi, 0, W - 1);
+        }
+        if ((flags & 2u) != 0u) {
+          yi = ((yi % H) + H) % H;
+        } else {
+          yi = clamp(yi, 0, H - 1);
+        }
+        t = img.read(uint2(uint(xi), uint(yi)));
+      }
+      return float4(t.rgb * u.w1.rgb, t.a * u.w1.a);
+    }
+  }
+}
+kernel void shade_over(device uchar4 *io [[buffer(0)]],
+                       constant ShadeU &u [[buffer(1)]],
+                       constant uint2 &dims [[buffer(2)]],
+                       device float *cov [[buffer(3)]],
+                       texture2d<float, access::read> img [[texture(0)]],
+                       uint2 gid [[thread_position_in_grid]]) {
   if (gid.x >= dims.x || gid.y >= dims.y) return;
   uint i = gid.y * dims.x + gid.x;
   float c = cov[i];
   if (c <= 0.0) return;
+  float4 src = sheval(gid, u, img);
   float4 dd = float4(io[i]) * (1.0 / 255.0);
-  float sa = clamp(u.col.a * u.alpha, 0.0, 1.0) * clamp(c, 0.0, 1.0);
+  float sa = clamp(src.a * u.alpha, 0.0, 1.0) * clamp(c, 0.0, 1.0);
   if (sa <= 0.0) return;
   float inv = 1.0 - sa;
-  float3 rgb = u.col.rgb * sa + dd.rgb * inv;
+  float3 rgb = src.rgb * sa + dd.rgb * inv;
   float a = sa + dd.a * inv;
   io[i] = uchar4(saturate(float4(rgb, a)) * 255.0 + 0.5);
 }
@@ -333,10 +427,13 @@ type BlendParams* = object
   op*: cuint
   cov*: cfloat
 
-type ShadeParams* = object
-  ## Must match MSL `ShadeP` layout: col, alpha (20 bytes).
-  col*: array[4, cfloat]
+type ShadeJob* = object
+  ## Must match MSL `ShadeU` layout: kind, alpha, pad, w0..w3
+  ## (80 bytes). Payload packing per kind is documented on `shadeOver`.
+  kind*: cuint
   alpha*: cfloat
+  pad*: array[2, cfloat]
+  w*: array[16, cfloat]
 
 const patternMsl* = """
 #include <metal_stdlib>
@@ -513,7 +610,7 @@ static:
   doAssert sizeof(RadialParams) == 48
   doAssert sizeof(BoxParams) == 64
   doAssert sizeof(BlendParams) == 24
-  doAssert sizeof(ShadeParams) == 20
+  doAssert sizeof(ShadeJob) == 80
   doAssert sizeof(PatternParams) == 52
   doAssert sizeof(BlurParams) == 4
 
@@ -565,8 +662,7 @@ proc newMetalCtx*(w, h: int): MetalCtx =
       result.buildSlot(MSlotRadial, radialMsl, "fill_radial")
       result.buildSlot(MSlotBox, boxMsl, "fill_box")
       result.buildSlot(MSlotBlend, blendMsl, "comp_blend")
-      result.buildSlot(MSlotShadeSolidOver, shadeSolidOverMsl,
-        "shade_solid_over")
+      result.buildSlot(MSlotShadeOver, shadeMsl, "shade_over")
       result.buildSlot(MSlotPattern, patternMsl, "fill_pattern_nearest")
       result.buildSlot(MSlotBlurH, blurMsl, "blur_h")
       result.buildSlot(MSlotBlurV, blurMsl, "blur_v")
@@ -633,14 +729,26 @@ proc uploadAux*(ctx: MetalCtx, cov: openArray[float32]) =
       raise newException(ValueError, "aux upload size mismatch")
     nvgmtl_upload(ctx.p, 1, cast[ptr uint8](unsafeAddr cov[0]))
 
-proc shadeSolidOver*(ctx: MetalCtx, col: Color, alpha: float64) =
-  ## Coverage-driven solid source-over (see `shadeSolidOverMsl` docs).
+const
+  ShadeSolid* = 0
+  ShadeLinear* = 1
+  ShadeRadial* = 2
+  ShadeBox* = 3
+  ShadePattern* = 4
+
+proc shadeOver*(ctx: MetalCtx, kind: int, alpha: float64,
+    w: array[16, cfloat]) =
+  ## Coverage-driven source-over for any paint kind (see `shadeMsl`).
+  ## Payload `w` packs the paint params: solid: w0 = color; linear:
+  ## w0.xy = s, w0.zw = e, w1 = c0, w2 = c1; radial: w0.xy = c,
+  ## w0.zw = (inr, outr), w1 = c0, w2 = c1; box: w0.xy = c,
+  ## w0.zw = (ex, ey), w1.xy = (radius, feather), w2 = c0, w3 = c1;
+  ## pattern: w0.xy = o, w0.zw = (ex, ey), w1 = tint, w2.x = angle,
+  ## w3 = (imgW, imgH, flags) with flags bit 3 selecting bilinear.
   when defined(macosx):
-    var u = ShadeParams(
-      col: [cfloat(col.r), cfloat(col.g), cfloat(col.b), cfloat(col.a)],
-      alpha: cfloat(alpha))
-    nvgmtl_fill(ctx.p, cint(MSlotShadeSolidOver), addr u,
-      cint(sizeof(u)))
+    var u = ShadeJob(kind: cuint(kind), alpha: cfloat(alpha),
+      pad: [cfloat(0), cfloat(0)], w: w)
+    nvgmtl_fill(ctx.p, cint(MSlotShadeOver), addr u, cint(sizeof(u)))
 
 proc setPattern*(ctx: MetalCtx, img: Image) =
   ## Upload `img` pixels as the pattern texture.
