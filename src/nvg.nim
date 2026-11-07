@@ -2,7 +2,8 @@
 ##
 ## Redesigned immediate-mode API on `Canvas` (see `nvg/canvas`).
 ## V1 renders to a CPU `Surface`; `nvg/backend` keeps the seam for a
-## future GPU renderer. No text in v1.
+## future GPU renderer. Text shapes via harfnim into path fills/strokes
+## (see `nvg/text`).
 
 import ./nvg/types
 import ./nvg/transform
@@ -14,6 +15,7 @@ import ./nvg/raster
 import ./nvg/dash
 import ./nvg/pathmeasure
 import ./nvg/layer
+import ./nvg/text
 import ./nvg/jitctx
 when defined(nvgJit):
   import ./nvg/jit
@@ -30,6 +32,7 @@ export raster
 export dash
 export pathmeasure
 export layer
+export text
 export jitctx
 when defined(nvgJit):
   export jit

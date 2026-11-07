@@ -3,9 +3,11 @@
 ## Not a `nvg*` name-for-name port: drawing state lives on a `Canvas`
 ## object with methods (`canvas.rect(...)`, `canvas.fill()`, ...),
 ## transforms are pre-multiplied like NanoVG, and path coordinates are
-## captured in device space at verb time. Text is out of scope for v1.
+## captured in device space at verb time. Text renders through harfnim
+## shaping into ordinary path fills/strokes (see `nvg/text`).
 
 import std/tables
+import harfnim/feature
 import ./types
 import ./transform
 import ./path
@@ -13,11 +15,13 @@ import ./paint
 import ./surface
 import ./dash
 import ./backend
+import ./text
 
 export types
 export transform except apply
 export paint
 export surface except blendPixel
+export text
 
 type
   DrawState* = object
@@ -33,6 +37,12 @@ type
     alpha*: float64
     clip*: Clip
     compOp*: CompOp
+    fontFace*: int
+    fontSize*: float64
+    textHAlign*: TextHAlign
+    textVAlign*: TextVAlign
+    letterSpacing*: float64
+    lineHeightMul*: float64
 
   Canvas* = ref object
     surf*: Surface
@@ -44,19 +54,26 @@ type
     shapeAA*: bool
     images*: Table[int, Image]
     nextImageId*: int
+    fonts*: Table[int, TextFont]
+    fontNames*: Table[string, int]
+    nextFontId*: int
 
 proc defaultState*(): DrawState =
   DrawState(xform: identity(), fill: solidPaint(rgbf(0, 0, 0)),
     stroke: solidPaint(rgbf(0, 0, 0)), strokeWidth: 1.0,
     lineCap: lcButt, lineJoin: ljMiter, miterLimit: 4.0, dash: @[],
     dashOffset: 0.0, alpha: 1.0,
-    clip: Clip(enabled: false), compOp: coSourceOver)
+    clip: Clip(enabled: false), compOp: coSourceOver, fontFace: 0,
+    fontSize: 16.0, textHAlign: thaLeft, textVAlign: tvaBaseline,
+    letterSpacing: 0.0, lineHeightMul: 1.2)
 
 proc newCanvas*(w, h: int, backend: Backend = nil): Canvas =
   result = Canvas(surf: newSurface(w, h), states: @[defaultState()],
     backend: if backend == nil: Backend(newCpuBackend()) else: backend,
     pixelRatio: 1.0, tessTol: DefaultTessTol, shapeAA: true,
-    images: initTable[int, Image](), nextImageId: 1)
+    images: initTable[int, Image](), nextImageId: 1,
+    fonts: initTable[int, TextFont](), fontNames: initTable[string, int](),
+    nextFontId: 1)
 
 proc width*(c: Canvas): int = c.surf.w
 proc height*(c: Canvas): int = c.surf.h
@@ -340,6 +357,170 @@ proc imagePattern*(c: Canvas, ox, oy, ex, ey, angle: float64, image: int,
     img = c.images[image]
   imagePattern(img, ox, oy, ex, ey, angle,
     rgbf(1, 1, 1).withAlpha(alpha)).withMap(c.captureMap())
+
+# --- Fonts and text ---
+#
+# Stateful (NanoVG-like) register + style procs pair with stateless
+# overloads that take an explicit `TextFont`. Both shape via harfnim,
+# emit glyph outlines into a throwaway path (the current path is left
+# untouched), and render through the active backend, so JIT kernels
+# apply unchanged. Fills use nonzero winding (TrueType holes).
+
+proc createFont*(c: Canvas, name, file: string, faceIndex = 0): int =
+  ## Register a font from a file under `name` (TTC face via
+  ## `faceIndex`), returning a nonzero handle, or 0 when the file is
+  ## missing or unparseable. Re-registering a name replaces the entry
+  ## but keeps its handle.
+  try:
+    let font = loadFontFile(file, faceIndex)
+    font.name = name
+    if name in c.fontNames:
+      result = c.fontNames[name]
+      c.fonts[result] = font
+    else:
+      result = c.nextFontId
+      inc c.nextFontId
+      c.fonts[result] = font
+      c.fontNames[name] = result
+  except CatchableError:
+    result = 0
+
+proc createFontMem*(c: Canvas, name: string, data: openArray[uint8],
+    faceIndex = 0): int =
+  ## Like `createFont` but parses `data` directly. Returns 0 on failure.
+  try:
+    let font = loadFontBytes(data, faceIndex)
+    font.name = name
+    if name in c.fontNames:
+      result = c.fontNames[name]
+      c.fonts[result] = font
+    else:
+      result = c.nextFontId
+      inc c.nextFontId
+      c.fonts[result] = font
+      c.fontNames[name] = result
+  except CatchableError:
+    result = 0
+
+proc findFont*(c: Canvas, name: string): int =
+  ## Handle for a registered name, or 0 when unknown.
+  if name in c.fontNames: c.fontNames[name] else: 0
+
+proc setFontFace*(c: Canvas, name: string) =
+  ## Select the font for subsequent stateful text (0 when unknown).
+  c.states[^1].fontFace = c.findFont(name)
+
+proc setFontFaceId*(c: Canvas, id: int) =
+  ## Select the font by handle (0 when unknown).
+  c.states[^1].fontFace = if id in c.fonts: id else: 0
+
+proc setFontSize*(c: Canvas, px: float64) =
+  c.states[^1].fontSize = max(1.0, px)
+
+proc setTextAlign*(c: Canvas, ha: TextHAlign, va = tvaBaseline) =
+  c.states[^1].textHAlign = ha
+  c.states[^1].textVAlign = va
+
+proc setLetterSpacing*(c: Canvas, px: float64) =
+  c.states[^1].letterSpacing = px
+
+proc setLineHeight*(c: Canvas, mul: float64) =
+  ## Line step as a multiple of the font size (default 1.2).
+  c.states[^1].lineHeightMul = max(0.0, mul)
+
+proc lookupFont(c: Canvas, id: int): TextFont =
+  if id in c.fonts: c.fonts[id] else: nil
+
+proc widestAdvance(lay: TextLayout): float64 =
+  for line in lay.lines:
+    result = max(result, line.advance)
+
+proc paintLayout(c: Canvas, lay: TextLayout, x, y: float64,
+    ha: TextHAlign, va: TextVAlign, strokeMode: bool) =
+  var p = Path()
+  p.appendLayout(c.states[^1].xform, lay, x, y, ha, va)
+  let polys = p.flatten(c.tessTol, DefaultDistTol)
+  if polys.len == 0:
+    return
+  let st = c.states[^1]
+  if strokeMode:
+    let w = clamp(st.strokeWidth * averageScale(st.xform), 0.0, 200.0)
+    if w <= 0.0:
+      return
+    let dashed = applyDash(polys, st.dash, st.dashOffset)
+    if dashed.len == 0:
+      return
+    c.backend.stroke(c.surf, dashed, st.stroke, w, st.lineCap,
+      st.lineJoin, st.miterLimit, st.alpha, st.clip, c.shapeAA,
+      st.compOp)
+  else:
+    c.backend.fill(c.surf, polys, st.fill, st.alpha, st.clip,
+      c.shapeAA, st.compOp, frNonZero)
+
+proc shiftBounds(lay: TextLayout, x, y: float64, ha: TextHAlign,
+    va: TextVAlign): Rect =
+  let b = layoutBounds(lay, ha)
+  rect(x + b.x, y + valignShift(lay, ha, va) + b.y, b.w, b.h)
+
+proc fillText*(c: Canvas, x, y: float64, s: string,
+    features: openArray[Feature] = []): float64 =
+  ## Fill text with the current fill paint at `(x, y)` under the state
+  ## font/align/spacing/line-height. `x` anchors each line per the
+  ## horizontal align; `y` is the first baseline (or the ink
+  ## top/middle/bottom for other vertical aligns). Returns the widest
+  ## line advance. Draws nothing when no font is selected.
+  let st = c.states[^1]
+  let lay = layoutText(c.lookupFont(st.fontFace), st.fontSize, s,
+    st.letterSpacing, st.lineHeightMul, features)
+  c.paintLayout(lay, x, y, st.textHAlign, st.textVAlign, false)
+  widestAdvance(lay)
+
+proc fillText*(c: Canvas, font: TextFont, size: float64, x, y: float64,
+    s: string, ha = thaLeft, va = tvaBaseline, letterSpacing = 0.0,
+    lineHeightMul = 1.2,
+    features: openArray[Feature] = []): float64 =
+  ## Stateless overload: explicit font and style, canvas state untouched.
+  let lay = layoutText(font, size, s, letterSpacing, lineHeightMul,
+    features)
+  c.paintLayout(lay, x, y, ha, va, false)
+  widestAdvance(lay)
+
+proc strokeText*(c: Canvas, x, y: float64, s: string,
+    features: openArray[Feature] = []): float64 =
+  ## Stroke text outlines with the current stroke style. Same layout
+  ## and return conventions as `fillText`.
+  let st = c.states[^1]
+  let lay = layoutText(c.lookupFont(st.fontFace), st.fontSize, s,
+    st.letterSpacing, st.lineHeightMul, features)
+  c.paintLayout(lay, x, y, st.textHAlign, st.textVAlign, true)
+  widestAdvance(lay)
+
+proc strokeText*(c: Canvas, font: TextFont, size: float64, x, y: float64,
+    s: string, ha = thaLeft, va = tvaBaseline, letterSpacing = 0.0,
+    lineHeightMul = 1.2,
+    features: openArray[Feature] = []): float64 =
+  ## Stateless overload of `strokeText`.
+  let lay = layoutText(font, size, s, letterSpacing, lineHeightMul,
+    features)
+  c.paintLayout(lay, x, y, ha, va, true)
+  widestAdvance(lay)
+
+proc textBounds*(c: Canvas, x, y: float64, s: string,
+    features: openArray[Feature] = []): Rect =
+  ## Measured ink bounds for stateful text at `(x, y)` (user space).
+  let st = c.states[^1]
+  let lay = layoutText(c.lookupFont(st.fontFace), st.fontSize, s,
+    st.letterSpacing, st.lineHeightMul, features)
+  shiftBounds(lay, x, y, st.textHAlign, st.textVAlign)
+
+proc textBounds*(c: Canvas, font: TextFont, size: float64, x, y: float64,
+    s: string, ha = thaLeft, va = tvaBaseline, letterSpacing = 0.0,
+    lineHeightMul = 1.2,
+    features: openArray[Feature] = []): Rect =
+  ## Stateless overload of `textBounds` (no drawing).
+  let lay = layoutText(font, size, s, letterSpacing, lineHeightMul,
+    features)
+  shiftBounds(lay, x, y, ha, va)
 
 # --- Draw ---
 

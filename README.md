@@ -22,6 +22,8 @@
 - 26 blend modes: Porter-Duff plus the full CSS mix-blend set
 - Masks and offscreen layers for cutouts and compositing tricks
 - Stars, polygons, rounded corners, plus measuring/splitting paths
+- Text rendering: harfnim shaping (kerning, ligatures, Arabic joining,
+  RTL) with glyph outlines as fills and strokes, multiline + alignment
 - An opt-in JIT backend that renders pixel-identical output, faster
 - PNG export with zero dependencies (pure-Nim encoder)
 
@@ -62,7 +64,7 @@ destroyJitBackend(c.backend.JitBackend)
 - [x] JIT backend, pixel-identical to scalar
 - [x] All 26 blend modes on the JIT fast path (separable + non-separable)
 - [x] PNG export without dependencies
-- [ ] Text rendering (shaping + glyph outlines)
+- [x] Text rendering (shaping + glyph outlines, multiline + align)
 - [x] Bilinear and multi-stop paints on the JIT fast path
 - [ ] AArch64 kernel execution sign-off
 - [ ] Image file loading API
