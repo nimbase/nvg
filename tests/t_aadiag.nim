@@ -36,3 +36,20 @@ test "zz fixed-pixel kernel-vs-scalar echoes":
   runCase("over-px", @[10u8, 200u8, 30u8, 40u8],
     rgbaf(0.2, 0.4, 0.8, 0.5), 0.25, coSourceOver)
   check true
+
+test "zz hue kernel curve over G byte":
+  # Pure kernel characterization (no rand, no scalar): G byte 0..255,
+  # fixed R/B/A/src/cov. Diffs vs the x86 curve pinpoint triggers.
+  let kern = JitKernels()
+  let fn = kern.getSolid(coHue)
+  check fn != nil
+  var line = ""
+  for g in 0 ..< 256:
+    var dst = @[118u8, uint8(g), 253u8, 132u8]
+    var cv = [1.0]
+    var ctx = bakeSolidCtx(rgbaf(1, 0, 0, 1), 1.0)
+    var got = dst
+    fn(addr got[0], addr cv[0], int64(1), addr ctx)
+    line.add($got[1] & " ")
+  echo "hue-curve-g: ", line
+  kern.destroy()
