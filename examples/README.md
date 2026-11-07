@@ -20,5 +20,5 @@
 # | `masks.nim`     | offscreen layers + alpha masks                     |
 # | `paths.nim`     | stars, polygons, fill rules, path measurement      |
 # | `jit.nim`       | CPU vs JIT backend, pixel-identity check           |
-# | `text.nim`      | shaped text (needs a font path argument)         |
+# | `text.nim`      | sizes, 3x4 alignment grid, spacing, line height, paints |
 # | `images.nim`    | image file loading into pattern paints           |
