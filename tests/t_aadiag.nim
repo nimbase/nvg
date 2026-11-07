@@ -18,8 +18,9 @@ test "zz hue kernel bytes":
   for i in 0 ..< buf.length:
     s.add(buf[i].toHex(2))
   echo "zz-bytes len=", buf.length
-  echo "zz-bytes ", s[0 ..< 400]
-  echo "zz-bytes ", s[s.len - 400 ..< s.len]
+  echo "zz-bytes0 ", s[0 ..< 880]
+  echo "zz-bytes1 ", s[880 ..< 1760]
+  echo "zz-bytes2 ", s[1760 ..< s.len]
   buf.destroy()
   check true
 
