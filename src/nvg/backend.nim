@@ -48,9 +48,10 @@ when defined(nvgMetal):
     ## CPU using the exact scalar code (`buildEdges`, `scanRowSpans`,
     ## `coverageEdges`), so antialiasing matches by construction; paint
     ## evaluation and compositing run in MSL over a shared buffer.
-    ## M5 shades solid x sourceOver on the GPU and falls back to the
-    ## scalar rasterizer for everything else, so output stays identical
-    ## to `CpuBackend`. Opt-in via
+    ## Basic paints shade on the GPU under any `CompOp`; multi-stop
+    ## shades on the GPU for source-over only; longer, mapped, or
+    ## degenerate paints fall back to the scalar rasterizer, so output
+    ## stays identical to `CpuBackend`. Opt-in via
     ## `newCanvas(w, h, newMetalBackend(w, h))`; call `close` when done.
     ctx*: MetalCtx
     covBuf*: seq[float32]
@@ -64,17 +65,17 @@ when defined(nvgMetal):
 
   proc shadeFill(b: MetalBackend, surf: Surface, polys: seq[SubPoly],
       paint: Paint, alpha: float64, clip: Clip, aa: bool,
-      rule: FillRule) =
+      rule: FillRule, op: CompOp) =
     ## Scalar `fillPolys` early-outs and coverage loop, GPU shade for
-    ## identity-map basic paints (solid, 2-stop gradients, patterns);
-    ## multi-stop, mapped, and degenerate paints fall back to scalar.
+    ## identity-map basic paints under any op; multi-stop shades on GPU
+    ## for source-over only, and mapped, degenerate, or over-long
+    ## paints fall back to scalar.
     if polys.len == 0: return
     let a = clamp01(alpha)
     if a <= 0.0: return
     if b.ctx.w != surf.w or b.ctx.h != surf.h or
         b.covBuf.len != surf.w * surf.h:
-      fillPolys(surf, polys, paint, alpha, clip, aa, coSourceOver,
-        rule)
+      fillPolys(surf, polys, paint, alpha, clip, aa, op, rule)
       return
     var kind = -1
     var w: array[16, cfloat]
@@ -181,9 +182,8 @@ when defined(nvgMetal):
           w[12] = cfloat(pt.img.w)
           w[13] = cfloat(pt.img.h)
           w[14] = cfloat(flags)
-    if kind < 0 and multiKind < 0:
-      fillPolys(surf, polys, paint, alpha, clip, aa, coSourceOver,
-        rule)
+    if kind < 0 and (multiKind < 0 or op != coSourceOver):
+      fillPolys(surf, polys, paint, alpha, clip, aa, op, rule)
       return
     let edges = buildEdges(polys)
     if edges.len == 0: return
@@ -217,7 +217,7 @@ when defined(nvgMetal):
     b.ctx.upload(surf.pixels)
     b.ctx.uploadAux(b.covBuf)
     if kind >= 0:
-      b.ctx.shadeOver(kind, a, w)
+      b.ctx.shadeOver(kind, op, a, w)
     else:
       b.ctx.shadeMulti(multiKind, a, mg0, mg1, mg2, mstops)
     surf.pixels = b.ctx.readback()
@@ -410,19 +410,13 @@ when defined(nvgMetal):
   method fill*(b: MetalBackend, surf: Surface, polys: seq[SubPoly],
       paint: Paint, alpha: float64, clip: Clip, aa = true,
       op = coSourceOver, rule = frEvenOdd) =
-    if op != coSourceOver:
-      fillPolys(surf, polys, paint, alpha, clip, aa, op, rule)
-      return
-    b.shadeFill(surf, polys, paint, alpha, clip, aa, rule)
+    b.shadeFill(surf, polys, paint, alpha, clip, aa, rule, op)
 
   method stroke*(b: MetalBackend, surf: Surface, polys: seq[SubPoly],
       paint: Paint, width: float64, cap: LineCap, join: LineJoin,
       miterLimit: float64, alpha: float64, clip: Clip,
       aa = true, op = coSourceOver) =
-    if op != coSourceOver:
-      strokePolys(surf, polys, paint, width, cap, join, miterLimit,
-        alpha, clip, aa, op)
-      return
     let expanded = expandStroke(polys, width, cap, join, miterLimit)
-    b.shadeFill(surf, expanded, paint, alpha, clip, aa, frEvenOdd)
+    b.shadeFill(surf, expanded, paint, alpha, clip, aa, frEvenOdd,
+      op)
 

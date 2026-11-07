@@ -48,7 +48,7 @@ const
   MSlotBlurH* = 7
   MSlotBlurV* = 8
   MSlotPatternBilinear* = 9
-  MSlotShadeOver* = 10
+  MSlotShade* = 10
   MSlotShadeMulti* = 11
 
 const solidMsl* = """
@@ -305,15 +305,18 @@ kernel void comp_blend(device uchar4 *io [[buffer(0)]],
 const shadeMsl* = """
 #include <metal_stdlib>
 using namespace metal;
-// Generalized coverage-driven source-over: evaluates any paint kind at
-// pixel centers (identity map) and composites with per-pixel coverage
-// from buffer(3), mirroring scalar fillPolys. kind: 0 solid, 1 linear,
-// 2 radial, 3 box, 4 pattern (flags bit 3 selects bilinear). Payload
-// `w` packs each paint's params as documented on `shadeOver`.
+// Generalized coverage-driven composite: evaluates any paint kind at
+// pixel centers (identity map) and composites under any CompOp with
+// per-pixel coverage from buffer(3), mirroring scalar fillPolys. kind:
+// 0 solid, 1 linear, 2 radial, 3 box, 4 pattern (flags bit 3 selects
+// bilinear). Payload `w` packs each paint's params as documented on
+// `shadeOver`. Blend helpers mirror `blendMsl` (kept in sync by the
+// M4/M11 tests).
 struct ShadeU {
   uint kind;
+  uint op;
   float alpha;
-  float2 _p;
+  float _p;
   float4 w0; float4 w1; float4 w2; float4 w3;
 };
 float4 sheval(uint2 gid, ShadeU u,
@@ -402,12 +405,72 @@ float4 sheval(uint2 gid, ShadeU u,
     }
   }
 }
-kernel void shade_over(device uchar4 *io [[buffer(0)]],
-                       constant ShadeU &u [[buffer(1)]],
-                       constant uint2 &dims [[buffer(2)]],
-                       device float *cov [[buffer(3)]],
-                       texture2d<float, access::read> img [[texture(0)]],
-                       uint2 gid [[thread_position_in_grid]]) {
+float mblend(uint op, float cs, float cb) {
+  switch (op) {
+    case 11: return cs * cb;
+    case 12: return cs + cb - cs * cb;
+    case 13:
+      return cb <= 0.5 ? 2.0 * cs * cb
+                       : 1.0 - 2.0 * (1.0 - cs) * (1.0 - cb);
+    case 14: return min(cs, cb);
+    case 15: return max(cs, cb);
+    case 16:
+      if (cs <= 0.0) return 0.0;
+      if (cb >= 1.0) return 1.0;
+      return min(1.0, cs / (1.0 - cb));
+    case 17:
+      if (cs >= 1.0) return 1.0;
+      if (cb <= 0.0) return 0.0;
+      return 1.0 - min(1.0, (1.0 - cs) / cb);
+    case 18:
+      return cs <= 0.5 ? 2.0 * cs * cb
+                       : 1.0 - 2.0 * (1.0 - cs) * (1.0 - cb);
+    case 19: {
+      if (cs <= 0.5) return cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb);
+      float d = cb <= 0.25 ? ((16.0 * cb - 12.0) * cb + 4.0) * cb
+                           : sqrt(cb);
+      return cb + (2.0 * cs - 1.0) * (d - cb);
+    }
+    case 20: return abs(cs - cb);
+    default: return cs + cb - 2.0 * cs * cb;
+  }
+}
+float mlum(float3 c) { return 0.3 * c.r + 0.59 * c.g + 0.11 * c.b; }
+float3 mclip(float3 c) {
+  float l = mlum(c);
+  float n = min(c.r, min(c.g, c.b));
+  float x = max(c.r, max(c.g, c.b));
+  float3 r = c;
+  if (n < 0.0) r = l + ((c - l) * l / (l - n));
+  if (x > 1.0) r = l + ((r - l) * (1.0 - l) / (x - l));
+  return r;
+}
+float3 msetlum(float3 c, float l) {
+  float d = l - mlum(c);
+  return mclip(c + d);
+}
+float msat(float3 c) {
+  return max(c.r, max(c.g, c.b)) - min(c.r, min(c.g, c.b));
+}
+float3 msetsat(float3 c, float s) {
+  float vals[3] = {c.r, c.g, c.b};
+  float mx = max(c.r, max(c.g, c.b));
+  float mn = min(c.r, min(c.g, c.b));
+  if (mx == mn) return float3(0.0);
+  int iMax = c.r == mx ? 0 : (c.g == mx ? 1 : 2);
+  int iMin = c.r == mn ? 0 : (c.g == mn ? 1 : 2);
+  int iMid = 3 - iMax - iMin;
+  float o[3] = {0.0, 0.0, 0.0};
+  o[iMax] = s;
+  o[iMid] = ((vals[iMid] - vals[iMin]) * s) / (vals[iMax] - vals[iMin]);
+  return float3(o[0], o[1], o[2]);
+}
+kernel void shade(device uchar4 *io [[buffer(0)]],
+                  constant ShadeU &u [[buffer(1)]],
+                  constant uint2 &dims [[buffer(2)]],
+                  device float *cov [[buffer(3)]],
+                  texture2d<float, access::read> img [[texture(0)]],
+                  uint2 gid [[thread_position_in_grid]]) {
   if (gid.x >= dims.x || gid.y >= dims.y) return;
   uint i = gid.y * dims.x + gid.x;
   float c = cov[i];
@@ -415,11 +478,66 @@ kernel void shade_over(device uchar4 *io [[buffer(0)]],
   float4 src = sheval(gid, u, img);
   float4 dd = float4(io[i]) * (1.0 / 255.0);
   float sa = clamp(src.a * u.alpha, 0.0, 1.0) * clamp(c, 0.0, 1.0);
-  if (sa <= 0.0) return;
-  float inv = 1.0 - sa;
-  float3 rgb = src.rgb * sa + dd.rgb * inv;
-  float a = sa + dd.a * inv;
-  io[i] = uchar4(saturate(float4(rgb, a)) * 255.0 + 0.5);
+  if (u.op == 0u) {
+    if (sa <= 0.0) return;
+    float inv = 1.0 - sa;
+    float3 rgb = src.rgb * sa + dd.rgb * inv;
+    float a = sa + dd.a * inv;
+    io[i] = uchar4(saturate(float4(rgb, a)) * 255.0 + 0.5);
+    return;
+  }
+  float3 sr3 = src.rgb;
+  float3 csr = sr3 * sa;
+  float3 cdr = dd.rgb * dd.a;
+  float da = dd.a;
+  float3 cor;
+  float ao;
+  switch (u.op) {
+    case 1: cor = csr * da; ao = sa * da; break;
+    case 2: cor = csr * (1.0 - da); ao = sa * (1.0 - da); break;
+    case 3: cor = csr * da + cdr * (1.0 - sa); ao = da; break;
+    case 4: cor = csr * (1.0 - da) + cdr; ao = sa + da * (1.0 - sa); break;
+    case 5: cor = cdr * sa; ao = da * sa; break;
+    case 6: cor = cdr * (1.0 - sa); ao = da * (1.0 - sa); break;
+    case 7: cor = csr * (1.0 - da) + cdr * sa; ao = sa; break;
+    case 8:
+      cor = csr + cdr;
+      ao = min(1.0, sa + da);
+      break;
+    case 9: cor = csr; ao = sa; break;
+    case 10:
+      cor = csr * (1.0 - da) + cdr * (1.0 - sa);
+      ao = sa + da - 2.0 * sa * da;
+      break;
+    default: {
+      float3 br = float3(mblend(u.op, sr3.r, dd.r),
+                         mblend(u.op, sr3.g, dd.g),
+                         mblend(u.op, sr3.b, dd.b));
+      if (u.op >= 22u) {
+        float3 sc = sr3;
+        float3 dc = dd.rgb;
+        if (u.op == 22u) {
+          br = msetlum(msetsat(sc, msat(dc)), mlum(dc));
+        } else if (u.op == 23u) {
+          br = msetlum(msetsat(dc, msat(sc)), mlum(dc));
+        } else if (u.op == 24u) {
+          br = msetlum(sc, mlum(dc));
+        } else {
+          br = msetlum(dc, mlum(sc));
+        }
+      }
+      cor = (1.0 - da) * sa * sr3 + (1.0 - sa) * da * dd.rgb + sa * da * br;
+      ao = sa + da * (1.0 - sa);
+      break;
+    }
+  }
+  uchar4 res;
+  if (ao <= 1e-6) {
+    res = uchar4(0, 0, 0, 0);
+  } else {
+    res = uchar4(saturate(float4(cor / ao, ao)) * 255.0 + 0.5);
+  }
+  io[i] = res;
 }
 """
 
@@ -528,11 +646,12 @@ type BlendParams* = object
   cov*: cfloat
 
 type ShadeJob* = object
-  ## Must match MSL `ShadeU` layout: kind, alpha, pad, w0..w3
+  ## Must match MSL `ShadeU` layout: kind, op, alpha, pad, w0..w3
   ## (80 bytes). Payload packing per kind is documented on `shadeOver`.
   kind*: cuint
+  op*: cuint
   alpha*: cfloat
-  pad*: array[2, cfloat]
+  pad*: cfloat
   w*: array[16, cfloat]
 
 type MultiParams* = object
@@ -776,7 +895,7 @@ proc newMetalCtx*(w, h: int): MetalCtx =
       result.buildSlot(MSlotRadial, radialMsl, "fill_radial")
       result.buildSlot(MSlotBox, boxMsl, "fill_box")
       result.buildSlot(MSlotBlend, blendMsl, "comp_blend")
-      result.buildSlot(MSlotShadeOver, shadeMsl, "shade_over")
+      result.buildSlot(MSlotShade, shadeMsl, "shade")
       result.buildSlot(MSlotShadeMulti, shadeMultiMsl, "shade_multi")
       result.buildSlot(MSlotPattern, patternMsl, "fill_pattern_nearest")
       result.buildSlot(MSlotBlurH, blurMsl, "blur_h")
@@ -844,19 +963,20 @@ proc uploadAux*(ctx: MetalCtx, cov: openArray[float32]) =
       raise newException(ValueError, "aux upload size mismatch")
     nvgmtl_upload(ctx.p, 1, cast[ptr uint8](unsafeAddr cov[0]))
 
-proc shadeOver*(ctx: MetalCtx, kind: int, alpha: float64,
+proc shadeOver*(ctx: MetalCtx, kind: int, op: CompOp, alpha: float64,
     w: array[16, cfloat]) =
-  ## Coverage-driven source-over for any paint kind (see `shadeMsl`).
-  ## Payload `w` packs the paint params: solid: w0 = color; linear:
-  ## w0.xy = s, w0.zw = e, w1 = c0, w2 = c1; radial: w0.xy = c,
-  ## w0.zw = (inr, outr), w1 = c0, w2 = c1; box: w0.xy = c,
-  ## w0.zw = (ex, ey), w1.xy = (radius, feather), w2 = c0, w3 = c1;
-  ## pattern: w0.xy = o, w0.zw = (ex, ey), w1 = tint, w2.x = angle,
-  ## w3 = (imgW, imgH, flags) with flags bit 3 selecting bilinear.
+  ## Coverage-driven composite for any paint kind under any `CompOp`
+  ## (see `shadeMsl`). Payload `w` packs the paint params: solid:
+  ## w0 = color; linear: w0.xy = s, w0.zw = e, w1 = c0, w2 = c1;
+  ## radial: w0.xy = c, w0.zw = (inr, outr), w1 = c0, w2 = c1; box:
+  ## w0.xy = c, w0.zw = (ex, ey), w1.xy = (radius, feather), w2 = c0,
+  ## w3 = c1; pattern: w0.xy = o, w0.zw = (ex, ey), w1 = tint,
+  ## w2.x = angle, w3 = (imgW, imgH, flags) with flags bit 3
+  ## selecting bilinear. Op ordinal passes through like `compBlend`.
   when defined(macosx):
-    var u = ShadeJob(kind: cuint(kind), alpha: cfloat(alpha),
-      pad: [cfloat(0), cfloat(0)], w: w)
-    nvgmtl_fill(ctx.p, cint(MSlotShadeOver), addr u, cint(sizeof(u)))
+    var u = ShadeJob(kind: cuint(kind), op: cuint(ord(op)),
+      alpha: cfloat(alpha), pad: cfloat(0), w: w)
+    nvgmtl_fill(ctx.p, cint(MSlotShade), addr u, cint(sizeof(u)))
 
 proc shadeMulti*(ctx: MetalCtx, kind: int, alpha: float64,
     g0, g1, g2: array[2, float64], stops: openArray[GradientStop]) =

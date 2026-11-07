@@ -432,6 +432,85 @@ test "metal backend shades pattern paints on gpu":
   else:
     skip()
 
+test "metal backend shades blend ops on gpu":
+  when defined(macosx) and defined(nvgMetal):
+    const W = 16
+    const H = 16
+    let bar1 = [coSourceIn, coDestinationOver, coLighter, coXor,
+      coMultiply, coScreen, coOverlay, coDarken, coColorDodge,
+      coDifference, coExclusion]
+    let bar2 = [coHue, coSaturation, coColor, coLuminosity]
+    let backdrops = [rgbf(0.2, 0.5, 0.6), rgbaf(0.7, 0.7, 0.7, 0.5)]
+    let paints = [
+      solidPaint(rgbaf(1, 0, 0, 0.8)),
+      linearGradient(0, 0, 16, 0, rgbf(0, 0, 0), rgbf(1, 1, 1)),
+    ]
+    let mb = newMetalBackend(W, H)
+    defer: mb.close()
+    for backdrop in backdrops:
+      for paint in paints:
+        for op in bar1:
+          var cpu = newCanvas(W, H)
+          cpu.clear(backdrop)
+          cpu.setFillPaint(paint)
+          cpu.setCompositeOp(op)
+          cpu.rect(2.5, 2.5, 11, 11)
+          cpu.fill()
+          var gpu = newCanvas(W, H, mb)
+          gpu.clear(backdrop)
+          gpu.setFillPaint(paint)
+          gpu.setCompositeOp(op)
+          gpu.rect(2.5, 2.5, 11, 11)
+          gpu.fill()
+          var maxDiff = 0
+          for i in 0 ..< cpu.surf.pixels.len:
+            let d = abs(int(gpu.surf.pixels[i]) - int(cpu.surf.pixels[i]))
+            if d > maxDiff:
+              maxDiff = d
+          check maxDiff <= 1
+        for op in bar2:
+          var cpu = newCanvas(W, H)
+          cpu.clear(backdrop)
+          cpu.setFillPaint(paint)
+          cpu.setCompositeOp(op)
+          cpu.rect(2.5, 2.5, 11, 11)
+          cpu.fill()
+          var gpu = newCanvas(W, H, mb)
+          gpu.clear(backdrop)
+          gpu.setFillPaint(paint)
+          gpu.setCompositeOp(op)
+          gpu.rect(2.5, 2.5, 11, 11)
+          gpu.fill()
+          var maxDiff = 0
+          for i in 0 ..< cpu.surf.pixels.len:
+            let d = abs(int(gpu.surf.pixels[i]) - int(cpu.surf.pixels[i]))
+            if d > maxDiff:
+              maxDiff = d
+          check maxDiff <= 2
+    # One stroked case through the op path.
+    var cpu = newCanvas(W, H)
+    cpu.clear(rgbf(0.2, 0.5, 0.6))
+    cpu.setStrokeColor(rgbf(1, 1, 0))
+    cpu.setStrokeWidth(3.0)
+    cpu.setCompositeOp(coMultiply)
+    cpu.rect(3.5, 3.5, 9, 9)
+    cpu.stroke()
+    var gpu = newCanvas(W, H, mb)
+    gpu.clear(rgbf(0.2, 0.5, 0.6))
+    gpu.setStrokeColor(rgbf(1, 1, 0))
+    gpu.setStrokeWidth(3.0)
+    gpu.setCompositeOp(coMultiply)
+    gpu.rect(3.5, 3.5, 9, 9)
+    gpu.stroke()
+    var maxDiff = 0
+    for i in 0 ..< cpu.surf.pixels.len:
+      let d = abs(int(gpu.surf.pixels[i]) - int(cpu.surf.pixels[i]))
+      if d > maxDiff:
+        maxDiff = d
+    check maxDiff <= 1
+  else:
+    skip()
+
 test "compute radial gradient matches cpu within 1 lsb":
   when defined(macosx):
     if not mtlAvailable():
