@@ -4,11 +4,16 @@
 ## anchor point and measured ink bounds drawn), letter spacing, line
 ## height, gradient fills, stroked outlines, and the stateless API.
 ##
-## Run: nim c -r examples/text.nim -- /path/to/font.ttf [outDir]
+## Forced JIT: text renders through the JIT row kernels, so this example
+## needs the define (wired automatically by examples/config.nims):
+##   nim c -r -d:nvgJit examples/text.nim -- /path/to/font.ttf [outDir]
 ## The font path can also come from the TEXT_FONT environment variable.
 
 import std/os
 import nvg
+
+when not defined(nvgJit):
+  {.error: "text example forces the JIT backend: rebuild with -d:nvgJit".}
 
 proc drawAnchor(c: Canvas, x, y: float64) =
   c.beginPath()
@@ -44,7 +49,7 @@ const
 
 proc main(fontPath, outDir: string) =
   createDir(outDir)
-  let c = newCanvas(960, 1260)
+  let c = newCanvas(960, 1260, newJitBackend())
   c.clear(rgb(255, 255, 255))
 
   let id = c.createFont("demo", fontPath)

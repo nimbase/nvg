@@ -5,9 +5,10 @@
 #
 # Run them all (sh):
 #   for f in examples/*.nim; do nim c -r "$f"; done
-# The JIT example needs the define (others must NOT pass it):
+# The JIT examples define nvgJit via examples/config.nims (others must NOT
+# pass it):
 #   nim c -r -d:nvgJit examples/jit.nim
-# The text example needs a font file (or TEXT_FONT set):
+# The text example needs a font file (or TEXT_FONT set), and forces JIT:
 #   nim c -r examples/text.nim -- /path/to/font.ttf
 #
 # | file            | shows                                              |

@@ -1,3 +1,3 @@
 switch("path", "$projectDir/../src")
-if projectName() == "jit":
+if projectName() in ["jit", "text"]:
   switch("define", "nvgJit")
