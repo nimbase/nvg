@@ -118,6 +118,12 @@ void nvgmtl_fill(void *p, int slot, const void *params, int paramslen) {
   }
 }
 
+void nvgmtl_upload(void *p, const unsigned char *src) {
+  NvgMtlCtx *c = (NvgMtlCtx *)p;
+  if (c == NULL || src == NULL) return;
+  memcpy([c->buf contents], src, (size_t)(c->w * c->h * 4));
+}
+
 void nvgmtl_readback(void *p, unsigned char *dst) {
   NvgMtlCtx *c = (NvgMtlCtx *)p;
   if (c == NULL || dst == NULL) return;

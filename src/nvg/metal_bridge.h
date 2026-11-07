@@ -30,6 +30,9 @@ int nvgmtl_build(void *ctx, int slot, const char *src, int srclen,
 // NULL with 0) is visible as buffer(1), dims as buffer(2).
 void nvgmtl_fill(void *ctx, int slot, const void *params, int paramslen);
 
+// Copy w*h*4 bytes from src into the buffer. No-op on NULL.
+void nvgmtl_upload(void *ctx, const unsigned char *src);
+
 // Copy w*h*4 bytes into dst (must be large enough). No-op on NULL.
 void nvgmtl_readback(void *ctx, unsigned char *dst);
 

@@ -31,6 +31,7 @@ type MetalCtx* = ref object
 const
   MSlotSolid* = 0
   MSlotLinear* = 1
+  MSlotSolidOver* = 2
 
 const solidMsl* = """
 #include <metal_stdlib>
@@ -66,6 +67,24 @@ kernel void fill_linear(device uchar4 *out [[buffer(0)]],
 }
 """
 
+const solidOverMsl* = """
+#include <metal_stdlib>
+using namespace metal;
+kernel void comp_solid_over(device uchar4 *io [[buffer(0)]],
+                            constant float4 &col [[buffer(1)]],
+                            constant uint2 &dims [[buffer(2)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= dims.x || gid.y >= dims.y) return;
+  uint i = gid.y * dims.x + gid.x;
+  float4 d = float4(io[i]) * (1.0 / 255.0);
+  float sa = clamp(col.a, 0.0, 1.0);
+  float inv = 1.0 - sa;
+  float3 rgb = col.rgb * sa + d.rgb * inv;
+  float a = sa + d.a * inv;
+  io[i] = uchar4(saturate(float4(rgb, a)) * 255.0 + 0.5);
+}
+"""
+
 type LinearParams* = object
   ## Must match MSL `LinP` layout: s, e, c0, c1 (48 bytes).
   sx*, sy*, ex*, ey*: cfloat
@@ -80,6 +99,7 @@ when defined(macosx):
       srclen: cint, name: cstring, namelen: cint): cint {.importc.}
   proc nvgmtl_fill(p: pointer, slot: cint, params: pointer,
       paramslen: cint) {.importc.}
+  proc nvgmtl_upload(p: pointer, src: ptr uint8) {.importc.}
   proc nvgmtl_readback(p: pointer, dst: ptr uint8) {.importc.}
   proc nvgmtl_device_name(p: pointer, dst: cstring,
       cap: cint): cint {.importc.}
@@ -111,6 +131,7 @@ proc newMetalCtx*(w, h: int): MetalCtx =
     try:
       result.buildSlot(MSlotSolid, solidMsl, "fill_solid")
       result.buildSlot(MSlotLinear, linearMsl, "fill_linear")
+      result.buildSlot(MSlotSolidOver, solidOverMsl, "comp_solid_over")
     except IOError:
       nvgmtl_destroy(p)
       result.p = nil
@@ -157,6 +178,21 @@ proc readback*(ctx: MetalCtx): seq[uint8] =
       nvgmtl_readback(ctx.p, addr result[0])
   else:
     result = @[]
+
+proc upload*(ctx: MetalCtx, pixels: openArray[uint8]) =
+  ## Copy straight RGBA8 bytes into the buffer (Surface layout).
+  when defined(macosx):
+    if pixels.len != ctx.w * ctx.h * 4:
+      raise newException(ValueError, "upload size mismatch")
+    nvgmtl_upload(ctx.p, unsafeAddr pixels[0])
+
+proc compSolidOver*(ctx: MetalCtx, r, g, b, a: float64) =
+  ## Source-over composite of a straight color onto the buffer content,
+  ## mirroring scalar `blendPixel` (coverage 1). Each thread owns its
+  ## pixel, so the in-place read-modify-write needs no ordering.
+  when defined(macosx):
+    var col = [cfloat(r), cfloat(g), cfloat(b), cfloat(a)]
+    nvgmtl_fill(ctx.p, cint(MSlotSolidOver), addr col[0], 16)
 
 proc close*(ctx: MetalCtx) =
   when defined(macosx):

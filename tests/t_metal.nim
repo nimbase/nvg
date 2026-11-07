@@ -1,6 +1,7 @@
 import std/unittest
 import nvg
 import nvg/metal
+import nvg/surface
 
 test "metal device enumerates with a name":
   when defined(macosx):
@@ -58,5 +59,44 @@ test "compute linear gradient matches cpu within 1 lsb":
             if d > maxDiff:
               maxDiff = d
       check maxDiff <= 1
+  else:
+    skip()
+
+test "compute source-over matches cpu within 1 lsb":
+  when defined(macosx):
+    if not mtlAvailable():
+      skip()
+    const W = 8
+    const H = 8
+    let dstCases = [
+      rgbf(0, 0, 1),
+      rgbaf(0, 0, 0, 0),
+      rgbaf(0, 1, 0, 0.5),
+      rgbaf(1, 1, 1, 0.25),
+    ]
+    let srcCases = [
+      rgbaf(1, 0, 0, 0.5),
+      rgbaf(1, 1, 0, 1.0),
+      rgbaf(0, 1, 1, 0.0),
+    ]
+    var ctx = newMetalCtx(W, H)
+    defer: ctx.close()
+    for dst in dstCases:
+      for src in srcCases:
+        var s = newSurface(W, H)
+        s.clear(dst)
+        let before = s.pixels
+        for y in 0 ..< H:
+          for x in 0 ..< W:
+            s.blendPixel(x, y, src, 1.0, coSourceOver)
+        ctx.upload(before)
+        ctx.compSolidOver(src.r, src.g, src.b, src.a)
+        let got = ctx.readback()
+        var maxDiff = 0
+        for i in 0 ..< got.len:
+          let d = abs(int(got[i]) - int(s.pixels[i]))
+          if d > maxDiff:
+            maxDiff = d
+        check maxDiff <= 1
   else:
     skip()
