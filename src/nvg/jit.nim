@@ -289,7 +289,7 @@ proc buildSolidRowGenAarch64*(op: CompOp): ExecutableBuffer =
     cbz x11, fwd("done")
     sub sp, sp, 96
     movz x4, 0xED8D
-    movk x4, 0x0B5E, lsl, 16
+    movk x4, 0xA0B5, lsl, 16
     movk x4, 0xC6F7, lsl, 32
     movk x4, 0x3EB0, lsl, 48
     fmov d25, x4 # 1e-6 threshold
@@ -749,7 +749,7 @@ proc buildLinearRowGenAarch64*(op: CompOp): ExecutableBuffer =
     cbz x11, fwd("done")
     sub sp, sp, 96
     movz x4, 0xED8D
-    movk x4, 0x0B5E, lsl, 16
+    movk x4, 0xA0B5, lsl, 16
     movk x4, 0xC6F7, lsl, 32
     movk x4, 0x3EB0, lsl, 48
     fmov d25, x4 # 1e-6 threshold
@@ -1254,7 +1254,7 @@ proc buildRadialRowGenAarch64*(op: CompOp): ExecutableBuffer =
     cbz x11, fwd("done")
     sub sp, sp, 96
     movz x4, 0xED8D
-    movk x4, 0x0B5E, lsl, 16
+    movk x4, 0xA0B5, lsl, 16
     movk x4, 0xC6F7, lsl, 32
     movk x4, 0x3EB0, lsl, 48
     fmov d25, x4 # 1e-6 threshold
@@ -1815,7 +1815,7 @@ proc buildBoxRowGenAarch64*(op: CompOp): ExecutableBuffer =
     cbz x11, fwd("done")
     sub sp, sp, 96
     movz x4, 0xED8D
-    movk x4, 0x0B5E, lsl, 16
+    movk x4, 0xA0B5, lsl, 16
     movk x4, 0xC6F7, lsl, 32
     movk x4, 0x3EB0, lsl, 48
     fmov d25, x4 # 1e-6 threshold
@@ -2624,7 +2624,7 @@ proc buildPatternRowGenAarch64*(op: CompOp): ExecutableBuffer =
     cbz x11, fwd("done")
     sub sp, sp, 96
     movz x4, 0xED8D
-    movk x4, 0x0B5E, lsl, 16
+    movk x4, 0xA0B5, lsl, 16
     movk x4, 0xC6F7, lsl, 32
     movk x4, 0x3EB0, lsl, 48
     fmov d25, x4 # 1e-6 threshold
