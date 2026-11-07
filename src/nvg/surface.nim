@@ -512,43 +512,113 @@ proc savePng*(s: Surface, path: string) =
     discard f.writeBytes(bytes, 0, bytes.len)
 
 proc boxBlur*(s: Surface, radius: int) =
-  ## Separable channel-independent box blur (window `2*radius+1`),
-  ## clamped edges, round-half-up integer math. Alpha blurs like any
-  ## channel: fast but halos at transparent edges are the documented
-  ## tradeoff (halo-free edges need premultiplied resampling instead).
-  ## Non-positive radii are a no-op. The Metal mirror uses the same
-  ## integer formula, so it is byte-identical.
+  ## Separable box blur (window `2*radius+1`) in premultiplied space:
+  ## each tap contributes `rgb*a` and `a`; the output divides color by
+  ## total alpha (transparent when it is zero) and averages alpha over
+  ## the window. Premultiplied averaging keeps blurred transparent
+  ## edges the source hue instead of dark fringes; on opaque images it
+  ## reduces exactly to the straight-channel mean. Edges clamp
+  ## (replicate); all math is integer round-half-up, so the Metal
+  ## mirror is byte-identical. Both passes use sliding running sums:
+  ## O(pixels) regardless of radius. Non-positive radii are a no-op.
   if radius <= 0 or s.w <= 0 or s.h <= 0: return
   let n = 2 * radius + 1
-  let half = n div 2
+  let halfN = n div 2
   var tmp = newSeq[uint8](s.pixels.len)
   for y in 0 ..< s.h:
+    let row = y * s.w
+    var ar, ag, ab, aa = 0
+    for k in -radius .. radius:
+      let i = (row + clamp(k, 0, s.w - 1)) * 4
+      let a = int(s.pixels[i + 3])
+      ar += int(s.pixels[i]) * a
+      ag += int(s.pixels[i + 1]) * a
+      ab += int(s.pixels[i + 2]) * a
+      aa += a
     for x in 0 ..< s.w:
-      var sr, sg, sb, sa = 0
-      for k in -radius .. radius:
-        let xx = clamp(x + k, 0, s.w - 1)
-        let i = (y * s.w + xx) * 4
-        sr += int(s.pixels[i])
-        sg += int(s.pixels[i + 1])
-        sb += int(s.pixels[i + 2])
-        sa += int(s.pixels[i + 3])
+      let o = (row + x) * 4
+      if aa > 0:
+        let h = aa div 2
+        tmp[o] = uint8((ar + h) div aa)
+        tmp[o + 1] = uint8((ag + h) div aa)
+        tmp[o + 2] = uint8((ab + h) div aa)
+      else:
+        tmp[o] = 0
+        tmp[o + 1] = 0
+        tmp[o + 2] = 0
+      tmp[o + 3] = uint8((aa + halfN) div n)
+      let li = (row + clamp(x - radius, 0, s.w - 1)) * 4
+      let la = int(s.pixels[li + 3])
+      ar -= int(s.pixels[li]) * la
+      ag -= int(s.pixels[li + 1]) * la
+      ab -= int(s.pixels[li + 2]) * la
+      aa -= la
+      let ri = (row + clamp(x + radius + 1, 0, s.w - 1)) * 4
+      let ra = int(s.pixels[ri + 3])
+      ar += int(s.pixels[ri]) * ra
+      ag += int(s.pixels[ri + 1]) * ra
+      ab += int(s.pixels[ri + 2]) * ra
+      aa += ra
+  for x in 0 ..< s.w:
+    var ar, ag, ab, aa = 0
+    for k in -radius .. radius:
+      let i = (clamp(k, 0, s.h - 1) * s.w + x) * 4
+      let a = int(tmp[i + 3])
+      ar += int(tmp[i]) * a
+      ag += int(tmp[i + 1]) * a
+      ab += int(tmp[i + 2]) * a
+      aa += a
+    for y in 0 ..< s.h:
       let o = (y * s.w + x) * 4
-      tmp[o] = uint8((sr + half) div n)
-      tmp[o + 1] = uint8((sg + half) div n)
-      tmp[o + 2] = uint8((sb + half) div n)
-      tmp[o + 3] = uint8((sa + half) div n)
-  for y in 0 ..< s.h:
-    for x in 0 ..< s.w:
-      var sr, sg, sb, sa = 0
-      for k in -radius .. radius:
-        let yy = clamp(y + k, 0, s.h - 1)
-        let i = (yy * s.w + x) * 4
-        sr += int(tmp[i])
-        sg += int(tmp[i + 1])
-        sb += int(tmp[i + 2])
-        sa += int(tmp[i + 3])
-      let o = (y * s.w + x) * 4
-      s.pixels[o] = uint8((sr + half) div n)
-      s.pixels[o + 1] = uint8((sg + half) div n)
-      s.pixels[o + 2] = uint8((sb + half) div n)
-      s.pixels[o + 3] = uint8((sa + half) div n)
+      if aa > 0:
+        let h = aa div 2
+        s.pixels[o] = uint8((ar + h) div aa)
+        s.pixels[o + 1] = uint8((ag + h) div aa)
+        s.pixels[o + 2] = uint8((ab + h) div aa)
+      else:
+        s.pixels[o] = 0
+        s.pixels[o + 1] = 0
+        s.pixels[o + 2] = 0
+      s.pixels[o + 3] = uint8((aa + halfN) div n)
+      let li = (clamp(y - radius, 0, s.h - 1) * s.w + x) * 4
+      let la = int(tmp[li + 3])
+      ar -= int(tmp[li]) * la
+      ag -= int(tmp[li + 1]) * la
+      ab -= int(tmp[li + 2]) * la
+      aa -= la
+      let ri = (clamp(y + radius + 1, 0, s.h - 1) * s.w + x) * 4
+      let ra = int(tmp[ri + 3])
+      ar += int(tmp[ri]) * ra
+      ag += int(tmp[ri + 1]) * ra
+      ab += int(tmp[ri + 2]) * ra
+      aa += ra
+
+proc boxWidthsForSigma*(sigma: float64, boxes = 3): seq[int] =
+  ## Odd box widths whose repeated application approximates Gaussian
+  ## blur with standard deviation `sigma` (ideal width split over
+  ## `boxes` passes). Width 1 means an identity pass. Empty for
+  ## non-positive sigma. The Metal mirror runs the same widths.
+  if sigma <= 0.0 or boxes <= 0:
+    return @[]
+  let n = boxes
+  let ideal = sqrt((12.0 * sigma * sigma / float64(n)) + 1.0)
+  var lo = int(floor(ideal))
+  if lo mod 2 == 0:
+    dec lo
+  if lo < 1:
+    lo = 1
+  let hi = lo + 2
+  let m = clamp(int(round((12.0 * sigma * sigma -
+    float64(n * lo * lo) - 4.0 * float64(n) * float64(lo) -
+    3.0 * float64(n)) / float64(-4 * lo - 4))), 0, n)
+  for i in 0 ..< m:
+    result.add(lo)
+  for i in m ..< n:
+    result.add(hi)
+
+proc gaussianBlur*(s: Surface, sigma: float64, boxes = 3) =
+  ## Gaussian-like blur via repeated box blur (`boxWidthsForSigma`):
+  ## fast and visually close, though not an exact Gaussian.
+  ## Non-positive sigma is a no-op.
+  for w in boxWidthsForSigma(sigma, boxes):
+    s.boxBlur((w - 1) div 2)

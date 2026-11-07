@@ -32,6 +32,7 @@ when defined(macosx):
 import ./types
 import ./images
 import ./paint
+import ./surface
 
 type MetalCtx* = ref object
   p: pointer
@@ -723,10 +724,15 @@ type PatternParams* = object
 const blurMsl* = """
 #include <metal_stdlib>
 using namespace metal;
-// Separable box blur, integer math mirroring scalar `boxBlur`: clamped
-// edges, round-half-up `(sum + n/2)/n` with odd n, so output is
+// Separable box blur in premultiplied space, mirroring scalar
+// `boxBlur`: taps accumulate rgb*a and a as uints, color divides by
+// total alpha (transparent when zero), alpha averages over the
+// window. Integer round-half-up throughout, so output is
 // byte-identical to the CPU. Horizontal pass reads pixels and writes
 // the aux buffer as bytes; vertical pass reads aux and writes pixels.
+// (GPUs keep direct taps here; the O(pixels) running sums live on the
+// CPU side where a single thread owns each row. Shared-memory tiling
+// or downsampling would be the next step for very large radii.)
 struct BlurP { int radius; };
 kernel void blur_h(device uchar4 *src [[buffer(0)]],
                    constant BlurP &u [[buffer(1)]],
@@ -735,18 +741,17 @@ kernel void blur_h(device uchar4 *src [[buffer(0)]],
                    uint2 gid [[thread_position_in_grid]]) {
   if (gid.x >= dims.x || gid.y >= dims.y) return;
   int r = u.radius;
-  int n = 2 * r + 1;
-  uint3 acc = uint3(0);
+  uint3 accC = uint3(0);
   uint accA = 0u;
   for (int k = -r; k <= r; k++) {
     int xx = clamp(int(gid.x) + k, 0, int(dims.x) - 1);
     uchar4 t = src[gid.y * dims.x + uint(xx)];
-    acc += uint3(t.r, t.g, t.b);
+    accC += uint3(t.r, t.g, t.b) * uint(t.a);
     accA += uint(t.a);
   }
-  uint den = uint(n);
-  uint3 c = (acc + den / 2u) / den;
-  uint a = (accA + den / 2u) / den;
+  uint n = uint(2 * r + 1);
+  uint3 c = accA > 0u ? (accC + accA / 2u) / accA : uint3(0);
+  uint a = (accA + n / 2u) / n;
   tmp[gid.y * dims.x + gid.x] = uchar4(uchar3(c), uchar(a));
 }
 kernel void blur_v(device uchar4 *dst [[buffer(0)]],
@@ -756,18 +761,17 @@ kernel void blur_v(device uchar4 *dst [[buffer(0)]],
                    uint2 gid [[thread_position_in_grid]]) {
   if (gid.x >= dims.x || gid.y >= dims.y) return;
   int r = u.radius;
-  int n = 2 * r + 1;
-  uint3 acc = uint3(0);
+  uint3 accC = uint3(0);
   uint accA = 0u;
   for (int k = -r; k <= r; k++) {
     int yy = clamp(int(gid.y) + k, 0, int(dims.y) - 1);
     uchar4 t = tmp[uint(yy) * dims.x + gid.x];
-    acc += uint3(t.r, t.g, t.b);
+    accC += uint3(t.r, t.g, t.b) * uint(t.a);
     accA += uint(t.a);
   }
-  uint den = uint(n);
-  uint3 c = (acc + den / 2u) / den;
-  uint a = (accA + den / 2u) / den;
+  uint n = uint(2 * r + 1);
+  uint3 c = accA > 0u ? (accC + accA / 2u) / accA : uint3(0);
+  uint a = (accA + n / 2u) / n;
   dst[gid.y * dims.x + gid.x] = uchar4(uchar3(c), uchar(a));
 }
 """
@@ -1061,6 +1065,13 @@ proc boxBlur*(ctx: MetalCtx, radius: int) =
     var u = BlurParams(radius: cint(radius))
     nvgmtl_fill(ctx.p, cint(MSlotBlurH), addr u, cint(sizeof(u)))
     nvgmtl_fill(ctx.p, cint(MSlotBlurV), addr u, cint(sizeof(u)))
+
+proc gaussianBlur*(ctx: MetalCtx, sigma: float64, boxes = 3) =
+  ## Gaussian-like blur mirroring scalar `gaussianBlur`: the same
+  ## `boxWidthsForSigma` widths as repeated box passes.
+  when defined(macosx):
+    for w in boxWidthsForSigma(sigma, boxes):
+      ctx.boxBlur((w - 1) div 2)
 
 proc compBlend*(ctx: MetalCtx, op: CompOp, r, g, b, a,
     cov: float64) =

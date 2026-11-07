@@ -642,6 +642,46 @@ test "cpu box blur hand computed":
   noop.boxBlur(0)
   check noop.getPixel(0, 0).toRgba8() == (255u8, 0u8, 0u8, 255u8)
 
+test "cpu box blur keeps hue at transparent edges":
+  # Premultiplied averaging: a lone red pixel blurs to full-red at
+  # low alpha, never a dark-red fringe.
+  var s = newSurface(5, 5)
+  s.clear(rgbaf(0, 0, 0, 0))
+  s.setPixel(2, 2, rgbf(1, 0, 0))
+  s.boxBlur(1)
+  check s.getPixel(1, 1).toRgba8() == (255u8, 0u8, 0u8, 28u8)
+  check s.getPixel(2, 2).toRgba8() == (255u8, 0u8, 0u8, 28u8)
+  check s.getPixel(0, 0).toRgba8() == (0u8, 0u8, 0u8, 0u8)
+
+test "cpu gaussian blur spreads monotonically":
+  var s = newSurface(9, 9)
+  s.clear(rgbaf(0, 0, 0, 0))
+  s.setPixel(4, 4, rgbf(1, 1, 1))
+  s.gaussianBlur(1.0)
+  # Premultiplied spread keeps full-white hue; only alpha falls off.
+  let c = s.getPixel(4, 4).toRgba8()
+  check c == (255u8, 255u8, 255u8, c[3])
+  check c[3] < 255u8 and c[3] > 0u8
+  # Symmetric falloff along the row through the center.
+  for dx in 1 .. 4:
+    let l = s.getPixel(4 - dx, 4).toRgba8()
+    let r = s.getPixel(4 + dx, 4).toRgba8()
+    check l == r
+  let g1 = s.getPixel(3, 4).toRgba8()
+  let g2 = s.getPixel(2, 4).toRgba8()
+  check g1[0] == 255u8
+  check g1[3] >= g2[3]
+  check s.getPixel(0, 0).toRgba8() == (0u8, 0u8, 0u8, 0u8)
+  var again = newSurface(9, 9)
+  again.clear(rgbaf(0, 0, 0, 0))
+  again.setPixel(4, 4, rgbf(1, 1, 1))
+  again.gaussianBlur(1.0)
+  check again.pixels == s.pixels
+  var tiny = newSurface(3, 3)
+  tiny.clear(rgbf(0, 1, 0))
+  tiny.gaussianBlur(0.0)
+  check tiny.getPixel(1, 1).toRgba8() == (0u8, 255u8, 0u8, 255u8)
+
 test "compute box blur is byte-identical to cpu":
   when defined(macosx):
     if not mtlAvailable():
@@ -664,6 +704,32 @@ test "compute box blur is byte-identical to cpu":
       cpu.boxBlur(radius)
       ctx.upload(s.pixels)
       ctx.boxBlur(radius)
+      check ctx.readback() == cpu.pixels
+  else:
+    skip()
+
+test "compute gaussian blur is byte-identical to cpu":
+  when defined(macosx):
+    if not mtlAvailable():
+      skip()
+    const W = 9
+    const H = 7
+    var s = newSurface(W, H)
+    for y in 0 ..< H:
+      for x in 0 ..< W:
+        s.setPixel(x, y, rgbaf(float64((x * 37 + y * 91) mod 256) / 255.0,
+          float64((x * 53 + y * 29) mod 256) / 255.0,
+          float64((x * 11 + y * 71) mod 256) / 255.0,
+          float64((x * 17 + y * 13) mod 256) / 255.0))
+    var ctx = newMetalCtx(W, H)
+    defer: ctx.close()
+    for sigma in [0.5, 1.5, 3.0]:
+      var cpu = newSurface(W, H)
+      for i in 0 ..< s.pixels.len:
+        cpu.pixels[i] = s.pixels[i]
+      cpu.gaussianBlur(sigma)
+      ctx.upload(s.pixels)
+      ctx.gaussianBlur(sigma)
       check ctx.readback() == cpu.pixels
   else:
     skip()
