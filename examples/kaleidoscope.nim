@@ -2,7 +2,7 @@
 ##
 ## Twelve mirrored wedges sample one photo tile: each wedge rotates the
 ## frame and every odd wedge mirrors it, so shared edges stay seamless
-## by construction. A medallion and ring finish the disc.
+## by construction. An outer ring finishes the disc.
 ##
 ## Run: nim c -r examples/kaleidoscope.nim [outDir]
 ## Source photo: tests/data/pexels-arash-kh-1030567404-24596467.jpg
@@ -51,18 +51,7 @@ proc main(outDir: string) =
     c.fill()
     c.restore()
 
-  # Medallion with a zoomed tile plus ring strokes. Tile origin keeps
-  # repeat-wrap boundaries outside the medallion (photos are not
-  # tileable, so a wrap inside the circle would seam).
-  c.setFillPaint(c.imagePattern(300, 300, 200, 200, 0.0, id, 1.0))
-  c.beginPath()
-  c.circle(Cx, Cy, 72)
-  c.fill()
-  c.setStrokeColor(rgbf(0.95, 0.95, 0.95))
-  c.setStrokeWidth(4.0)
-  c.beginPath()
-  c.circle(Cx, Cy, 72)
-  c.stroke()
+  # Outer frame ring.
   c.setStrokeColor(rgbf(0.08, 0.08, 0.12))
   c.setStrokeWidth(14.0)
   c.beginPath()
