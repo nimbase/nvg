@@ -113,6 +113,21 @@ proc fillBounds*(polys: seq[SubPoly], surf: Surface,
     y1 = min(y1, int(ceil(clip.y1)) - 1)
   (x0, y0, x1, y1, not (x1 < x0 or y1 < y0))
 
+proc filterRowEdges*(edges: openArray[Edge], y: int,
+    buf: var seq[Edge]) =
+  ## Edges that can affect row `y` (band `[y, y+1)`), reusing the
+  ## caller's buffer. An edge fully above (`max < yTop`) or below
+  ## (`min > yBot`) the band fails the subsample y-test for every
+  ## sample in the row, so it is a provable no-op inside both
+  ## `scanRowSpans` and `coverageEdges`: filtering is output-identical
+  ## and turns per-subsample walks from whole-polygon into row-local.
+  buf.setLen(0)
+  let yTop = float64(y)
+  let yBot = yTop + 1.0
+  for e in edges:
+    if max(e.y0, e.y1) < yTop or min(e.y0, e.y1) > yBot: continue
+    buf.add(e)
+
 proc scanRowSpans*(edges: openArray[Edge], x0, x1, y: int,
     edgeMark: var openArray[bool], xs: var seq[tuple[x: float64, dir: int]],
     spans: var seq[tuple[a, b: float64]], rule = frEvenOdd) =
@@ -172,9 +187,11 @@ proc fillPolys*(surf: Surface, polys: seq[SubPoly], paint: Paint,
   let rowW = x1 - x0 + 1
   var edgeMark = newSeq[bool](rowW)
   var xs: seq[tuple[x: float64, dir: int]] = @[]
+  var rowEdges: seq[Edge] = @[]
   var spans: seq[tuple[a, b: float64]] = @[]
   for y in y0 .. y1:
-    scanRowSpans(edges, x0, x1, y, edgeMark, xs, spans, rule)
+    filterRowEdges(edges, y, rowEdges)
+    scanRowSpans(rowEdges, x0, x1, y, edgeMark, xs, spans, rule)
     for x in x0 .. x1:
       let cx = float64(x) + 0.5
       var inside = false
@@ -186,7 +203,7 @@ proc fillPolys*(surf: Surface, polys: seq[SubPoly], paint: Paint,
         if not aa:
           if inside: 1.0 else: 0.0
         elif edgeMark[x - x0]:
-          coverageEdges(float64(x), float64(y), edges, rule)
+          coverageEdges(float64(x), float64(y), rowEdges, rule)
         elif inside:
           1.0 # edge-free pixel agreeing with its center sample
         else:
@@ -216,9 +233,11 @@ proc fillSolidJit*(surf: Surface, polys: seq[SubPoly], src: Color,
   if covBuf.len < rowW: covBuf.setLen(rowW)
   var edgeMark = newSeq[bool](rowW)
   var xs: seq[tuple[x: float64, dir: int]] = @[]
+  var rowEdges: seq[Edge] = @[]
   var spans: seq[tuple[a, b: float64]] = @[]
   for y in y0 .. y1:
-    scanRowSpans(edges, x0, x1, y, edgeMark, xs, spans, rule)
+    filterRowEdges(edges, y, rowEdges)
+    scanRowSpans(rowEdges, x0, x1, y, edgeMark, xs, spans, rule)
     # NB: no `spans.len == 0` skip here. Rows whose geometry misses
     # the center line can still own marked edge pixels with nonzero
     # orphan coverage (the scalar path paints them via the same
@@ -235,7 +254,7 @@ proc fillSolidJit*(surf: Surface, polys: seq[SubPoly], src: Color,
         if not aa:
           if inside: 1.0 else: 0.0
         elif edgeMark[x - x0]:
-          coverageEdges(float64(x), float64(y), edges, rule)
+          coverageEdges(float64(x), float64(y), rowEdges, rule)
         elif inside:
           1.0
         else:
@@ -286,9 +305,11 @@ proc fillLinearJit*(surf: Surface, polys: seq[SubPoly], paint: Paint,
   if covBuf.len < rowW: covBuf.setLen(rowW)
   var edgeMark = newSeq[bool](rowW)
   var xs: seq[tuple[x: float64, dir: int]] = @[]
+  var rowEdges: seq[Edge] = @[]
   var spans: seq[tuple[a, b: float64]] = @[]
   for y in y0 .. y1:
-    scanRowSpans(edges, x0, x1, y, edgeMark, xs, spans, rule)
+    filterRowEdges(edges, y, rowEdges)
+    scanRowSpans(rowEdges, x0, x1, y, edgeMark, xs, spans, rule)
     # Same orphan-row rule as `fillSolidJit`: no spans-skip, `any` gate.
     var any = false
     for x in x0 .. x1:
@@ -302,7 +323,7 @@ proc fillLinearJit*(surf: Surface, polys: seq[SubPoly], paint: Paint,
         if not aa:
           if inside: 1.0 else: 0.0
         elif edgeMark[x - x0]:
-          coverageEdges(float64(x), float64(y), edges, rule)
+          coverageEdges(float64(x), float64(y), rowEdges, rule)
         elif inside:
           1.0
         else:
@@ -350,9 +371,11 @@ proc fillRadialJit*(surf: Surface, polys: seq[SubPoly], paint: Paint,
   if covBuf.len < rowW: covBuf.setLen(rowW)
   var edgeMark = newSeq[bool](rowW)
   var xs: seq[tuple[x: float64, dir: int]] = @[]
+  var rowEdges: seq[Edge] = @[]
   var spans: seq[tuple[a, b: float64]] = @[]
   for y in y0 .. y1:
-    scanRowSpans(edges, x0, x1, y, edgeMark, xs, spans, rule)
+    filterRowEdges(edges, y, rowEdges)
+    scanRowSpans(rowEdges, x0, x1, y, edgeMark, xs, spans, rule)
     # Same orphan-row rule as `fillSolidJit`: no spans-skip, `any` gate.
     var any = false
     for x in x0 .. x1:
@@ -366,7 +389,7 @@ proc fillRadialJit*(surf: Surface, polys: seq[SubPoly], paint: Paint,
         if not aa:
           if inside: 1.0 else: 0.0
         elif edgeMark[x - x0]:
-          coverageEdges(float64(x), float64(y), edges, rule)
+          coverageEdges(float64(x), float64(y), rowEdges, rule)
         elif inside:
           1.0
         else:
@@ -412,9 +435,11 @@ proc fillBoxJit*(surf: Surface, polys: seq[SubPoly], paint: Paint,
   if covBuf.len < rowW: covBuf.setLen(rowW)
   var edgeMark = newSeq[bool](rowW)
   var xs: seq[tuple[x: float64, dir: int]] = @[]
+  var rowEdges: seq[Edge] = @[]
   var spans: seq[tuple[a, b: float64]] = @[]
   for y in y0 .. y1:
-    scanRowSpans(edges, x0, x1, y, edgeMark, xs, spans, rule)
+    filterRowEdges(edges, y, rowEdges)
+    scanRowSpans(rowEdges, x0, x1, y, edgeMark, xs, spans, rule)
     # Same orphan-row rule as `fillSolidJit`: no spans-skip, `any` gate.
     var any = false
     for x in x0 .. x1:
@@ -428,7 +453,7 @@ proc fillBoxJit*(surf: Surface, polys: seq[SubPoly], paint: Paint,
         if not aa:
           if inside: 1.0 else: 0.0
         elif edgeMark[x - x0]:
-          coverageEdges(float64(x), float64(y), edges, rule)
+          coverageEdges(float64(x), float64(y), rowEdges, rule)
         elif inside:
           1.0
         else:
@@ -475,9 +500,11 @@ proc fillPatternJit*(surf: Surface, polys: seq[SubPoly], paint: Paint,
   if covBuf.len < rowW: covBuf.setLen(rowW)
   var edgeMark = newSeq[bool](rowW)
   var xs: seq[tuple[x: float64, dir: int]] = @[]
+  var rowEdges: seq[Edge] = @[]
   var spans: seq[tuple[a, b: float64]] = @[]
   for y in y0 .. y1:
-    scanRowSpans(edges, x0, x1, y, edgeMark, xs, spans, rule)
+    filterRowEdges(edges, y, rowEdges)
+    scanRowSpans(rowEdges, x0, x1, y, edgeMark, xs, spans, rule)
     # Same orphan-row rule as `fillSolidJit`: no spans-skip, `any` gate.
     var any = false
     for x in x0 .. x1:
@@ -491,7 +518,7 @@ proc fillPatternJit*(surf: Surface, polys: seq[SubPoly], paint: Paint,
         if not aa:
           if inside: 1.0 else: 0.0
         elif edgeMark[x - x0]:
-          coverageEdges(float64(x), float64(y), edges, rule)
+          coverageEdges(float64(x), float64(y), rowEdges, rule)
         elif inside:
           1.0
         else:
@@ -538,9 +565,11 @@ proc fillMultiLinearJit*(surf: Surface, polys: seq[SubPoly], paint: Paint,
   if covBuf.len < rowW: covBuf.setLen(rowW)
   var edgeMark = newSeq[bool](rowW)
   var xs: seq[tuple[x: float64, dir: int]] = @[]
+  var rowEdges: seq[Edge] = @[]
   var spans: seq[tuple[a, b: float64]] = @[]
   for y in y0 .. y1:
-    scanRowSpans(edges, x0, x1, y, edgeMark, xs, spans, rule)
+    filterRowEdges(edges, y, rowEdges)
+    scanRowSpans(rowEdges, x0, x1, y, edgeMark, xs, spans, rule)
     var any = false
     for x in x0 .. x1:
       let cx = float64(x) + 0.5
@@ -553,7 +582,7 @@ proc fillMultiLinearJit*(surf: Surface, polys: seq[SubPoly], paint: Paint,
         if not aa:
           if inside: 1.0 else: 0.0
         elif edgeMark[x - x0]:
-          coverageEdges(float64(x), float64(y), edges, rule)
+          coverageEdges(float64(x), float64(y), rowEdges, rule)
         elif inside:
           1.0
         else:
@@ -598,9 +627,11 @@ proc fillMultiRadialJit*(surf: Surface, polys: seq[SubPoly], paint: Paint,
   if covBuf.len < rowW: covBuf.setLen(rowW)
   var edgeMark = newSeq[bool](rowW)
   var xs: seq[tuple[x: float64, dir: int]] = @[]
+  var rowEdges: seq[Edge] = @[]
   var spans: seq[tuple[a, b: float64]] = @[]
   for y in y0 .. y1:
-    scanRowSpans(edges, x0, x1, y, edgeMark, xs, spans, rule)
+    filterRowEdges(edges, y, rowEdges)
+    scanRowSpans(rowEdges, x0, x1, y, edgeMark, xs, spans, rule)
     var any = false
     for x in x0 .. x1:
       let cx = float64(x) + 0.5
@@ -613,7 +644,7 @@ proc fillMultiRadialJit*(surf: Surface, polys: seq[SubPoly], paint: Paint,
         if not aa:
           if inside: 1.0 else: 0.0
         elif edgeMark[x - x0]:
-          coverageEdges(float64(x), float64(y), edges, rule)
+          coverageEdges(float64(x), float64(y), rowEdges, rule)
         elif inside:
           1.0
         else:
@@ -660,9 +691,11 @@ proc fillMultiBoxJit*(surf: Surface, polys: seq[SubPoly], paint: Paint,
   if covBuf.len < rowW: covBuf.setLen(rowW)
   var edgeMark = newSeq[bool](rowW)
   var xs: seq[tuple[x: float64, dir: int]] = @[]
+  var rowEdges: seq[Edge] = @[]
   var spans: seq[tuple[a, b: float64]] = @[]
   for y in y0 .. y1:
-    scanRowSpans(edges, x0, x1, y, edgeMark, xs, spans, rule)
+    filterRowEdges(edges, y, rowEdges)
+    scanRowSpans(rowEdges, x0, x1, y, edgeMark, xs, spans, rule)
     var any = false
     for x in x0 .. x1:
       let cx = float64(x) + 0.5
@@ -675,7 +708,7 @@ proc fillMultiBoxJit*(surf: Surface, polys: seq[SubPoly], paint: Paint,
         if not aa:
           if inside: 1.0 else: 0.0
         elif edgeMark[x - x0]:
-          coverageEdges(float64(x), float64(y), edges, rule)
+          coverageEdges(float64(x), float64(y), rowEdges, rule)
         elif inside:
           1.0
         else:
@@ -721,9 +754,11 @@ proc fillPatternBilinearJit*(surf: Surface, polys: seq[SubPoly],
   if covBuf.len < rowW: covBuf.setLen(rowW)
   var edgeMark = newSeq[bool](rowW)
   var xs: seq[tuple[x: float64, dir: int]] = @[]
+  var rowEdges: seq[Edge] = @[]
   var spans: seq[tuple[a, b: float64]] = @[]
   for y in y0 .. y1:
-    scanRowSpans(edges, x0, x1, y, edgeMark, xs, spans, rule)
+    filterRowEdges(edges, y, rowEdges)
+    scanRowSpans(rowEdges, x0, x1, y, edgeMark, xs, spans, rule)
     var any = false
     for x in x0 .. x1:
       let cx = float64(x) + 0.5
@@ -736,7 +771,7 @@ proc fillPatternBilinearJit*(surf: Surface, polys: seq[SubPoly],
         if not aa:
           if inside: 1.0 else: 0.0
         elif edgeMark[x - x0]:
-          coverageEdges(float64(x), float64(y), edges, rule)
+          coverageEdges(float64(x), float64(y), rowEdges, rule)
         elif inside:
           1.0
         else:

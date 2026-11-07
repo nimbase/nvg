@@ -194,8 +194,10 @@ when defined(nvgMetal):
     var edgeMark = newSeq[bool](rowW)
     var xs: seq[tuple[x: float64, dir: int]] = @[]
     var spans: seq[tuple[a, b: float64]] = @[]
+    var rowEdges: seq[Edge] = @[]
     for y in y0 .. y1:
-      scanRowSpans(edges, x0, x1, y, edgeMark, xs, spans, rule)
+      filterRowEdges(edges, y, rowEdges)
+      scanRowSpans(rowEdges, x0, x1, y, edgeMark, xs, spans, rule)
       for x in x0 .. x1:
         let cx = float64(x) + 0.5
         var inside = false
@@ -207,7 +209,7 @@ when defined(nvgMetal):
           if not aa:
             if inside: 1.0 else: 0.0
           elif edgeMark[x - x0]:
-            coverageEdges(float64(x), float64(y), edges, rule)
+            coverageEdges(float64(x), float64(y), rowEdges, rule)
           elif inside:
             1.0
           else:
