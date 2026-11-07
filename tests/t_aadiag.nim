@@ -3,9 +3,22 @@
 ## echoing both byte vectors. Comparing the three legs shows whether
 ## the ARM divergence lives in the kernel or the scalar.
 import std/unittest
+import std/random
 import nvg/types
 import nvg/surface
 import nvg/jit
+
+test "zz rand stream check":
+  # Proves/disproves identical rand streams across legs (load-bearing
+  # premise for all input replication). Integer MT: must match.
+  randomize(91827)
+  var draws: seq[int] = @[]
+  for i in 0 ..< 16:
+    draws.add(rand(255))
+  for i in 0 ..< 8:
+    draws.add(rand(4))
+  echo "zz-stream: ", draws
+  check true
 
 proc runCase(name: string, dst: seq[uint8], src: Color, cov: float64,
     op: CompOp) =
