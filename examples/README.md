@@ -10,6 +10,8 @@
 #   nim c -r -d:nvgJit examples/jit.nim
 # The text example needs a font file (or TEXT_FONT set), and forces JIT:
 #   nim c -r examples/text.nim -- /path/to/font.ttf
+# The gpu example needs a font file too, and forces the Metal backend:
+#   nim c -r examples/gpu.nim -- /path/to/font.ttf
 #
 # | file            | shows                                              |
 # |-----------------|----------------------------------------------------|
@@ -23,3 +25,4 @@
 # | `jit.nim`       | CPU vs JIT backend, pixel-identity check           |
 # | `text.nim`      | sizes, 3x4 alignment grid, spacing, line height, paints |
 # | `images.nim`    | image file loading into pattern paints           |
+# | `gpu.nim`       | all features through the Metal backend + blur      |
