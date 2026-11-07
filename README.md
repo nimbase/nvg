@@ -26,6 +26,8 @@
   RTL) with glyph outlines as fills and strokes, multiline + alignment
 - An opt-in JIT backend that renders pixel-identical output, faster
 - PNG export with zero dependencies (pure-Nim encoder)
+- Image file loading: PNG, JPEG, BMP, GIF, QOI, PNM, TGA decode into
+  pattern paints, no dependencies beyond the workspace
 
 ## Examples
 ```nim
@@ -67,7 +69,7 @@ destroyJitBackend(c.backend.JitBackend)
 - [x] Text rendering (shaping + glyph outlines, multiline + align)
 - [x] Bilinear and multi-stop paints on the JIT fast path
 - [ ] AArch64 kernel execution sign-off
-- [ ] Image file loading API
+- [x] Image file loading API
 
 ### ❤ Contributions & Support
 - 🐛 Found a bug? [Create a new Issue](https://github.com/nimbase/nvg-nim/issues)

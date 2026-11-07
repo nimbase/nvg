@@ -16,12 +16,14 @@ import ./surface
 import ./dash
 import ./backend
 import ./text
+import ./loadimage
 
 export types
 export transform except apply
 export paint
 export surface except blendPixel
 export text
+export loadimage
 
 type
   DrawState* = object
@@ -346,6 +348,28 @@ proc imageSize*(c: Canvas, id: int): tuple[w, h: int, ok: bool] =
   if id notin c.images: return (0, 0, false)
   let img = c.images[id]
   (img.w, img.h, true)
+
+proc createImageMem*(c: Canvas, data: openArray[uint8],
+    flags: set[ImageFlag]): int =
+  ## Decode image bytes (format sniffed: PNG, JPEG, BMP, GIF first
+  ## frame, QOI, PNM, TGA) into straight-alpha RGBA8, returning a
+  ## handle, or 0 when the data is missing, unknown, or truncated.
+  let d = decodeRgba8(data)
+  if not d.ok or d.w <= 0 or d.h <= 0:
+    return 0
+  let id = c.nextImageId
+  inc c.nextImageId
+  c.images[id] = newImage(d.w, d.h, flags, d.pixels)
+  id
+
+proc createImageFile*(c: Canvas, file: string,
+    flags: set[ImageFlag]): int =
+  ## Like `createImageMem` but reads `file` first. Missing or
+  ## undecodable files return 0.
+  try:
+    return c.createImageMem(cast[seq[uint8]](readFile(file)), flags)
+  except CatchableError:
+    return 0
 
 proc imagePattern*(c: Canvas, ox, oy, ex, ey, angle: float64, image: int,
     alpha: float64): Paint =

@@ -21,3 +21,4 @@
 # | `paths.nim`     | stars, polygons, fill rules, path measurement      |
 # | `jit.nim`       | CPU vs JIT backend, pixel-identity check           |
 # | `text.nim`      | shaped text (needs a font path argument)         |
+# | `images.nim`    | image file loading into pattern paints           |
