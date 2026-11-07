@@ -117,3 +117,14 @@ test "zz scalar sweep hashes":
     line.add($got[1] & " ")
   echo "hue-curve-g: ", line
   kern.destroy()
+
+test "zz opaque-dst Bout isolation":
+  # With opaque dst (da=1) and sa=1, the wrapper collapses (t1=t2=0,
+  # ao=1) so output bytes ARE Bout bytes directly. Matching Bout
+  # across legs exonerates the whole NS tail; differing Bout isolates
+  # the divergence to pre-composite computation.
+  for (name, r, g, b) in [("bout-px2", 118u8, 162u8, 253u8),
+      ("bout-adv", 56u8, 234u8, 99u8),
+      ("bout-black", 0u8, 0u8, 0u8), ("bout-white", 255u8, 255u8, 255u8)]:
+    runCase(name, @[r, g, b, 255u8], rgbaf(1, 0, 0, 1), 1.0, coHue)
+  check true
