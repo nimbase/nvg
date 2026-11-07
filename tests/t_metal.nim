@@ -100,3 +100,65 @@ test "compute source-over matches cpu within 1 lsb":
         check maxDiff <= 1
   else:
     skip()
+
+test "compute radial gradient matches cpu within 1 lsb":
+  when defined(macosx):
+    if not mtlAvailable():
+      skip()
+    const W = 16
+    const H = 16
+    var ctx = newMetalCtx(W, H)
+    defer: ctx.close()
+    let cases = [
+      (8.0, 8.0, 1.0, 8.0, rgbf(0, 0, 0), rgbf(1, 1, 1)),
+      (4.0, 12.0, 0.0, 10.0, rgbf(1, 0, 0), rgbf(0, 0, 1)),
+    ]
+    for (cx, cy, inr, outr, c0, c1) in cases:
+      let paint = radialGradient(cx, cy, inr, outr, c0, c1)
+      ctx.fillRadial(cx, cy, inr, outr, c0, c1)
+      let got = ctx.readback()
+      var maxDiff = 0
+      for y in 0 ..< H:
+        for x in 0 ..< W:
+          let (r, g, b, a) = paint.sample(
+            float64(x) + 0.5, float64(y) + 0.5).toRgba8()
+          let i = (y * W + x) * 4
+          for k in 0 ..< 4:
+            let want = [r, g, b, a][k]
+            let d = abs(int(got[i + k]) - int(want))
+            if d > maxDiff:
+              maxDiff = d
+      check maxDiff <= 1
+  else:
+    skip()
+
+test "compute box gradient matches cpu within 1 lsb":
+  when defined(macosx):
+    if not mtlAvailable():
+      skip()
+    const W = 16
+    const H = 16
+    var ctx = newMetalCtx(W, H)
+    defer: ctx.close()
+    let cases = [
+      (8.0, 8.0, 5.0, 5.0, 2.0, 3.0, rgbf(0, 0, 0), rgbf(1, 1, 1)),
+      (8.0, 8.0, 6.0, 3.0, 1.0, 2.0, rgbf(1, 0, 0), rgbf(0, 0, 1)),
+    ]
+    for (cx, cy, ex, ey, radius, feather, c0, c1) in cases:
+      let paint = boxGradient(cx, cy, ex, ey, radius, feather, c0, c1)
+      ctx.fillBox(cx, cy, ex, ey, radius, feather, c0, c1)
+      let got = ctx.readback()
+      var maxDiff = 0
+      for y in 0 ..< H:
+        for x in 0 ..< W:
+          let (r, g, b, a) = paint.sample(
+            float64(x) + 0.5, float64(y) + 0.5).toRgba8()
+          let i = (y * W + x) * 4
+          for k in 0 ..< 4:
+            let want = [r, g, b, a][k]
+            let d = abs(int(got[i + k]) - int(want))
+            if d > maxDiff:
+              maxDiff = d
+      check maxDiff <= 1
+  else:
+    skip()

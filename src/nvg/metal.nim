@@ -32,6 +32,8 @@ const
   MSlotSolid* = 0
   MSlotLinear* = 1
   MSlotSolidOver* = 2
+  MSlotRadial* = 3
+  MSlotBox* = 4
 
 const solidMsl* = """
 #include <metal_stdlib>
@@ -85,11 +87,67 @@ kernel void comp_solid_over(device uchar4 *io [[buffer(0)]],
 }
 """
 
+const radialMsl* = """
+#include <metal_stdlib>
+using namespace metal;
+struct RadP { float2 c; float2 r; float4 c0; float4 c1; };
+kernel void fill_radial(device uchar4 *out [[buffer(0)]],
+                        constant RadP &u [[buffer(1)]],
+                        constant uint2 &dims [[buffer(2)]],
+                        uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= dims.x || gid.y >= dims.y) return;
+  float2 q = float2(gid) + 0.5 - u.c;
+  float dist = length(q);
+  float f = max(1.0, u.r.y - u.r.x);
+  float t = (dist - u.r.x) / f;
+  float4 col = mix(u.c0, u.c1, clamp(t, 0.0, 1.0));
+  out[gid.y * dims.x + gid.x] = uchar4(saturate(col) * 255.0 + 0.5);
+}
+"""
+
+const boxMsl* = """
+#include <metal_stdlib>
+using namespace metal;
+struct BoxP { float2 c; float2 e; float2 rf; float2 _pad; float4 c0; float4 c1; };
+kernel void fill_box(device uchar4 *out [[buffer(0)]],
+                     constant BoxP &u [[buffer(1)]],
+                     constant uint2 &dims [[buffer(2)]],
+                     uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= dims.x || gid.y >= dims.y) return;
+  float2 p = float2(gid) + 0.5 - u.c;
+  float2 q = abs(p) - (u.e - u.rf.x);
+  float sd = min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - u.rf.x;
+  float f = max(1.0, u.rf.y);
+  float t = (sd + f * 0.5) / f;
+  float4 col = mix(u.c0, u.c1, clamp(t, 0.0, 1.0));
+  out[gid.y * dims.x + gid.x] = uchar4(saturate(col) * 255.0 + 0.5);
+}
+"""
+
 type LinearParams* = object
   ## Must match MSL `LinP` layout: s, e, c0, c1 (48 bytes).
   sx*, sy*, ex*, ey*: cfloat
   c0*: array[4, cfloat]
   c1*: array[4, cfloat]
+
+type RadialParams* = object
+  ## Must match MSL `RadP` layout: c, r, c0, c1 (48 bytes).
+  cx*, cy*, inr*, outr*: cfloat
+  c0*: array[4, cfloat]
+  c1*: array[4, cfloat]
+
+type BoxParams* = object
+  ## Must match MSL `BoxP` layout: c, e, rf, _pad, c0, c1 (64 bytes).
+  cx*, cy*, ex*, ey*: cfloat
+  radius*, feather*: cfloat
+  pad*: array[2, cfloat]
+  c0*: array[4, cfloat]
+  c1*: array[4, cfloat]
+
+static:
+  doAssert sizeof(LinearParams) == 48
+  doAssert sizeof(RadialParams) == 48
+  doAssert sizeof(BoxParams) == 64
 
 when defined(macosx):
   proc nvgmtl_device_count(): cint {.importc.}
@@ -132,6 +190,8 @@ proc newMetalCtx*(w, h: int): MetalCtx =
       result.buildSlot(MSlotSolid, solidMsl, "fill_solid")
       result.buildSlot(MSlotLinear, linearMsl, "fill_linear")
       result.buildSlot(MSlotSolidOver, solidOverMsl, "comp_solid_over")
+      result.buildSlot(MSlotRadial, radialMsl, "fill_radial")
+      result.buildSlot(MSlotBox, boxMsl, "fill_box")
     except IOError:
       nvgmtl_destroy(p)
       result.p = nil
@@ -193,6 +253,29 @@ proc compSolidOver*(ctx: MetalCtx, r, g, b, a: float64) =
   when defined(macosx):
     var col = [cfloat(r), cfloat(g), cfloat(b), cfloat(a)]
     nvgmtl_fill(ctx.p, cint(MSlotSolidOver), addr col[0], 16)
+
+proc fillRadial*(ctx: MetalCtx, cx, cy, inr, outr: float64, c0,
+    c1: Color) =
+  ## Radial 2-stop fill mirroring scalar `sample` at pixel centers,
+  ## identity map. 1 LSB allowance like `fillLinear`.
+  when defined(macosx):
+    var u = RadialParams(cx: cfloat(cx), cy: cfloat(cy),
+      inr: cfloat(inr), outr: cfloat(outr),
+      c0: [cfloat(c0.r), cfloat(c0.g), cfloat(c0.b), cfloat(c0.a)],
+      c1: [cfloat(c1.r), cfloat(c1.g), cfloat(c1.b), cfloat(c1.a)])
+    nvgmtl_fill(ctx.p, cint(MSlotRadial), addr u, cint(sizeof(u)))
+
+proc fillBox*(ctx: MetalCtx, cx, cy, ex, ey, radius,
+    feather: float64, c0, c1: Color) =
+  ## Box 2-stop fill mirroring scalar `sample` at pixel centers,
+  ## identity map. 1 LSB allowance like `fillLinear`.
+  when defined(macosx):
+    var u = BoxParams(cx: cfloat(cx), cy: cfloat(cy),
+      ex: cfloat(ex), ey: cfloat(ey), radius: cfloat(radius),
+      feather: cfloat(feather), pad: [cfloat(0), cfloat(0)],
+      c0: [cfloat(c0.r), cfloat(c0.g), cfloat(c0.b), cfloat(c0.a)],
+      c1: [cfloat(c1.r), cfloat(c1.g), cfloat(c1.b), cfloat(c1.a)])
+    nvgmtl_fill(ctx.p, cint(MSlotBox), addr u, cint(sizeof(u)))
 
 proc close*(ctx: MetalCtx) =
   when defined(macosx):
