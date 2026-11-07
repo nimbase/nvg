@@ -1,4 +1,4 @@
-## Kaleidoscope from a photo (CPU backend, no font or GPU needed).
+## Kaleidoscope from a photo (CPU and GPU backends).
 ##
 ## Twelve mirrored wedges sample one photo tile: each wedge rotates the
 ## frame and every odd wedge mirrors it, so shared edges stay seamless
@@ -6,10 +6,15 @@
 ##
 ## Run: nim c -r examples/kaleidoscope.nim [outDir]
 ## Source photo: tests/data/pexels-arash-kh-1030567404-24596467.jpg
+## With -d:nvgMetal it renders through the Metal backend when a device
+## is present, falling back to CPU otherwise:
+##   nim c -r -d:nvgMetal examples/kaleidoscope.nim [outDir]
 
 import std/os
 import std/math
 import nvg
+when defined(nvgMetal):
+  import nvg/metal
 
 const
   W = 800
@@ -21,7 +26,22 @@ const
 
 proc main(outDir: string) =
   createDir(outDir)
-  let c = newCanvas(W, H)
+  when defined(nvgMetal):
+    var mb: MetalBackend = nil
+    if mtlAvailable():
+      mb = newMetalBackend(W, H)
+      echo "backend: Metal"
+    else:
+      echo "backend: CPU (no Metal device)"
+    defer:
+      if mb != nil:
+        mb.close()
+    let c =
+      if mb != nil: newCanvas(W, H, mb)
+      else: newCanvas(W, H)
+  else:
+    echo "backend: CPU"
+    let c = newCanvas(W, H)
   c.clear(rgbf(0.05, 0.05, 0.08))
 
   let id = c.createImageFile("tests/data/pexels-arash-kh-1030567404-24596467.jpg",
@@ -33,9 +53,14 @@ proc main(outDir: string) =
   # shared edges sample identical texels and stay seamless. Calls
   # compose right-to-left (pre-multiplied): mirror, then rotate about
   # the local origin, then move the apex to the disc center.
+  # Each wedge overlaps its neighbors by ~1px at the rim: coverage of
+  # a shared edge splits across two source-over passes, which would
+  # bleed background through (up to 25% at a 0.5/0.5 split) plus float
+  # edge mismatch; the overlap lets the top wedge win opaquely.
   let step = 2.0 * PI / float64(Segments)
-  let ex = cos(step * 0.5) * Radius
-  let ey = sin(step * 0.5) * Radius
+  let ha = step * 0.5 + 1.0 / Radius
+  let ex = cos(ha) * Radius
+  let ey = sin(ha) * Radius
   for i in 0 ..< Segments:
     c.save()
     if i mod 2 == 1:

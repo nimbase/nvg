@@ -4,7 +4,6 @@
 ## `raster.nim`). A future GPU renderer implements the same `fill`/`stroke`
 ## signatures on a new `Backend` subtype so `canvas.nim` does not change.
 
-import std/math
 import ./types
 import ./transform
 import ./path
