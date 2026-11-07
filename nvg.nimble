@@ -11,5 +11,5 @@ srcDir        = "src"
 
 requires "nim >= 2.4.0"
 requires "dynasm >= 0.1.0"
-requires "harfnim >= 0.1.0"
+requires "gh:nimbase/harfnim"
 requires "image >= 0.1.0"
