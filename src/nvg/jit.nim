@@ -147,11 +147,17 @@ proc buildSolidRowGenX64*(op: CompOp): ExecutableBuffer =
     mov r11, cov
     mov rax, nn
     mov r8, ctx
-    sub rsp, 160
+    sub rsp, 192
     movupd [rsp], xmm6
     movupd [rsp + 16], xmm7
     movabs rcx, 0x3EB0C6F7A0B5ED8D # 1e-6 bits (ao threshold)
-    mov qword [rsp + 152], rcx
+    mov qword [rsp + 176], rcx
+    movabs rcx, 0x3FD3333333333333 # W3C Lum R weight (non-sep tails)
+    mov qword [rsp + 96], rcx
+    movabs rcx, 0x3FE2E147AE147AE1 # W3C Lum G weight
+    mov qword [rsp + 104], rcx
+    movabs rcx, 0x3FBC28F5C28F5C29 # W3C Lum B weight
+    mov qword [rsp + 112], rcx
     mov r9, [r8 + 64] # divtab
     movsd xmm4, [r8 + 32] # c255
     movsd xmm5, [r8 + 48] # zero
@@ -183,7 +189,7 @@ proc buildSolidRowGenX64*(op: CompOp): ExecutableBuffer =
     label done
     movupd xmm6, [rsp]
     movupd xmm7, [rsp + 16]
-    add rsp, 160
+    add rsp, 192
     ret()
   a.finalize()
 
@@ -281,12 +287,30 @@ proc buildSolidRowGenAarch64*(op: CompOp): ExecutableBuffer =
     mov x11, x2
     mov x12, x3
     cbz x11, fwd("done")
-    sub sp, sp, 64
+    sub sp, sp, 96
     movz x4, 0xED8D
     movk x4, 0x0B5E, lsl, 16
     movk x4, 0xC6F7, lsl, 32
     movk x4, 0x3EB0, lsl, 48
     fmov d25, x4 # 1e-6 threshold
+    movz x4, 0x3333
+    movk x4, 0x3333, lsl, 16
+    movk x4, 0x3333, lsl, 32
+    movk x4, 0x3FD3, lsl, 48
+    fmov d26, x4 # W3C Lum R weight (non-sep tails)
+    str d26, [sp]
+    movz x4, 0x7AE1
+    movk x4, 0xAE14, lsl, 16
+    movk x4, 0xE147, lsl, 32
+    movk x4, 0x3FE2, lsl, 48
+    fmov d26, x4 # W3C Lum G weight
+    str d26, [sp, 8]
+    movz x4, 0x5C29
+    movk x4, 0x28F5, lsl, 16
+    movk x4, 0xBC28, lsl, 32
+    movk x4, 0x3FBC, lsl, 48
+    fmov d26, x4 # W3C Lum B weight
+    str d26, [sp, 16]
     ldr d16, [x12, 32] # c255
     ldr d17, [x12, 48] # zero
     ldr d18, [x12, 56] # one
@@ -313,7 +337,7 @@ proc buildSolidRowGenAarch64*(op: CompOp): ExecutableBuffer =
     sub x11, x11, 1
     cbnz x11, bwd("row")
     label done
-    add sp, sp, 64
+    add sp, sp, 96
     ret()
   a.finalize()
 
@@ -490,7 +514,7 @@ proc buildLinearRowGenX64*(op: CompOp): ExecutableBuffer =
     mov r11, cov
     mov rax, nn
     mov r8, ctx
-    sub rsp, 160
+    sub rsp, 192
     movupd [rsp], xmm6
     movupd [rsp + 16], xmm7
     movupd [rsp + 32], xmm8
@@ -498,7 +522,13 @@ proc buildLinearRowGenX64*(op: CompOp): ExecutableBuffer =
     movupd [rsp + 64], xmm10
     movupd [rsp + 80], xmm11
     movabs rcx, 0x3EB0C6F7A0B5ED8D # 1e-6 bits (ao threshold)
-    mov qword [rsp + 152], rcx
+    mov qword [rsp + 176], rcx
+    movabs rcx, 0x3FD3333333333333 # W3C Lum R weight (non-sep tails)
+    mov qword [rsp + 96], rcx
+    movabs rcx, 0x3FE2E147AE147AE1 # W3C Lum G weight
+    mov qword [rsp + 104], rcx
+    movabs rcx, 0x3FBC28F5C28F5C29 # W3C Lum B weight
+    mov qword [rsp + 112], rcx
     mov r9, [r8 + 176] # divtab
     movsd xmm4, [r8 + 144] # c255
     movsd xmm5, [r8 + 160] # zero
@@ -573,7 +603,7 @@ proc buildLinearRowGenX64*(op: CompOp): ExecutableBuffer =
     movupd xmm9, [rsp + 48]
     movupd xmm10, [rsp + 64]
     movupd xmm11, [rsp + 80]
-    add rsp, 160
+    add rsp, 192
     ret()
   a.finalize()
 
@@ -717,12 +747,30 @@ proc buildLinearRowGenAarch64*(op: CompOp): ExecutableBuffer =
     mov x11, x2
     mov x12, x3
     cbz x11, fwd("done")
-    sub sp, sp, 64
+    sub sp, sp, 96
     movz x4, 0xED8D
     movk x4, 0x0B5E, lsl, 16
     movk x4, 0xC6F7, lsl, 32
     movk x4, 0x3EB0, lsl, 48
     fmov d25, x4 # 1e-6 threshold
+    movz x4, 0x3333
+    movk x4, 0x3333, lsl, 16
+    movk x4, 0x3333, lsl, 32
+    movk x4, 0x3FD3, lsl, 48
+    fmov d26, x4 # W3C Lum R weight (non-sep tails)
+    str d26, [sp]
+    movz x4, 0x7AE1
+    movk x4, 0xAE14, lsl, 16
+    movk x4, 0xE147, lsl, 32
+    movk x4, 0x3FE2, lsl, 48
+    fmov d26, x4 # W3C Lum G weight
+    str d26, [sp, 8]
+    movz x4, 0x5C29
+    movk x4, 0x28F5, lsl, 16
+    movk x4, 0xBC28, lsl, 32
+    movk x4, 0x3FBC, lsl, 48
+    fmov d26, x4 # W3C Lum B weight
+    str d26, [sp, 16]
     ldr d16, [x12, 144] # c255
     ldr d17, [x12, 160] # zero
     ldr d18, [x12, 168] # one
@@ -798,7 +846,7 @@ proc buildLinearRowGenAarch64*(op: CompOp): ExecutableBuffer =
     sub x11, x11, 1
     cbnz x11, bwd("row")
     label done
-    add sp, sp, 64
+    add sp, sp, 96
     ret()
   a.finalize()
 
@@ -966,7 +1014,7 @@ proc buildRadialRowGenX64*(op: CompOp): ExecutableBuffer =
     mov r11, cov
     mov rax, nn
     mov r8, ctx
-    sub rsp, 160
+    sub rsp, 192
     movupd [rsp], xmm6
     movupd [rsp + 16], xmm7
     movupd [rsp + 32], xmm8
@@ -974,7 +1022,13 @@ proc buildRadialRowGenX64*(op: CompOp): ExecutableBuffer =
     movupd [rsp + 64], xmm10
     movupd [rsp + 80], xmm11
     movabs rcx, 0x3EB0C6F7A0B5ED8D # 1e-6 bits (ao threshold)
-    mov qword [rsp + 152], rcx
+    mov qword [rsp + 176], rcx
+    movabs rcx, 0x3FD3333333333333 # W3C Lum R weight (non-sep tails)
+    mov qword [rsp + 96], rcx
+    movabs rcx, 0x3FE2E147AE147AE1 # W3C Lum G weight
+    mov qword [rsp + 104], rcx
+    movabs rcx, 0x3FBC28F5C28F5C29 # W3C Lum B weight
+    mov qword [rsp + 112], rcx
     mov r9, [r8 + 176] # divtab
     movsd xmm4, [r8 + 144] # c255
     movsd xmm5, [r8 + 160] # zero
@@ -1053,7 +1107,7 @@ proc buildRadialRowGenX64*(op: CompOp): ExecutableBuffer =
     movupd xmm9, [rsp + 48]
     movupd xmm10, [rsp + 64]
     movupd xmm11, [rsp + 80]
-    add rsp, 160
+    add rsp, 192
     ret()
   a.finalize()
 
@@ -1198,12 +1252,30 @@ proc buildRadialRowGenAarch64*(op: CompOp): ExecutableBuffer =
     mov x11, x2
     mov x12, x3
     cbz x11, fwd("done")
-    sub sp, sp, 64
+    sub sp, sp, 96
     movz x4, 0xED8D
     movk x4, 0x0B5E, lsl, 16
     movk x4, 0xC6F7, lsl, 32
     movk x4, 0x3EB0, lsl, 48
     fmov d25, x4 # 1e-6 threshold
+    movz x4, 0x3333
+    movk x4, 0x3333, lsl, 16
+    movk x4, 0x3333, lsl, 32
+    movk x4, 0x3FD3, lsl, 48
+    fmov d26, x4 # W3C Lum R weight (non-sep tails)
+    str d26, [sp]
+    movz x4, 0x7AE1
+    movk x4, 0xAE14, lsl, 16
+    movk x4, 0xE147, lsl, 32
+    movk x4, 0x3FE2, lsl, 48
+    fmov d26, x4 # W3C Lum G weight
+    str d26, [sp, 8]
+    movz x4, 0x5C29
+    movk x4, 0x28F5, lsl, 16
+    movk x4, 0xBC28, lsl, 32
+    movk x4, 0x3FBC, lsl, 48
+    fmov d26, x4 # W3C Lum B weight
+    str d26, [sp, 16]
     ldr d16, [x12, 144] # c255
     ldr d17, [x12, 160] # zero
     ldr d18, [x12, 168] # one
@@ -1281,7 +1353,7 @@ proc buildRadialRowGenAarch64*(op: CompOp): ExecutableBuffer =
     sub x11, x11, 1
     cbnz x11, bwd("row")
     label done
-    add sp, sp, 64
+    add sp, sp, 96
     ret()
   a.finalize()
 
@@ -1470,7 +1542,7 @@ proc buildBoxRowGenX64*(op: CompOp): ExecutableBuffer =
     mov r11, cov
     mov rax, nn
     mov r8, ctx
-    sub rsp, 160
+    sub rsp, 192
     movupd [rsp], xmm6
     movupd [rsp + 16], xmm7
     movupd [rsp + 32], xmm8
@@ -1478,7 +1550,13 @@ proc buildBoxRowGenX64*(op: CompOp): ExecutableBuffer =
     movupd [rsp + 64], xmm10
     movupd [rsp + 80], xmm11
     movabs rcx, 0x3EB0C6F7A0B5ED8D # 1e-6 bits (ao threshold)
-    mov qword [rsp + 152], rcx
+    mov qword [rsp + 176], rcx
+    movabs rcx, 0x3FD3333333333333 # W3C Lum R weight (non-sep tails)
+    mov qword [rsp + 96], rcx
+    movabs rcx, 0x3FE2E147AE147AE1 # W3C Lum G weight
+    mov qword [rsp + 104], rcx
+    movabs rcx, 0x3FBC28F5C28F5C29 # W3C Lum B weight
+    mov qword [rsp + 112], rcx
     mov r9, [r8 + 184] # divtab
     movsd xmm4, [r8 + 152] # c255
     movsd xmm5, [r8 + 168] # zero
@@ -1571,7 +1649,7 @@ proc buildBoxRowGenX64*(op: CompOp): ExecutableBuffer =
     movupd xmm9, [rsp + 48]
     movupd xmm10, [rsp + 64]
     movupd xmm11, [rsp + 80]
-    add rsp, 160
+    add rsp, 192
     ret()
   a.finalize()
 
@@ -1735,12 +1813,30 @@ proc buildBoxRowGenAarch64*(op: CompOp): ExecutableBuffer =
     mov x11, x2
     mov x12, x3
     cbz x11, fwd("done")
-    sub sp, sp, 64
+    sub sp, sp, 96
     movz x4, 0xED8D
     movk x4, 0x0B5E, lsl, 16
     movk x4, 0xC6F7, lsl, 32
     movk x4, 0x3EB0, lsl, 48
     fmov d25, x4 # 1e-6 threshold
+    movz x4, 0x3333
+    movk x4, 0x3333, lsl, 16
+    movk x4, 0x3333, lsl, 32
+    movk x4, 0x3FD3, lsl, 48
+    fmov d26, x4 # W3C Lum R weight (non-sep tails)
+    str d26, [sp]
+    movz x4, 0x7AE1
+    movk x4, 0xAE14, lsl, 16
+    movk x4, 0xE147, lsl, 32
+    movk x4, 0x3FE2, lsl, 48
+    fmov d26, x4 # W3C Lum G weight
+    str d26, [sp, 8]
+    movz x4, 0x5C29
+    movk x4, 0x28F5, lsl, 16
+    movk x4, 0xBC28, lsl, 32
+    movk x4, 0x3FBC, lsl, 48
+    fmov d26, x4 # W3C Lum B weight
+    str d26, [sp, 16]
     ldr d16, [x12, 152] # c255
     ldr d17, [x12, 168] # zero
     ldr d18, [x12, 176] # one
@@ -1833,7 +1929,7 @@ proc buildBoxRowGenAarch64*(op: CompOp): ExecutableBuffer =
     sub x11, x11, 1
     cbnz x11, bwd("row")
     label done
-    add sp, sp, 64
+    add sp, sp, 96
     ret()
   a.finalize()
 
@@ -2107,7 +2203,7 @@ proc buildPatternRowGenX64*(op: CompOp): ExecutableBuffer =
     mov r11, cov
     mov rbx, nn
     mov r8, ctx
-    sub rsp, 160
+    sub rsp, 192
     movupd [rsp], xmm6
     movupd [rsp + 16], xmm7
     movupd [rsp + 32], xmm8
@@ -2115,7 +2211,13 @@ proc buildPatternRowGenX64*(op: CompOp): ExecutableBuffer =
     movupd [rsp + 64], xmm10
     movupd [rsp + 80], xmm11
     movabs rcx, 0x3EB0C6F7A0B5ED8D # 1e-6 bits (ao threshold)
-    mov qword [rsp + 152], rcx
+    mov qword [rsp + 176], rcx
+    movabs rcx, 0x3FD3333333333333 # W3C Lum R weight (non-sep tails)
+    mov qword [rsp + 96], rcx
+    movabs rcx, 0x3FE2E147AE147AE1 # W3C Lum G weight
+    mov qword [rsp + 104], rcx
+    movabs rcx, 0x3FBC28F5C28F5C29 # W3C Lum B weight
+    mov qword [rsp + 112], rcx
     mov r9, [r8 + 168] # divtab
     movsd xmm4, [r8 + 136] # c255
     movsd xmm5, [r8 + 152] # zero
@@ -2285,7 +2387,7 @@ proc buildPatternRowGenX64*(op: CompOp): ExecutableBuffer =
     movupd xmm9, [rsp + 48]
     movupd xmm10, [rsp + 64]
     movupd xmm11, [rsp + 80]
-    add rsp, 160
+    add rsp, 192
     pop r12
     pop rbx
     ret()
@@ -2520,12 +2622,30 @@ proc buildPatternRowGenAarch64*(op: CompOp): ExecutableBuffer =
     mov x11, x2
     mov x12, x3
     cbz x11, fwd("done")
-    sub sp, sp, 64
+    sub sp, sp, 96
     movz x4, 0xED8D
     movk x4, 0x0B5E, lsl, 16
     movk x4, 0xC6F7, lsl, 32
     movk x4, 0x3EB0, lsl, 48
     fmov d25, x4 # 1e-6 threshold
+    movz x4, 0x3333
+    movk x4, 0x3333, lsl, 16
+    movk x4, 0x3333, lsl, 32
+    movk x4, 0x3FD3, lsl, 48
+    fmov d26, x4 # W3C Lum R weight (non-sep tails)
+    str d26, [sp]
+    movz x4, 0x7AE1
+    movk x4, 0xAE14, lsl, 16
+    movk x4, 0xE147, lsl, 32
+    movk x4, 0x3FE2, lsl, 48
+    fmov d26, x4 # W3C Lum G weight
+    str d26, [sp, 8]
+    movz x4, 0x5C29
+    movk x4, 0x28F5, lsl, 16
+    movk x4, 0xBC28, lsl, 32
+    movk x4, 0x3FBC, lsl, 48
+    fmov d26, x4 # W3C Lum B weight
+    str d26, [sp, 16]
     ldr d16, [x12, 136] # c255
     ldr d17, [x12, 152] # zero
     ldr d18, [x12, 160] # one
@@ -2689,7 +2809,7 @@ proc buildPatternRowGenAarch64*(op: CompOp): ExecutableBuffer =
     sub x11, x11, 1
     cbnz x11, bwd("row")
     label done
-    add sp, sp, 64
+    add sp, sp, 96
     ret()
   a.finalize()
 
@@ -3040,7 +3160,7 @@ proc buildMultiLinearRowGenX64*(op: CompOp): ExecutableBuffer =
     mov r11, cov
     mov rax, nn
     mov r8, ctx
-    sub rsp, 160
+    sub rsp, 192
     movupd [rsp], xmm6
     movupd [rsp + 16], xmm7
     movupd [rsp + 32], xmm8
@@ -3048,7 +3168,13 @@ proc buildMultiLinearRowGenX64*(op: CompOp): ExecutableBuffer =
     movupd [rsp + 64], xmm10
     movupd [rsp + 80], xmm11
     movabs rcx, 0x3EB0C6F7A0B5ED8D # 1e-6 bits (ao threshold)
-    mov qword [rsp + 152], rcx
+    mov qword [rsp + 176], rcx
+    movabs rcx, 0x3FD3333333333333 # W3C Lum R weight (non-sep tails)
+    mov qword [rsp + 96], rcx
+    movabs rcx, 0x3FE2E147AE147AE1 # W3C Lum G weight
+    mov qword [rsp + 104], rcx
+    movabs rcx, 0x3FBC28F5C28F5C29 # W3C Lum B weight
+    mov qword [rsp + 112], rcx
     mov r9, [r8 + 128] # divtab
     movsd xmm4, [r8 + 96] # c255
     movsd xmm5, [r8 + 112] # zero
@@ -3295,7 +3421,7 @@ proc buildMultiLinearRowGenX64*(op: CompOp): ExecutableBuffer =
     movupd xmm9, [rsp + 48]
     movupd xmm10, [rsp + 64]
     movupd xmm11, [rsp + 80]
-    add rsp, 160
+    add rsp, 192
     pop r14
     pop r13
     pop r12
@@ -3657,7 +3783,7 @@ proc buildMultiRadialRowGenX64*(op: CompOp): ExecutableBuffer =
     mov r11, cov
     mov rax, nn
     mov r8, ctx
-    sub rsp, 160
+    sub rsp, 192
     movupd [rsp], xmm6
     movupd [rsp + 16], xmm7
     movupd [rsp + 32], xmm8
@@ -3665,7 +3791,13 @@ proc buildMultiRadialRowGenX64*(op: CompOp): ExecutableBuffer =
     movupd [rsp + 64], xmm10
     movupd [rsp + 80], xmm11
     movabs rcx, 0x3EB0C6F7A0B5ED8D # 1e-6 bits (ao threshold)
-    mov qword [rsp + 152], rcx
+    mov qword [rsp + 176], rcx
+    movabs rcx, 0x3FD3333333333333 # W3C Lum R weight (non-sep tails)
+    mov qword [rsp + 96], rcx
+    movabs rcx, 0x3FE2E147AE147AE1 # W3C Lum G weight
+    mov qword [rsp + 104], rcx
+    movabs rcx, 0x3FBC28F5C28F5C29 # W3C Lum B weight
+    mov qword [rsp + 112], rcx
     mov r9, [r8 + 120] # divtab
     movsd xmm4, [r8 + 88] # c255
     movsd xmm5, [r8 + 104] # zero
@@ -3917,7 +4049,672 @@ proc buildMultiRadialRowGenX64*(op: CompOp): ExecutableBuffer =
     movupd xmm9, [rsp + 48]
     movupd xmm10, [rsp + 64]
     movupd xmm11, [rsp + 80]
-    add rsp, 160
+    add rsp, 192
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret()
+  a.finalize()
+
+proc buildMultiBoxRowX64*(): ExecutableBuffer =
+  ## Multi-stop box-gradient source-over row kernel. Same ABI as solid.
+  ## `t` replicates `paint.sample` (box branch: map, `sdRoundBox` via
+  ## `0-x` + `maxpd` like the 2-stop box kernel, `(sd+f*0.5)/f`,
+  ## clamped) and the stop evaluation replicates `sampleStops` exactly:
+  ## clamp01, below-first (last author at min pos), past-last (final
+  ## non-degenerate lerp at u>=1, clamped in lerp), else linear search
+  ## L/R + lerp. Stops borrow the paint heap array via `MultiBoxCtx`
+  ## (ptr+len); len 0/1 handled (transparent/constant). Blend replicates
+  ## source-over. Finite colors only.
+  var a = newAssembler(akX64)
+  dynasm a:
+    arch x64
+    alias dst, rdi, rcx
+    alias cov, rsi, rdx
+    alias nn, rdx, r8
+    alias ctx, rcx, r9
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov r10, dst
+    mov r11, cov
+    mov rax, nn
+    mov r8, ctx
+    sub rsp, 96
+    movupd [rsp], xmm6
+    movupd [rsp + 16], xmm7
+    movupd [rsp + 32], xmm8
+    movupd [rsp + 48], xmm9
+    movupd [rsp + 64], xmm10
+    movupd [rsp + 80], xmm11
+    mov r9, [r8 + 136] # divtab
+    movsd xmm4, [r8 + 104] # c255
+    movsd xmm5, [r8 + 120] # zero
+    movsd xmm6, [r8 + 128] # one
+    movsd xmm7, [r8 + 112] # half
+    cmp rax, 0
+    jle fwd("done")
+    movsd xmm8, [r8 + 144] # rowX
+    label row
+    # qx = (m0*x + m2y) + m4
+    movsd xmm0, xmm8
+    mulsd xmm0, [r8 + 0] # m0
+    addsd xmm0, [r8 + 152] # m2y
+    addsd xmm0, [r8 + 16] # m4
+    # qy = (m1*x + m3y) + m5
+    movsd xmm1, xmm8
+    mulsd xmm1, [r8 + 8] # m1
+    addsd xmm1, [r8 + 160] # m3y
+    addsd xmm1, [r8 + 24] # m5
+    # px = qx-cx, py = qy-cy, then |.| via max(x, 0-x)
+    subsd xmm0, [r8 + 32] # cx
+    subsd xmm1, [r8 + 40] # cy
+    movsd xmm2, xmm5
+    subsd xmm2, xmm0 # -px
+    maxpd xmm0, xmm2 # |px|
+    movsd xmm2, xmm5
+    subsd xmm2, xmm1 # -py
+    maxpd xmm1, xmm2 # |py|
+    # qx = |px|-exr, qy = |py|-eyr
+    subsd xmm0, [r8 + 48] # exr
+    subsd xmm1, [r8 + 56] # eyr
+    # d1 = min(max(qx,qy),0)
+    movsd xmm2, xmm0
+    maxpd xmm2, xmm1
+    minpd xmm2, xmm5
+    # sd = d1 + sqrt(max(qx,0)^2+max(qy,0)^2) - r
+    maxpd xmm0, xmm5
+    mulsd xmm0, xmm0
+    maxpd xmm1, xmm5
+    mulsd xmm1, xmm1
+    addsd xmm0, xmm1
+    sqrtsd xmm0, xmm0
+    addsd xmm2, xmm0
+    subsd xmm2, [r8 + 64] # radius -> sd
+    # t = (sd+f*0.5)/f, clamped to tc
+    movsd xmm0, [r8 + 72] # f
+    mulsd xmm0, xmm7 # f*0.5
+    addsd xmm0, xmm2 # fh+sd == sd+fh, exact
+    divsd xmm0, [r8 + 72] # f
+    maxpd xmm0, xmm5
+    minpd xmm0, xmm6
+    movsd xmm9, xmm0 # tc
+    mov r12, [r8 + 80] # stopsPtr
+    mov rbx, [r8 + 88] # stopsLen
+    cmp rbx, 0
+    jle fwd("transparent")
+    cmp rbx, 1
+    jz fwd("single")
+    # pos0
+    movsd xmm0, [r12]
+    ucomisd xmm9, xmm0
+    jb fwd("below")
+    # posLast
+    mov rcx, rbx
+    dec rcx
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx]
+    ucomisd xmm9, xmm0
+    jae fwd("final")
+    # interior: L in r13
+    `xor` r13, r13
+    label search
+    mov r14, r13
+    inc r14
+    mov rcx, r14
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx] # posR
+    ucomisd xmm0, xmm9
+    jbe fwd("adv")
+    jmp fwd("found")
+    label adv
+    mov r13, r14
+    jmp bwd("search")
+    label found
+    # ptrL in rcx, ptrR in rdx
+    mov rcx, r13
+    imul rcx, rcx, 40
+    add rcx, r12
+    mov rdx, r13
+    inc rdx
+    imul rdx, rdx, 40
+    add rdx, r12
+    movsd xmm0, [rcx] # posL
+    movsd xmm1, [rdx] # posR
+    movsd xmm2, xmm9
+    subsd xmm2, xmm0
+    movsd xmm3, xmm1
+    subsd xmm3, xmm0
+    divsd xmm2, xmm3
+    maxpd xmm2, xmm5
+    minpd xmm2, xmm6
+    movsd xmm9, xmm2 # u (xmm10 is free temp for lerps)
+    # A first (xmm10 temp, result xmm3)
+    movsd xmm3, [rcx + 32]
+    movsd xmm10, [rdx + 32]
+    subsd xmm10, xmm3
+    mulsd xmm10, xmm9
+    addsd xmm3, xmm10
+    # R -> xmm0
+    movsd xmm0, [rcx + 8]
+    movsd xmm10, [rdx + 8]
+    subsd xmm10, xmm0
+    mulsd xmm10, xmm9
+    addsd xmm0, xmm10
+    # G -> xmm1
+    movsd xmm1, [rcx + 16]
+    movsd xmm10, [rdx + 16]
+    subsd xmm10, xmm1
+    mulsd xmm10, xmm9
+    addsd xmm1, xmm10
+    # B -> xmm2
+    movsd xmm2, [rcx + 24]
+    movsd xmm10, [rdx + 24]
+    subsd xmm10, xmm2
+    mulsd xmm10, xmm9
+    addsd xmm2, xmm10
+    jmp fwd("evaldone")
+    label transparent
+    xorpd xmm0, xmm0
+    xorpd xmm1, xmm1
+    xorpd xmm2, xmm2
+    xorpd xmm3, xmm3
+    jmp fwd("evaldone")
+    label single
+    movsd xmm0, [r12 + 8]
+    movsd xmm1, [r12 + 16]
+    movsd xmm2, [r12 + 24]
+    movsd xmm3, [r12 + 32]
+    jmp fwd("evaldone")
+    label below
+    movsd xmm0, [r12] # pos0
+    `xor` r13, r13
+    label belowloop
+    mov r14, r13
+    inc r14
+    cmp r14, rbx
+    jge fwd("belowdone")
+    mov rcx, r14
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm1, [rcx]
+    ucomisd xmm1, xmm0
+    jnz fwd("belowdone")
+    mov r13, r14
+    jmp bwd("belowloop")
+    label belowdone
+    mov rcx, r13
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx + 8]
+    movsd xmm1, [rcx + 16]
+    movsd xmm2, [rcx + 24]
+    movsd xmm3, [rcx + 32]
+    jmp fwd("evaldone")
+    label final
+    # posLast in xmm0 already? Reload for safety
+    mov rcx, rbx
+    dec rcx
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx] # posLast
+    mov r13, rbx
+    dec r13 # j = len-1
+    label finalloop
+    cmp r13, 0
+    jle fwd("finalcheck")
+    mov r14, r13
+    dec r14
+    mov rdx, r14
+    imul rdx, rdx, 40
+    add rdx, r12
+    movsd xmm1, [rdx]
+    ucomisd xmm1, xmm0
+    jnz fwd("finalcheck")
+    mov r13, r14
+    jmp bwd("finalloop")
+    label finalcheck
+    cmp r13, 0
+    jz fwd("finallast")
+    dec r13 # L
+    mov rcx, r13
+    imul rcx, rcx, 40
+    add rcx, r12 # ptrL
+    mov rdx, rbx
+    dec rdx
+    imul rdx, rdx, 40
+    add rdx, r12 # ptrLast
+    movsd xmm0, [rcx] # posL
+    movsd xmm2, xmm9
+    subsd xmm2, xmm0
+    movsd xmm3, [rdx] # posLast
+    subsd xmm3, xmm0
+    divsd xmm2, xmm3
+    maxpd xmm2, xmm5
+    minpd xmm2, xmm6
+    movsd xmm9, xmm2 # u
+    # A first, then R/G/B (xmm10 temp)
+    movsd xmm3, [rcx + 32]
+    movsd xmm10, [rdx + 32]
+    subsd xmm10, xmm3
+    mulsd xmm10, xmm9
+    addsd xmm3, xmm10
+    movsd xmm0, [rcx + 8]
+    movsd xmm10, [rdx + 8]
+    subsd xmm10, xmm0
+    mulsd xmm10, xmm9
+    addsd xmm0, xmm10
+    movsd xmm1, [rcx + 16]
+    movsd xmm10, [rdx + 16]
+    subsd xmm10, xmm1
+    mulsd xmm10, xmm9
+    addsd xmm1, xmm10
+    movsd xmm2, [rcx + 24]
+    movsd xmm10, [rdx + 24]
+    subsd xmm10, xmm2
+    mulsd xmm10, xmm9
+    addsd xmm2, xmm10
+    jmp fwd("evaldone")
+    label finallast
+    mov rcx, rbx
+    dec rcx
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx + 8]
+    movsd xmm1, [rcx + 16]
+    movsd xmm2, [rcx + 24]
+    movsd xmm3, [rcx + 32]
+    jmp fwd("evaldone")
+    label evaldone
+    # xmm0=cr, xmm1=cg, xmm2=cb, xmm3=a_lerp -> sa_c/inv + sourceOver blend
+    mulsd xmm3, [r8 + 96] # aAlpha
+    maxpd xmm3, xmm5
+    minpd xmm3, xmm6
+    mulsd xmm3, [r11] # cov
+    movsd xmm10, xmm3 # sa_c
+    movsd xmm11, xmm6
+    subsd xmm11, xmm10 # inv
+    # R
+    mulsd xmm0, xmm10
+    movzx edx, byte [r10]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm3, xmm11
+    addsd xmm0, xmm3
+    maxpd xmm0, xmm5
+    minpd xmm0, xmm6
+    mulsd xmm0, xmm4
+    addsd xmm0, xmm7
+    cvttsd2si edx, xmm0
+    mov byte [r10], dl
+    # G
+    mulsd xmm1, xmm10
+    movzx edx, byte [r10 + 1]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm3, xmm11
+    addsd xmm1, xmm3
+    maxpd xmm1, xmm5
+    minpd xmm1, xmm6
+    mulsd xmm1, xmm4
+    addsd xmm1, xmm7
+    cvttsd2si edx, xmm1
+    mov byte [r10 + 1], dl
+    # B
+    mulsd xmm2, xmm10
+    movzx edx, byte [r10 + 2]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm3, xmm11
+    addsd xmm2, xmm3
+    maxpd xmm2, xmm5
+    minpd xmm2, xmm6
+    mulsd xmm2, xmm4
+    addsd xmm2, xmm7
+    cvttsd2si edx, xmm2
+    mov byte [r10 + 2], dl
+    # A
+    movzx edx, byte [r10 + 3]
+    movsd xmm3, [r9 + rdx*8]
+    mulsd xmm3, xmm11
+    addsd xmm3, xmm10
+    maxpd xmm3, xmm5
+    minpd xmm3, xmm6
+    mulsd xmm3, xmm4
+    addsd xmm3, xmm7
+    cvttsd2si edx, xmm3
+    mov byte [r10 + 3], dl
+    addsd xmm8, xmm6 # x += 1.0
+    add r10, 4
+    add r11, 8
+    sub rax, 1
+    cmp rax, 0
+    jg bwd("row")
+    label done
+    movupd xmm6, [rsp]
+    movupd xmm7, [rsp + 16]
+    movupd xmm8, [rsp + 32]
+    movupd xmm9, [rsp + 48]
+    movupd xmm10, [rsp + 64]
+    movupd xmm11, [rsp + 80]
+    add rsp, 96
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret()
+  a.finalize()
+
+proc buildMultiBoxRowGenX64*(op: CompOp): ExecutableBuffer =
+  ## Multi-stop box-gradient head with the generic-op blend tail. Same ABI as solid.
+  ## `t` replicates `paint.sample` (box branch) and the stop evaluation
+  ## replicates `sampleStops` exactly: clamp01, below-first (last author
+  ## at min pos), past-last (final non-degenerate lerp at u>=1, clamped
+  ## in lerp), else linear search L/R + lerp. Stops borrow the paint heap
+  ## array via `MultiBoxCtx` (ptr+len); len 0/1 handled
+  ## (transparent/constant). Paint eval mirrors sampleStops exactly;
+  ## channels clamp and clearing ops run.
+  var a = newAssembler(akX64)
+  dynasm a:
+    arch x64
+    alias dst, rdi, rcx
+    alias cov, rsi, rdx
+    alias nn, rdx, r8
+    alias ctx, rcx, r9
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov r10, dst
+    mov r11, cov
+    mov rax, nn
+    mov r8, ctx
+    sub rsp, 192
+    movupd [rsp], xmm6
+    movupd [rsp + 16], xmm7
+    movupd [rsp + 32], xmm8
+    movupd [rsp + 48], xmm9
+    movupd [rsp + 64], xmm10
+    movupd [rsp + 80], xmm11
+    movabs rcx, 0x3EB0C6F7A0B5ED8D # 1e-6 bits (ao threshold)
+    mov qword [rsp + 176], rcx
+    movabs rcx, 0x3FD3333333333333 # W3C Lum R weight (non-sep tails)
+    mov qword [rsp + 96], rcx
+    movabs rcx, 0x3FE2E147AE147AE1 # W3C Lum G weight
+    mov qword [rsp + 104], rcx
+    movabs rcx, 0x3FBC28F5C28F5C29 # W3C Lum B weight
+    mov qword [rsp + 112], rcx
+    mov r9, [r8 + 136] # divtab
+    movsd xmm4, [r8 + 104] # c255
+    movsd xmm5, [r8 + 120] # zero
+    movsd xmm6, [r8 + 128] # one
+    movsd xmm7, [r8 + 112] # half
+    cmp rax, 0
+    jle fwd("done")
+    movsd xmm8, [r8 + 144] # rowX
+    label row
+    # qx = (m0*x + m2y) + m4
+    movsd xmm0, xmm8
+    mulsd xmm0, [r8 + 0]
+    addsd xmm0, [r8 + 152]
+    addsd xmm0, [r8 + 16]
+    # qy = (m1*x + m3y) + m5
+    movsd xmm1, xmm8
+    mulsd xmm1, [r8 + 8]
+    addsd xmm1, [r8 + 160]
+    addsd xmm1, [r8 + 24]
+    # px = qx-cx, py = qy-cy, then |.| via max(x, 0-x)
+    subsd xmm0, [r8 + 32] # cx
+    subsd xmm1, [r8 + 40] # cy
+    movsd xmm2, xmm5
+    subsd xmm2, xmm0 # -px
+    maxpd xmm0, xmm2 # |px|
+    movsd xmm2, xmm5
+    subsd xmm2, xmm1 # -py
+    maxpd xmm1, xmm2 # |py|
+    # qx = |px|-exr, qy = |py|-eyr
+    subsd xmm0, [r8 + 48] # exr
+    subsd xmm1, [r8 + 56] # eyr
+    # d1 = min(max(qx,qy),0)
+    movsd xmm2, xmm0
+    maxpd xmm2, xmm1
+    minpd xmm2, xmm5
+    # sd = d1 + sqrt(max(qx,0)^2+max(qy,0)^2) - r
+    maxpd xmm0, xmm5
+    mulsd xmm0, xmm0
+    maxpd xmm1, xmm5
+    mulsd xmm1, xmm1
+    addsd xmm0, xmm1
+    sqrtsd xmm0, xmm0
+    addsd xmm2, xmm0
+    subsd xmm2, [r8 + 64] # radius -> sd
+    # t = (sd+f*0.5)/f, clamped to tc
+    movsd xmm0, [r8 + 72] # f
+    mulsd xmm0, xmm7 # f*0.5
+    addsd xmm0, xmm2 # fh+sd == sd+fh, exact
+    divsd xmm0, [r8 + 72] # f
+    maxpd xmm0, xmm5
+    minpd xmm0, xmm6
+    movsd xmm9, xmm0 # tc
+    mov r12, [r8 + 80] # stopsPtr
+    mov rbx, [r8 + 88] # stopsLen
+    cmp rbx, 0
+    jle fwd("transparent")
+    cmp rbx, 1
+    jz fwd("single")
+    # pos0
+    movsd xmm0, [r12]
+    ucomisd xmm9, xmm0
+    jb fwd("below")
+    # posLast
+    mov rcx, rbx
+    dec rcx
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx]
+    ucomisd xmm9, xmm0
+    jae fwd("final")
+    # interior: L in r13
+    `xor` r13, r13
+    label search
+    mov r14, r13
+    inc r14
+    mov rcx, r14
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx] # posR
+    ucomisd xmm0, xmm9
+    jbe fwd("adv")
+    jmp fwd("found")
+    label adv
+    mov r13, r14
+    jmp bwd("search")
+    label found
+    # ptrL in rcx, ptrR in rdx
+    mov rcx, r13
+    imul rcx, rcx, 40
+    add rcx, r12
+    mov rdx, r13
+    inc rdx
+    imul rdx, rdx, 40
+    add rdx, r12
+    movsd xmm0, [rcx] # posL
+    movsd xmm1, [rdx] # posR
+    movsd xmm2, xmm9
+    subsd xmm2, xmm0
+    movsd xmm3, xmm1
+    subsd xmm3, xmm0
+    divsd xmm2, xmm3
+    maxpd xmm2, xmm5
+    minpd xmm2, xmm6
+    movsd xmm9, xmm2 # u (xmm10 is free temp for lerps)
+    # A first (xmm10 temp, result xmm3)
+    movsd xmm3, [rcx + 32]
+    movsd xmm10, [rdx + 32]
+    subsd xmm10, xmm3
+    mulsd xmm10, xmm9
+    addsd xmm3, xmm10
+    # R -> xmm0
+    movsd xmm0, [rcx + 8]
+    movsd xmm10, [rdx + 8]
+    subsd xmm10, xmm0
+    mulsd xmm10, xmm9
+    addsd xmm0, xmm10
+    # G -> xmm1
+    movsd xmm1, [rcx + 16]
+    movsd xmm10, [rdx + 16]
+    subsd xmm10, xmm1
+    mulsd xmm10, xmm9
+    addsd xmm1, xmm10
+    # B -> xmm2
+    movsd xmm2, [rcx + 24]
+    movsd xmm10, [rdx + 24]
+    subsd xmm10, xmm2
+    mulsd xmm10, xmm9
+    addsd xmm2, xmm10
+    jmp fwd("evaldone")
+    label transparent
+    xorpd xmm0, xmm0
+    xorpd xmm1, xmm1
+    xorpd xmm2, xmm2
+    xorpd xmm3, xmm3
+    jmp fwd("evaldone")
+    label single
+    movsd xmm0, [r12 + 8]
+    movsd xmm1, [r12 + 16]
+    movsd xmm2, [r12 + 24]
+    movsd xmm3, [r12 + 32]
+    jmp fwd("evaldone")
+    label below
+    movsd xmm0, [r12] # pos0
+    `xor` r13, r13
+    label belowloop
+    mov r14, r13
+    inc r14
+    cmp r14, rbx
+    jge fwd("belowdone")
+    mov rcx, r14
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm1, [rcx]
+    ucomisd xmm1, xmm0
+    jnz fwd("belowdone")
+    mov r13, r14
+    jmp bwd("belowloop")
+    label belowdone
+    mov rcx, r13
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx + 8]
+    movsd xmm1, [rcx + 16]
+    movsd xmm2, [rcx + 24]
+    movsd xmm3, [rcx + 32]
+    jmp fwd("evaldone")
+    label final
+    # posLast in xmm0 already? Reload for safety
+    mov rcx, rbx
+    dec rcx
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx] # posLast
+    mov r13, rbx
+    dec r13 # j = len-1
+    label finalloop
+    cmp r13, 0
+    jle fwd("finalcheck")
+    mov r14, r13
+    dec r14
+    mov rdx, r14
+    imul rdx, rdx, 40
+    add rdx, r12
+    movsd xmm1, [rdx]
+    ucomisd xmm1, xmm0
+    jnz fwd("finalcheck")
+    mov r13, r14
+    jmp bwd("finalloop")
+    label finalcheck
+    cmp r13, 0
+    jz fwd("finallast")
+    dec r13 # L
+    mov rcx, r13
+    imul rcx, rcx, 40
+    add rcx, r12 # ptrL
+    mov rdx, rbx
+    dec rdx
+    imul rdx, rdx, 40
+    add rdx, r12 # ptrLast
+    movsd xmm0, [rcx] # posL
+    movsd xmm2, xmm9
+    subsd xmm2, xmm0
+    movsd xmm3, [rdx] # posLast
+    subsd xmm3, xmm0
+    divsd xmm2, xmm3
+    maxpd xmm2, xmm5
+    minpd xmm2, xmm6
+    movsd xmm9, xmm2 # u
+    # A first, then R/G/B (xmm10 temp)
+    movsd xmm3, [rcx + 32]
+    movsd xmm10, [rdx + 32]
+    subsd xmm10, xmm3
+    mulsd xmm10, xmm9
+    addsd xmm3, xmm10
+    movsd xmm0, [rcx + 8]
+    movsd xmm10, [rdx + 8]
+    subsd xmm10, xmm0
+    mulsd xmm10, xmm9
+    addsd xmm0, xmm10
+    movsd xmm1, [rcx + 16]
+    movsd xmm10, [rdx + 16]
+    subsd xmm10, xmm1
+    mulsd xmm10, xmm9
+    addsd xmm1, xmm10
+    movsd xmm2, [rcx + 24]
+    movsd xmm10, [rdx + 24]
+    subsd xmm10, xmm2
+    mulsd xmm10, xmm9
+    addsd xmm2, xmm10
+    jmp fwd("evaldone")
+    label finallast
+    mov rcx, rbx
+    dec rcx
+    imul rcx, rcx, 40
+    add rcx, r12
+    movsd xmm0, [rcx + 8]
+    movsd xmm1, [rcx + 16]
+    movsd xmm2, [rcx + 24]
+    movsd xmm3, [rcx + 32]
+    jmp fwd("evaldone")
+    label evaldone
+    # xmm0=cr, xmm1=cg, xmm2=cb, xmm3=a_lerp -> clamped rgb + sa, then tail
+    maxpd xmm0, xmm5
+    minpd xmm0, xmm6
+    maxpd xmm1, xmm5
+    minpd xmm1, xmm6
+    maxpd xmm2, xmm5
+    minpd xmm2, xmm6
+    mulsd xmm3, [r8 + 96] # aAlpha
+    maxpd xmm3, xmm5
+    minpd xmm3, xmm6
+    mulsd xmm3, [r11] # cov
+    movsd xmm10, xmm3 # sa
+  emitBlendTailX64(op, a)
+  dynasm a:
+    arch x64
+    addsd xmm8, xmm6 # x += 1.0
+    add r10, 4
+    add r11, 8
+    sub rax, 1
+    cmp rax, 0
+    jg bwd("row")
+    label done
+    movupd xmm6, [rsp]
+    movupd xmm7, [rsp + 16]
+    movupd xmm8, [rsp + 32]
+    movupd xmm9, [rsp + 48]
+    movupd xmm10, [rsp + 64]
+    movupd xmm11, [rsp + 80]
+    add rsp, 192
     pop r14
     pop r13
     pop r12
@@ -4505,7 +5302,7 @@ proc buildPatternBilinearRowGenX64*(op: CompOp): ExecutableBuffer =
     mov r11, cov
     mov rbx, nn
     mov r8, ctx
-    sub rsp, 176
+    sub rsp, 192
     movupd [rsp], xmm6
     movupd [rsp + 16], xmm7
     movupd [rsp + 32], xmm8
@@ -4514,7 +5311,9 @@ proc buildPatternBilinearRowGenX64*(op: CompOp): ExecutableBuffer =
     movupd [rsp + 80], xmm11
     movabs rcx, 0x3EB0C6F7A0B5ED8D # 1e-6 bits (acc threshold)
     mov qword [rsp + 168], rcx
-    mov qword [rsp + 160], rcx
+    mov qword [rsp + 184], rcx # acc threshold (NS Bout_g owns [rsp+160])
+    mov qword [rsp + 176], rcx # ao threshold (shared tail reads [rsp+176];
+    # [rsp+152] holds Bout_r for non-sep ops, written per pixel)
     mov r9, [r8 + 168] # divtab
     movsd xmm4, [r8 + 136] # c255
     movsd xmm5, [r8 + 152] # zero
@@ -4873,7 +5672,7 @@ proc buildPatternBilinearRowGenX64*(op: CompOp): ExecutableBuffer =
     movsd [rsp + 120], xmm3
     # accA > 1e-6?
     movsd xmm0, [rsp + 120]
-    movsd xmm1, [rsp + 160] # 1e-6 bits as double? stored qword bits
+    movsd xmm1, [rsp + 184] # 1e-6 bits (NS Bout_g owns [rsp+160])
     ucomisd xmm0, xmm1
     jbe fwd("bilinzero")
     jmp fwd("biltint")
@@ -4911,6 +5710,14 @@ proc buildPatternBilinearRowGenX64*(op: CompOp): ExecutableBuffer =
     minpd xmm3, xmm6
     mulsd xmm3, [r11] # cov
     movsd xmm10, xmm3 # sa
+    # W3C Lum weights (tap spills at 96..120 are dead past geneval;
+    # rcx is free here). Other Gen builders spill these per row.
+    movabs rcx, 0x3FD3333333333333
+    mov qword [rsp + 96], rcx
+    movabs rcx, 0x3FE2E147AE147AE1
+    mov qword [rsp + 104], rcx
+    movabs rcx, 0x3FBC28F5C28F5C29
+    mov qword [rsp + 112], rcx
   emitBlendTailX64(op, a)
   dynasm a:
     arch x64
@@ -4928,7 +5735,7 @@ proc buildPatternBilinearRowGenX64*(op: CompOp): ExecutableBuffer =
     movupd xmm9, [rsp + 48]
     movupd xmm10, [rsp + 64]
     movupd xmm11, [rsp + 80]
-    add rsp, 176
+    add rsp, 192
     pop r15
     pop r14
     pop r13
@@ -4964,6 +5771,9 @@ type
     mradBufs: array[CompOp, ExecutableBuffer]
     mradFns: array[CompOp, MultiRadialRowFn]
     mradHas: array[CompOp, bool]
+    mboxBufs: array[CompOp, ExecutableBuffer]
+    mboxFns: array[CompOp, MultiBoxRowFn]
+    mboxHas: array[CompOp, bool]
     pbilBufs: array[CompOp, ExecutableBuffer]
     pbilFns: array[CompOp, PatternBilinearRowFn]
     pbilHas: array[CompOp, bool]
@@ -4974,7 +5784,6 @@ proc getSolid*(k: JitKernels, op: CompOp = coSourceOver): SolidRowFn =
   ## rasterizer; the AArch64 kernels are assemble-verified until an ARM
   ## run signs off execution).
   when defined(amd64):
-    if op >= coHue: return nil # scalar-only until JIT tails land
     if not k.solidHas[op]:
       ensureDivTable()
       k.solidBufs[op] = case op
@@ -5000,7 +5809,10 @@ proc getSolid*(k: JitKernels, op: CompOp = coSourceOver): SolidRowFn =
         of coSoftLight: buildSolidRowGenX64(coSoftLight)
         of coDifference: buildSolidRowGenX64(coDifference)
         of coExclusion: buildSolidRowGenX64(coExclusion)
-        else: raise newException(Defect, "scalar-only op has no JIT kernel")
+        of coHue: buildSolidRowGenX64(coHue)
+        of coSaturation: buildSolidRowGenX64(coSaturation)
+        of coColor: buildSolidRowGenX64(coColor)
+        of coLuminosity: buildSolidRowGenX64(coLuminosity)
       k.solidFns[op] = cast[SolidRowFn](
         k.solidBufs[op].ptrAt(AssemblyOffset(0)))
       k.solidHas[op] = true
@@ -5012,7 +5824,6 @@ proc getLinear*(k: JitKernels, op: CompOp = coSourceOver): LinearRowFn =
   ## Return the linear-gradient row kernel for `op`, building it on
   ## first use. Same platform gate as `getSolid`.
   when defined(amd64):
-    if op >= coHue: return nil # scalar-only until JIT tails land
     if not k.linearHas[op]:
       ensureDivTable()
       k.linearBufs[op] = case op
@@ -5038,7 +5849,10 @@ proc getLinear*(k: JitKernels, op: CompOp = coSourceOver): LinearRowFn =
         of coSoftLight: buildLinearRowGenX64(coSoftLight)
         of coDifference: buildLinearRowGenX64(coDifference)
         of coExclusion: buildLinearRowGenX64(coExclusion)
-        else: raise newException(Defect, "scalar-only op has no JIT kernel")
+        of coHue: buildLinearRowGenX64(coHue)
+        of coSaturation: buildLinearRowGenX64(coSaturation)
+        of coColor: buildLinearRowGenX64(coColor)
+        of coLuminosity: buildLinearRowGenX64(coLuminosity)
       k.linearFns[op] = cast[LinearRowFn](
         k.linearBufs[op].ptrAt(AssemblyOffset(0)))
       k.linearHas[op] = true
@@ -5050,7 +5864,6 @@ proc getRadial*(k: JitKernels, op: CompOp = coSourceOver): RadialRowFn =
   ## Return the radial-gradient row kernel for `op`, building it on
   ## first use. Same platform gate as `getSolid`.
   when defined(amd64):
-    if op >= coHue: return nil # scalar-only until JIT tails land
     if not k.radialHas[op]:
       ensureDivTable()
       k.radialBufs[op] = case op
@@ -5076,7 +5889,10 @@ proc getRadial*(k: JitKernels, op: CompOp = coSourceOver): RadialRowFn =
         of coSoftLight: buildRadialRowGenX64(coSoftLight)
         of coDifference: buildRadialRowGenX64(coDifference)
         of coExclusion: buildRadialRowGenX64(coExclusion)
-        else: raise newException(Defect, "scalar-only op has no JIT kernel")
+        of coHue: buildRadialRowGenX64(coHue)
+        of coSaturation: buildRadialRowGenX64(coSaturation)
+        of coColor: buildRadialRowGenX64(coColor)
+        of coLuminosity: buildRadialRowGenX64(coLuminosity)
       k.radialFns[op] = cast[RadialRowFn](
         k.radialBufs[op].ptrAt(AssemblyOffset(0)))
       k.radialHas[op] = true
@@ -5088,7 +5904,6 @@ proc getBox*(k: JitKernels, op: CompOp = coSourceOver): BoxRowFn =
   ## Return the box-gradient row kernel for `op`, building it on first
   ## use. Same platform gate as `getSolid`.
   when defined(amd64):
-    if op >= coHue: return nil # scalar-only until JIT tails land
     if not k.boxHas[op]:
       ensureDivTable()
       k.boxBufs[op] = case op
@@ -5114,7 +5929,10 @@ proc getBox*(k: JitKernels, op: CompOp = coSourceOver): BoxRowFn =
         of coSoftLight: buildBoxRowGenX64(coSoftLight)
         of coDifference: buildBoxRowGenX64(coDifference)
         of coExclusion: buildBoxRowGenX64(coExclusion)
-        else: raise newException(Defect, "scalar-only op has no JIT kernel")
+        of coHue: buildBoxRowGenX64(coHue)
+        of coSaturation: buildBoxRowGenX64(coSaturation)
+        of coColor: buildBoxRowGenX64(coColor)
+        of coLuminosity: buildBoxRowGenX64(coLuminosity)
       k.boxFns[op] = cast[BoxRowFn](
         k.boxBufs[op].ptrAt(AssemblyOffset(0)))
       k.boxHas[op] = true
@@ -5126,7 +5944,6 @@ proc getPattern*(k: JitKernels, op: CompOp = coSourceOver): PatternRowFn =
   ## Return the nearest-pattern row kernel for `op`, building it on
   ## first use. Same platform gate as `getSolid`.
   when defined(amd64):
-    if op >= coHue: return nil # scalar-only until JIT tails land
     if not k.patHas[op]:
       ensureDivTable()
       k.patBufs[op] = case op
@@ -5152,7 +5969,10 @@ proc getPattern*(k: JitKernels, op: CompOp = coSourceOver): PatternRowFn =
         of coSoftLight: buildPatternRowGenX64(coSoftLight)
         of coDifference: buildPatternRowGenX64(coDifference)
         of coExclusion: buildPatternRowGenX64(coExclusion)
-        else: raise newException(Defect, "scalar-only op has no JIT kernel")
+        of coHue: buildPatternRowGenX64(coHue)
+        of coSaturation: buildPatternRowGenX64(coSaturation)
+        of coColor: buildPatternRowGenX64(coColor)
+        of coLuminosity: buildPatternRowGenX64(coLuminosity)
       k.patFns[op] = cast[PatternRowFn](
         k.patBufs[op].ptrAt(AssemblyOffset(0)))
       k.patHas[op] = true
@@ -5164,7 +5984,6 @@ proc getMultiLinear*(k: JitKernels, op: CompOp = coSourceOver): MultiLinearRowFn
   ## Return the multi-stop linear-gradient row kernel for `op`.
   ## Same platform gate as `getSolid` (amd64 only; AArch64 not yet).
   when defined(amd64):
-    if op >= coHue: return nil # scalar-only until JIT tails land
     if not k.mlinHas[op]:
       ensureDivTable()
       k.mlinBufs[op] = case op
@@ -5190,7 +6009,10 @@ proc getMultiLinear*(k: JitKernels, op: CompOp = coSourceOver): MultiLinearRowFn
         of coSoftLight: buildMultiLinearRowGenX64(coSoftLight)
         of coDifference: buildMultiLinearRowGenX64(coDifference)
         of coExclusion: buildMultiLinearRowGenX64(coExclusion)
-        else: raise newException(Defect, "scalar-only op has no JIT kernel")
+        of coHue: buildMultiLinearRowGenX64(coHue)
+        of coSaturation: buildMultiLinearRowGenX64(coSaturation)
+        of coColor: buildMultiLinearRowGenX64(coColor)
+        of coLuminosity: buildMultiLinearRowGenX64(coLuminosity)
       k.mlinFns[op] = cast[MultiLinearRowFn](
         k.mlinBufs[op].ptrAt(AssemblyOffset(0)))
       k.mlinHas[op] = true
@@ -5201,7 +6023,6 @@ proc getMultiLinear*(k: JitKernels, op: CompOp = coSourceOver): MultiLinearRowFn
 proc getMultiRadial*(k: JitKernels, op: CompOp = coSourceOver): MultiRadialRowFn =
   ## Return the multi-stop radial-gradient row kernel for `op`.
   when defined(amd64):
-    if op >= coHue: return nil # scalar-only until JIT tails land
     if not k.mradHas[op]:
       ensureDivTable()
       k.mradBufs[op] = case op
@@ -5227,7 +6048,10 @@ proc getMultiRadial*(k: JitKernels, op: CompOp = coSourceOver): MultiRadialRowFn
         of coSoftLight: buildMultiRadialRowGenX64(coSoftLight)
         of coDifference: buildMultiRadialRowGenX64(coDifference)
         of coExclusion: buildMultiRadialRowGenX64(coExclusion)
-        else: raise newException(Defect, "scalar-only op has no JIT kernel")
+        of coHue: buildMultiRadialRowGenX64(coHue)
+        of coSaturation: buildMultiRadialRowGenX64(coSaturation)
+        of coColor: buildMultiRadialRowGenX64(coColor)
+        of coLuminosity: buildMultiRadialRowGenX64(coLuminosity)
       k.mradFns[op] = cast[MultiRadialRowFn](
         k.mradBufs[op].ptrAt(AssemblyOffset(0)))
       k.mradHas[op] = true
@@ -5235,10 +6059,48 @@ proc getMultiRadial*(k: JitKernels, op: CompOp = coSourceOver): MultiRadialRowFn
   else:
     nil
 
+proc getMultiBox*(k: JitKernels, op: CompOp = coSourceOver): MultiBoxRowFn =
+  ## Return the multi-stop box-gradient row kernel for `op`.
+  when defined(amd64):
+    if not k.mboxHas[op]:
+      ensureDivTable()
+      k.mboxBufs[op] = case op
+        of coSourceOver: buildMultiBoxRowX64()
+        of coSourceIn: buildMultiBoxRowGenX64(coSourceIn)
+        of coSourceOut: buildMultiBoxRowGenX64(coSourceOut)
+        of coAtop: buildMultiBoxRowGenX64(coAtop)
+        of coDestinationOver: buildMultiBoxRowGenX64(coDestinationOver)
+        of coDestinationIn: buildMultiBoxRowGenX64(coDestinationIn)
+        of coDestinationOut: buildMultiBoxRowGenX64(coDestinationOut)
+        of coDestinationAtop: buildMultiBoxRowGenX64(coDestinationAtop)
+        of coLighter: buildMultiBoxRowGenX64(coLighter)
+        of coCopy: buildMultiBoxRowGenX64(coCopy)
+        of coXor: buildMultiBoxRowGenX64(coXor)
+        of coMultiply: buildMultiBoxRowGenX64(coMultiply)
+        of coScreen: buildMultiBoxRowGenX64(coScreen)
+        of coOverlay: buildMultiBoxRowGenX64(coOverlay)
+        of coDarken: buildMultiBoxRowGenX64(coDarken)
+        of coLighten: buildMultiBoxRowGenX64(coLighten)
+        of coColorDodge: buildMultiBoxRowGenX64(coColorDodge)
+        of coColorBurn: buildMultiBoxRowGenX64(coColorBurn)
+        of coHardLight: buildMultiBoxRowGenX64(coHardLight)
+        of coSoftLight: buildMultiBoxRowGenX64(coSoftLight)
+        of coDifference: buildMultiBoxRowGenX64(coDifference)
+        of coExclusion: buildMultiBoxRowGenX64(coExclusion)
+        of coHue: buildMultiBoxRowGenX64(coHue)
+        of coSaturation: buildMultiBoxRowGenX64(coSaturation)
+        of coColor: buildMultiBoxRowGenX64(coColor)
+        of coLuminosity: buildMultiBoxRowGenX64(coLuminosity)
+      k.mboxFns[op] = cast[MultiBoxRowFn](
+        k.mboxBufs[op].ptrAt(AssemblyOffset(0)))
+      k.mboxHas[op] = true
+    k.mboxFns[op]
+  else:
+    nil
+
 proc getPatternBilinear*(k: JitKernels, op: CompOp = coSourceOver): PatternBilinearRowFn =
   ## Return the bilinear-pattern row kernel for `op`.
   when defined(amd64):
-    if op >= coHue: return nil # scalar-only until JIT tails land
     if not k.pbilHas[op]:
       ensureDivTable()
       k.pbilBufs[op] = case op
@@ -5264,7 +6126,10 @@ proc getPatternBilinear*(k: JitKernels, op: CompOp = coSourceOver): PatternBilin
         of coSoftLight: buildPatternBilinearRowGenX64(coSoftLight)
         of coDifference: buildPatternBilinearRowGenX64(coDifference)
         of coExclusion: buildPatternBilinearRowGenX64(coExclusion)
-        else: raise newException(Defect, "scalar-only op has no JIT kernel")
+        of coHue: buildPatternBilinearRowGenX64(coHue)
+        of coSaturation: buildPatternBilinearRowGenX64(coSaturation)
+        of coColor: buildPatternBilinearRowGenX64(coColor)
+        of coLuminosity: buildPatternBilinearRowGenX64(coLuminosity)
       k.pbilFns[op] = cast[PatternBilinearRowFn](
         k.pbilBufs[op].ptrAt(AssemblyOffset(0)))
       k.pbilHas[op] = true
@@ -5303,6 +6168,10 @@ proc destroy*(k: JitKernels) =
       k.mradBufs[op].destroy()
       k.mradHas[op] = false
       k.mradFns[op] = nil
+    if k.mboxHas[op]:
+      k.mboxBufs[op].destroy()
+      k.mboxHas[op] = false
+      k.mboxFns[op] = nil
     if k.pbilHas[op]:
       k.pbilBufs[op].destroy()
       k.pbilHas[op] = false
@@ -5338,6 +6207,10 @@ proc `=destroy`*(x: var JitKernelsObj) =
       x.mradBufs[op].destroy()
       x.mradHas[op] = false
       x.mradFns[op] = nil
+    if x.mboxHas[op]:
+      x.mboxBufs[op].destroy()
+      x.mboxHas[op] = false
+      x.mboxFns[op] = nil
     if x.pbilHas[op]:
       x.pbilBufs[op].destroy()
       x.pbilHas[op] = false

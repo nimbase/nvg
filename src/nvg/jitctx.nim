@@ -331,6 +331,51 @@ proc multiRadialSkippable*(p: Paint, alpha: float64): bool =
   true
 
 type
+  MultiBoxRowFn* = SolidRowFn
+    ## Multi-stop box-gradient row kernel. Same ABI as solid/linear;
+    ## stops travel via pointer+len in ctx (heap array owned by the
+    ## paint, alive through the fill).
+
+  MultiBoxCtx* = object
+    ## Box geometry block mirrors `BoxCtx` (so the `t` head matches the
+    ## 2-stop box kernel op-for-op): 0,8,16,24: m0,m1,m4,m5;
+    ## 32,40,48,56,64,72: cx,cy,exr,eyr,radius,f; 80: stopsPtr;
+    ## 88: stopsLen; 96,104,112,120,128: aAlpha,c255,half,zero,one;
+    ## 136: divtab; 144,152,160: rowX,m2y,m3y. Keep field order stable
+    ## (kernels address fields by numeric displacement).
+    m0*, m1*, m4*, m5*: float64
+    cx*, cy*, exr*, eyr*, radius*, f*: float64
+    stopsPtr*: pointer
+    stopsLen*: int64
+    aAlpha*, c255*, half*, zero*, one*: float64
+    divtab*: pointer
+    rowX*, m2y*, m3y*: float64
+
+proc bakeMultiBoxCtx*(p: Paint, alpha: float64): MultiBoxCtx =
+  ## Bake a multi-stop box gradient. Geometry matches `bakeBoxCtx`
+  ## (`exr = ex - radius`, `f` floor); stops pointer borrows the paint
+  ## heap array (alive through the synchronous fill).
+  let aAlpha = clamp01(alpha)
+  let n = p.box.stops.len
+  result = MultiBoxCtx(m0: p.map[0], m1: p.map[1], m4: p.map[4],
+    m5: p.map[5], cx: p.box.cx, cy: p.box.cy,
+    exr: p.box.ex - p.box.radius, eyr: p.box.ey - p.box.radius,
+    radius: p.box.radius, f: max(1.0, p.box.feather),
+    stopsPtr: if n > 0: addr p.box.stops[0] else: nil,
+    stopsLen: int64(n),
+    aAlpha: aAlpha, c255: 255.0, half: 0.5, zero: 0.0, one: 1.0,
+    divtab: divTablePtr(), rowX: 0.0, m2y: 0.0, m3y: 0.0)
+
+proc multiBoxSkippable*(p: Paint, alpha: float64): bool =
+  ## Source-over no-op gate for multi-stop box: zero global alpha,
+  ## empty (transparent), or every stop alpha non-positive.
+  if clamp01(alpha) <= 0.0: return true
+  if p.box.stops.len == 0: return true
+  for s in p.box.stops:
+    if s.color.a > 0.0: return false
+  true
+
+type
   PatternBilinearRowFn* = SolidRowFn
     ## Bilinear-filter pattern row kernel. Same ABI and same `PatternCtx`
     ## layout as nearest (no new ctx); caller gates on runnable +

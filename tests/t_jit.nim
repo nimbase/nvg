@@ -465,7 +465,8 @@ test "all comp ops identical: fills":
     coDestinationOver, coDestinationIn, coDestinationOut,
     coDestinationAtop, coLighter, coCopy, coXor, coMultiply, coScreen,
     coOverlay, coDarken, coLighten, coColorDodge, coColorBurn,
-    coHardLight, coSoftLight, coDifference, coExclusion]
+    coHardLight, coSoftLight, coDifference, coExclusion, coHue,
+    coSaturation, coColor, coLuminosity]
   var totalDiff = 0
   for op in ops:
     let d = checkScene(160, 120, proc(c: Canvas) =
@@ -602,7 +603,8 @@ when defined(amd64):
       coDestinationIn, coDestinationOut, coDestinationAtop, coLighter,
       coCopy, coXor, coMultiply, coScreen, coOverlay, coDarken,
       coLighten, coColorDodge, coColorBurn, coHardLight, coSoftLight,
-      coDifference, coExclusion]
+      coDifference, coExclusion, coHue, coSaturation, coColor,
+      coLuminosity]
     let kern = JitKernels()
     let srcs = [rgbaf(1, 0, 0, 1), rgbaf(0, 1, 0, 0.5),
       rgbaf(0.2, 0.4, 0.8, 0.0), rgbaf(2.0, -0.5, 0.5, 0.75),
@@ -644,7 +646,8 @@ when defined(amd64):
       coDestinationIn, coDestinationOut, coDestinationAtop, coLighter,
       coCopy, coXor, coMultiply, coScreen, coOverlay, coDarken,
       coLighten, coColorDodge, coColorBurn, coHardLight, coSoftLight,
-      coDifference, coExclusion]
+      coDifference, coExclusion, coHue, coSaturation, coColor,
+      coLuminosity]
     let kern = JitKernels()
     let p = linearGradient(10, 20, 300, 400,
       rgbaf(2.0, -0.5, 0.5, 0.75), rgbaf(0.2, 0.4, 0.8, 0.0))
@@ -1059,7 +1062,8 @@ when defined(amd64):
       coDestinationIn, coDestinationOut, coDestinationAtop, coLighter,
       coCopy, coXor, coMultiply, coScreen, coOverlay, coDarken,
       coLighten, coColorDodge, coColorBurn, coHardLight, coSoftLight,
-      coDifference, coExclusion]
+      coDifference, coExclusion, coHue, coSaturation, coColor,
+      coLuminosity]
     let kern = JitKernels()
     let p = linearGradientStops(10, 20, 300, 400, [
       GradientStop(pos: 0.0, color: rgbaf(2.0, -0.5, 0.5, 0.75)),
@@ -1120,6 +1124,18 @@ when defined(amd64):
       GradientStop(pos: 0.0, color: rgbaf(1, 0, 0, 1.0)),
       GradientStop(pos: 1.0, color: rgbaf(0, 0, 1, 0.0))])
     check not multiRadialSkippable(s, 1.0)
+    var b = boxGradientStops(0, 0, 50, 50, 10, 20, [
+      GradientStop(pos: 0.0, color: rgbaf(1, 0, 0, 0.0)),
+      GradientStop(pos: 1.0, color: rgbaf(0, 0, 1, 0.0))])
+    check multiBoxSkippable(b, 1.0)
+    check multiBoxSkippable(b, 0.0)
+    var c = boxGradientStops(0, 0, 50, 50, 10, 20, [
+      GradientStop(pos: 0.0, color: rgbaf(1, 0, 0, 1.0)),
+      GradientStop(pos: 1.0, color: rgbaf(0, 0, 1, 0.0))])
+    check not multiBoxSkippable(c, 1.0)
+    check multiBoxSkippable(c, 0.0)
+    check multiBoxSkippable(
+      boxGradientStops(0, 0, 50, 50, 10, 20, []), 1.0)
 
   test "multi-radial row kernel matches sample+blend":
     randomize(80808)
@@ -1178,7 +1194,8 @@ when defined(amd64):
       coDestinationIn, coDestinationOut, coDestinationAtop, coLighter,
       coCopy, coXor, coMultiply, coScreen, coOverlay, coDarken,
       coLighten, coColorDodge, coColorBurn, coHardLight, coSoftLight,
-      coDifference, coExclusion]
+      coDifference, coExclusion, coHue, coSaturation, coColor,
+      coLuminosity]
     let kern = JitKernels()
     let p = radialGradientStops(50, 50, 10, 60, [
       GradientStop(pos: 0.0, color: rgbaf(2.0, -0.5, 0.5, 0.75)),
@@ -1191,6 +1208,103 @@ when defined(amd64):
       for alpha in [1.0, 0.4]:
         for n in [1, 7, 32]:
           var ctx = bakeMultiRadialCtx(p, alpha)
+          let rowY = 50.5
+          ctx.rowX = 5.5
+          ctx.m2y = p.map[2] * rowY
+          ctx.m3y = p.map[3] * rowY
+          var dst = newSeq[uint8](n * 4)
+          var cov = newSeq[float64](n)
+          for i in 0 ..< dst.len: dst[i] = uint8(rand(255))
+          for i in 0 ..< n: cov[i] = [0.0, 0.25, 0.5, 1.0][rand(3)]
+          var got = dst
+          fn(addr got[0], addr cov[0], int64(n), addr ctx)
+          var surf = newSurface(n, 1)
+          surf.pixels.setLen(dst.len)
+          for i, b in dst: surf.pixels[i] = b
+          let aA = clamp01(alpha)
+          for i in 0 ..< n:
+            let col = p.sample(float64(5 + i) + 0.5, rowY)
+            surf.blendPixel(i, 0,
+              color(col.r, col.g, col.b, col.a * aA), cov[i], op)
+          let dd = diffStat(got, surf.pixels)
+          if dd.n > 0 and totalDiff == 0:
+            echo "op=", op, " alpha=", alpha, " n=", n, "\n", dd.detail
+          totalDiff += dd.n
+    check totalDiff == 0
+    kern.destroy()
+
+  test "multi-box row kernel matches sample+blend":
+    randomize(70707)
+    let kern = JitKernels()
+    let fn = kern.getMultiBox()
+    check fn != nil
+    var paints: seq[Paint] = @[
+      boxGradientStops(100, 100, 60, 40, 10, 20, [
+        GradientStop(pos: 0.0, color: rgbaf(1, 0, 0, 1)),
+        GradientStop(pos: 0.5, color: rgbaf(0, 1, 0, 0.5)),
+        GradientStop(pos: 1.0, color: rgbaf(0, 0, 1, 0.25))]),
+      boxGradientStops(0, 0, 50, 50, 0, 1, [
+        GradientStop(pos: 0.0, color: rgbaf(2.0, -0.5, 0.5, 0.75)),
+        GradientStop(pos: 1.0, color: rgbaf(0.2, 0.4, 0.8, 0.0))]),
+      boxGradientStops(50, 50, 30, 30, 40, 8, [
+        GradientStop(pos: 0.0, color: rgbaf(1, 0, 0, 1)),
+        GradientStop(pos: 0.5, color: rgbaf(0, 0, 1, 0.2)),
+        GradientStop(pos: 0.5, color: rgbaf(0, 1, 0, 0.9)),
+        GradientStop(pos: 1.0, color: rgbaf(1, 1, 1, 1))])]
+    var totalDiff = 0
+    for pi, p in paints:
+      for alpha in [1.0, 0.4]:
+        for n in [0, 1, 2, 3, 7, 64]:
+          let x0 = [60, 0, 20][pi]
+          let y = [100, 7, 50][pi]
+          var ctx = bakeMultiBoxCtx(p, alpha)
+          let rowY = float64(y) + 0.5
+          ctx.rowX = float64(x0) + 0.5
+          ctx.m2y = p.map[2] * rowY
+          ctx.m3y = p.map[3] * rowY
+          var dst = newSeq[uint8](n * 4)
+          var cov = newSeq[float64](max(n, 1))
+          for i in 0 ..< dst.len: dst[i] = uint8(rand(255))
+          for i in 0 ..< n: cov[i] = [0.0, 0.25, 0.5, 1.0][rand(3)]
+          var got = dst
+          if n > 0:
+            fn(addr got[0], addr cov[0], int64(n), addr ctx)
+          var surf = newSurface(max(n, 1), 1)
+          surf.pixels.setLen(dst.len)
+          for i, b in dst: surf.pixels[i] = b
+          let aA = clamp01(alpha)
+          for i in 0 ..< n:
+            let col = p.sample(float64(x0 + i) + 0.5, rowY)
+            surf.blendPixel(i, 0,
+              color(col.r, col.g, col.b, col.a * aA), cov[i],
+              coSourceOver)
+          let dd = diffStat(got, surf.pixels)
+          if dd.n > 0 and totalDiff == 0:
+            echo "paint=", pi, " alpha=", alpha, " n=", n, "\n", dd.detail
+          totalDiff += dd.n
+    check totalDiff == 0
+    kern.destroy()
+
+  test "multi-box generic-op kernel matches sample+blend":
+    randomize(60618)
+    const ops = [coSourceIn, coSourceOut, coAtop, coDestinationOver,
+      coDestinationIn, coDestinationOut, coDestinationAtop, coLighter,
+      coCopy, coXor, coMultiply, coScreen, coOverlay, coDarken,
+      coLighten, coColorDodge, coColorBurn, coHardLight, coSoftLight,
+      coDifference, coExclusion, coHue, coSaturation, coColor,
+      coLuminosity]
+    let kern = JitKernels()
+    let p = boxGradientStops(50, 50, 40, 30, 8, 15, [
+      GradientStop(pos: 0.0, color: rgbaf(2.0, -0.5, 0.5, 0.75)),
+      GradientStop(pos: 0.5, color: rgbaf(0.2, 0.4, 0.8, 0.2)),
+      GradientStop(pos: 1.0, color: rgbaf(0, 1, 0, 0.9))])
+    var totalDiff = 0
+    for op in ops:
+      let fn = kern.getMultiBox(op)
+      check fn != nil
+      for alpha in [1.0, 0.4]:
+        for n in [1, 7, 32]:
+          var ctx = bakeMultiBoxCtx(p, alpha)
           let rowY = 50.5
           ctx.rowX = 5.5
           ctx.m2y = p.map[2] * rowY
@@ -1277,7 +1391,8 @@ when defined(amd64):
       coDestinationIn, coDestinationOut, coDestinationAtop, coLighter,
       coCopy, coXor, coMultiply, coScreen, coOverlay, coDarken,
       coLighten, coColorDodge, coColorBurn, coHardLight, coSoftLight,
-      coDifference, coExclusion]
+      coDifference, coExclusion, coHue, coSaturation, coColor,
+      coLuminosity]
     var data = newSeq[uint8](6 * 4 * 4)
     for i in 0 ..< data.len: data[i] = uint8(rand(255))
     let kern = JitKernels()
@@ -1320,7 +1435,8 @@ when defined(amd64):
       coDestinationOver, coDestinationIn, coDestinationOut,
       coDestinationAtop, coLighter, coCopy, coXor, coMultiply, coScreen,
       coOverlay, coDarken, coLighten, coColorDodge, coColorBurn,
-      coHardLight, coSoftLight, coDifference, coExclusion]
+      coHardLight, coSoftLight, coDifference, coExclusion, coHue,
+    coSaturation, coColor, coLuminosity]
     var totalDiff = 0
     for op in ops:
       let d = checkScene(160, 120, proc(c: Canvas) =
@@ -1346,6 +1462,14 @@ when defined(amd64):
         c.setFillPaint(c.radialGradientStops(40, 90, 5, 30,
           [GradientStop(pos: 0.0, color: rgbaf(1, 1, 0, 0.9)),
             GradientStop(pos: 1.0, color: rgbaf(1, 0, 1, 0.2))]))
+        c.setCompositeOp(op)
+        c.fill()
+        c.beginPath()
+        c.rect(90.5, 75.5, 55, 35)
+        c.setFillPaint(c.boxGradientStops(90, 75, 55, 35, 8, 12,
+          [GradientStop(pos: 0.0, color: rgbaf(1, 0, 0, 0.9)),
+            GradientStop(pos: 0.5, color: rgbaf(0, 1, 0, 0.6)),
+            GradientStop(pos: 1.0, color: rgbaf(0, 0, 1, 0.3))]))
         c.setCompositeOp(op)
         c.fill())
       if d.n > 0 and totalDiff == 0:
@@ -1407,6 +1531,10 @@ test "aarch64 generic kernels assemble":
   if genOk(buildSolidRowGenAarch64(coSoftLight)): inc n
   if genOk(buildSolidRowGenAarch64(coDifference)): inc n
   if genOk(buildSolidRowGenAarch64(coExclusion)): inc n
+  if genOk(buildSolidRowGenAarch64(coHue)): inc n
+  if genOk(buildSolidRowGenAarch64(coSaturation)): inc n
+  if genOk(buildSolidRowGenAarch64(coColor)): inc n
+  if genOk(buildSolidRowGenAarch64(coLuminosity)): inc n
   if genOk(buildLinearRowGenAarch64(coAtop)): inc n
   if genOk(buildLinearRowGenAarch64(coMultiply)): inc n
   if genOk(buildLinearRowGenAarch64(coCopy)): inc n
@@ -1419,4 +1547,4 @@ test "aarch64 generic kernels assemble":
   if genOk(buildPatternRowGenAarch64(coAtop)): inc n
   if genOk(buildPatternRowGenAarch64(coMultiply)): inc n
   if genOk(buildPatternRowGenAarch64(coCopy)): inc n
-  check n == 33
+  check n == 37

@@ -118,6 +118,12 @@ when defined(nvgJit):
             fillBoxJit(surf, polys, paint, alpha, clip, fn,
               b.covJit, aa, rule, op)
             return
+        else:
+          let fn = b.kern.getMultiBox(op)
+          if fn != nil:
+            fillMultiBoxJit(surf, polys, paint, alpha, clip, fn,
+              b.covJit, aa, rule, op)
+            return
       of pkPattern:
         if patternRunnable(paint):
           if paint.pattern.img != nil and
@@ -184,6 +190,13 @@ when defined(nvgJit):
           if fn != nil:
             let expanded = expandStroke(polys, width, cap, join, miterLimit)
             fillBoxJit(surf, expanded, paint, alpha, clip, fn,
+              b.covJit, aa, frEvenOdd, op)
+            return
+        else:
+          let fn = b.kern.getMultiBox(op)
+          if fn != nil:
+            let expanded = expandStroke(polys, width, cap, join, miterLimit)
+            fillMultiBoxJit(surf, expanded, paint, alpha, clip, fn,
               b.covJit, aa, frEvenOdd, op)
             return
       of pkPattern:
