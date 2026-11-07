@@ -306,8 +306,8 @@ proc buildSolidRowGenAarch64*(op: CompOp): ExecutableBuffer =
     fmov d26, x4 # W3C Lum G weight
     str d26, [sp, 8]
     movz x4, 0x5C29
-    movk x4, 0x28F5, lsl, 16
-    movk x4, 0xBC28, lsl, 32
+    movk x4, 0xC28F, lsl, 16
+    movk x4, 0x28F5, lsl, 32
     movk x4, 0x3FBC, lsl, 48
     fmov d26, x4 # W3C Lum B weight
     str d26, [sp, 16]
@@ -766,8 +766,8 @@ proc buildLinearRowGenAarch64*(op: CompOp): ExecutableBuffer =
     fmov d26, x4 # W3C Lum G weight
     str d26, [sp, 8]
     movz x4, 0x5C29
-    movk x4, 0x28F5, lsl, 16
-    movk x4, 0xBC28, lsl, 32
+    movk x4, 0xC28F, lsl, 16
+    movk x4, 0x28F5, lsl, 32
     movk x4, 0x3FBC, lsl, 48
     fmov d26, x4 # W3C Lum B weight
     str d26, [sp, 16]
@@ -1271,8 +1271,8 @@ proc buildRadialRowGenAarch64*(op: CompOp): ExecutableBuffer =
     fmov d26, x4 # W3C Lum G weight
     str d26, [sp, 8]
     movz x4, 0x5C29
-    movk x4, 0x28F5, lsl, 16
-    movk x4, 0xBC28, lsl, 32
+    movk x4, 0xC28F, lsl, 16
+    movk x4, 0x28F5, lsl, 32
     movk x4, 0x3FBC, lsl, 48
     fmov d26, x4 # W3C Lum B weight
     str d26, [sp, 16]
@@ -1832,8 +1832,8 @@ proc buildBoxRowGenAarch64*(op: CompOp): ExecutableBuffer =
     fmov d26, x4 # W3C Lum G weight
     str d26, [sp, 8]
     movz x4, 0x5C29
-    movk x4, 0x28F5, lsl, 16
-    movk x4, 0xBC28, lsl, 32
+    movk x4, 0xC28F, lsl, 16
+    movk x4, 0x28F5, lsl, 32
     movk x4, 0x3FBC, lsl, 48
     fmov d26, x4 # W3C Lum B weight
     str d26, [sp, 16]
@@ -2641,8 +2641,8 @@ proc buildPatternRowGenAarch64*(op: CompOp): ExecutableBuffer =
     fmov d26, x4 # W3C Lum G weight
     str d26, [sp, 8]
     movz x4, 0x5C29
-    movk x4, 0x28F5, lsl, 16
-    movk x4, 0xBC28, lsl, 32
+    movk x4, 0xC28F, lsl, 16
+    movk x4, 0x28F5, lsl, 32
     movk x4, 0x3FBC, lsl, 48
     fmov d26, x4 # W3C Lum B weight
     str d26, [sp, 16]
