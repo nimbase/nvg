@@ -336,3 +336,50 @@ test "compute nearest pattern matches cpu within 1 lsb":
         check maxDiff <= 1
   else:
     skip()
+
+test "cpu box blur hand computed":
+  var s = newSurface(5, 5)
+  s.clear(rgbf(0, 0, 0))
+  s.setPixel(2, 2, rgbf(1, 1, 1))
+  s.boxBlur(1)
+  # Horizontal: row 2 becomes [0, 85, 85, 85, 0]; vertical folds to
+  # (255+1)/9-style thirds: (0+85+0+1)/3 = 28 at the cross.
+  check s.getPixel(2, 2).toRgba8() == (28u8, 28u8, 28u8, 255u8)
+  check s.getPixel(1, 2).toRgba8() == (28u8, 28u8, 28u8, 255u8)
+  check s.getPixel(2, 1).toRgba8() == (28u8, 28u8, 28u8, 255u8)
+  check s.getPixel(0, 0).toRgba8() == (0u8, 0u8, 0u8, 255u8)
+  check s.getPixel(4, 2).toRgba8() == (0u8, 0u8, 0u8, 255u8)
+  var flat = newSurface(4, 3)
+  flat.clear(rgbf(0.5, 0.25, 1.0))
+  flat.boxBlur(2)
+  check flat.getPixel(1, 1).toRgba8() == (128u8, 64u8, 255u8, 255u8)
+  var noop = newSurface(2, 2)
+  noop.clear(rgbf(1, 0, 0))
+  noop.boxBlur(0)
+  check noop.getPixel(0, 0).toRgba8() == (255u8, 0u8, 0u8, 255u8)
+
+test "compute box blur is byte-identical to cpu":
+  when defined(macosx):
+    if not mtlAvailable():
+      skip()
+    const W = 9
+    const H = 7
+    var s = newSurface(W, H)
+    for y in 0 ..< H:
+      for x in 0 ..< W:
+        s.setPixel(x, y, rgbaf(float64((x * 37 + y * 91) mod 256) / 255.0,
+          float64((x * 53 + y * 29) mod 256) / 255.0,
+          float64((x * 11 + y * 71) mod 256) / 255.0,
+          float64((x * 17 + y * 13) mod 256) / 255.0))
+    var ctx = newMetalCtx(W, H)
+    defer: ctx.close()
+    for radius in [1, 2, 3]:
+      var cpu = newSurface(W, H)
+      for i in 0 ..< s.pixels.len:
+        cpu.pixels[i] = s.pixels[i]
+      cpu.boxBlur(radius)
+      ctx.upload(s.pixels)
+      ctx.boxBlur(radius)
+      check ctx.readback() == cpu.pixels
+  else:
+    skip()

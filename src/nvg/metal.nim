@@ -45,6 +45,8 @@ const
   MSlotBlend* = 5
   MSlotShadeSolidOver* = 6
   MSlotPattern* = 7
+  MSlotBlurH* = 8
+  MSlotBlurV* = 9
 
 const solidMsl* = """
 #include <metal_stdlib>
@@ -388,6 +390,62 @@ type PatternParams* = object
   imgW*, imgH*: cuint
   flags*: cuint
 
+const blurMsl* = """
+#include <metal_stdlib>
+using namespace metal;
+// Separable box blur, integer math mirroring scalar `boxBlur`: clamped
+// edges, round-half-up `(sum + n/2)/n` with odd n, so output is
+// byte-identical to the CPU. Horizontal pass reads pixels and writes
+// the aux buffer as bytes; vertical pass reads aux and writes pixels.
+struct BlurP { int radius; };
+kernel void blur_h(device uchar4 *src [[buffer(0)]],
+                   constant BlurP &u [[buffer(1)]],
+                   constant uint2 &dims [[buffer(2)]],
+                   device uchar4 *tmp [[buffer(3)]],
+                   uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= dims.x || gid.y >= dims.y) return;
+  int r = u.radius;
+  int n = 2 * r + 1;
+  uint3 acc = uint3(0);
+  uint accA = 0u;
+  for (int k = -r; k <= r; k++) {
+    int xx = clamp(int(gid.x) + k, 0, int(dims.x) - 1);
+    uchar4 t = src[gid.y * dims.x + uint(xx)];
+    acc += uint3(t.r, t.g, t.b);
+    accA += uint(t.a);
+  }
+  uint den = uint(n);
+  uint3 c = (acc + den / 2u) / den;
+  uint a = (accA + den / 2u) / den;
+  tmp[gid.y * dims.x + gid.x] = uchar4(uchar3(c), uchar(a));
+}
+kernel void blur_v(device uchar4 *dst [[buffer(0)]],
+                   constant BlurP &u [[buffer(1)]],
+                   constant uint2 &dims [[buffer(2)]],
+                   device uchar4 *tmp [[buffer(3)]],
+                   uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= dims.x || gid.y >= dims.y) return;
+  int r = u.radius;
+  int n = 2 * r + 1;
+  uint3 acc = uint3(0);
+  uint accA = 0u;
+  for (int k = -r; k <= r; k++) {
+    int yy = clamp(int(gid.y) + k, 0, int(dims.y) - 1);
+    uchar4 t = tmp[uint(yy) * dims.x + gid.x];
+    acc += uint3(t.r, t.g, t.b);
+    accA += uint(t.a);
+  }
+  uint den = uint(n);
+  uint3 c = (acc + den / 2u) / den;
+  uint a = (accA + den / 2u) / den;
+  dst[gid.y * dims.x + gid.x] = uchar4(uchar3(c), uchar(a));
+}
+"""
+
+type BlurParams* = object
+  ## Must match MSL `BlurP` layout (4 bytes).
+  radius*: cint
+
 static:
   doAssert sizeof(LinearParams) == 48
   doAssert sizeof(RadialParams) == 48
@@ -395,6 +453,7 @@ static:
   doAssert sizeof(BlendParams) == 24
   doAssert sizeof(ShadeParams) == 20
   doAssert sizeof(PatternParams) == 52
+  doAssert sizeof(BlurParams) == 4
 
 when defined(macosx):
   proc nvgmtl_device_count(): cint {.importc.}
@@ -447,6 +506,8 @@ proc newMetalCtx*(w, h: int): MetalCtx =
       result.buildSlot(MSlotShadeSolidOver, shadeSolidOverMsl,
         "shade_solid_over")
       result.buildSlot(MSlotPattern, patternMsl, "fill_pattern_nearest")
+      result.buildSlot(MSlotBlurH, blurMsl, "blur_h")
+      result.buildSlot(MSlotBlurV, blurMsl, "blur_v")
     except IOError:
       nvgmtl_destroy(p)
       result.p = nil
@@ -549,6 +610,16 @@ proc fillPatternNearest*(ctx: MetalCtx, ox, oy, ex, ey,
       angle: cfloat(angle), pad: cfloat(0),
       imgW: cuint(img.w), imgH: cuint(img.h), flags: cuint(flags))
     nvgmtl_fill(ctx.p, cint(MSlotPattern), addr u, cint(sizeof(u)))
+
+proc boxBlur*(ctx: MetalCtx, radius: int) =
+  ## Separable box blur mirroring scalar `boxBlur`: horizontal pass
+  ## into aux, vertical pass back into pixels. Integer math, so
+  ## byte-identical to the CPU. Non-positive radii are a no-op.
+  when defined(macosx):
+    if radius <= 0: return
+    var u = BlurParams(radius: cint(radius))
+    nvgmtl_fill(ctx.p, cint(MSlotBlurH), addr u, cint(sizeof(u)))
+    nvgmtl_fill(ctx.p, cint(MSlotBlurV), addr u, cint(sizeof(u)))
 
 proc compBlend*(ctx: MetalCtx, op: CompOp, r, g, b, a,
     cov: float64) =

@@ -116,6 +116,9 @@ void nvgmtl_fill(void *p, int slot, const void *params, int paramslen) {
     if (params != NULL && paramslen > 0)
       [ce setBytes:params length:(NSUInteger)paramslen atIndex:1];
     [ce setBytes:dims length:sizeof(dims) atIndex:2];
+    // Aux doubles as full-size byte scratch (e.g. the blur passes
+    // ping-pong RGBA8 through it); kernels that ignore buffer(3)
+    // simply never declare it.
     [ce setBuffer:c->bufs[1] offset:0 atIndex:3];
     [ce setTexture:c->pat atIndex:0];
     NSUInteger tx = (NSUInteger)c->w < 16 ? (NSUInteger)c->w : 16;

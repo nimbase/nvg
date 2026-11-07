@@ -510,3 +510,45 @@ proc savePng*(s: Surface, path: string) =
   defer: f.close()
   if bytes.len > 0:
     discard f.writeBytes(bytes, 0, bytes.len)
+
+proc boxBlur*(s: Surface, radius: int) =
+  ## Separable channel-independent box blur (window `2*radius+1`),
+  ## clamped edges, round-half-up integer math. Alpha blurs like any
+  ## channel: fast but halos at transparent edges are the documented
+  ## tradeoff (halo-free edges need premultiplied resampling instead).
+  ## Non-positive radii are a no-op. The Metal mirror uses the same
+  ## integer formula, so it is byte-identical.
+  if radius <= 0 or s.w <= 0 or s.h <= 0: return
+  let n = 2 * radius + 1
+  let half = n div 2
+  var tmp = newSeq[uint8](s.pixels.len)
+  for y in 0 ..< s.h:
+    for x in 0 ..< s.w:
+      var sr, sg, sb, sa = 0
+      for k in -radius .. radius:
+        let xx = clamp(x + k, 0, s.w - 1)
+        let i = (y * s.w + xx) * 4
+        sr += int(s.pixels[i])
+        sg += int(s.pixels[i + 1])
+        sb += int(s.pixels[i + 2])
+        sa += int(s.pixels[i + 3])
+      let o = (y * s.w + x) * 4
+      tmp[o] = uint8((sr + half) div n)
+      tmp[o + 1] = uint8((sg + half) div n)
+      tmp[o + 2] = uint8((sb + half) div n)
+      tmp[o + 3] = uint8((sa + half) div n)
+  for y in 0 ..< s.h:
+    for x in 0 ..< s.w:
+      var sr, sg, sb, sa = 0
+      for k in -radius .. radius:
+        let yy = clamp(y + k, 0, s.h - 1)
+        let i = (yy * s.w + x) * 4
+        sr += int(tmp[i])
+        sg += int(tmp[i + 1])
+        sb += int(tmp[i + 2])
+        sa += int(tmp[i + 3])
+      let o = (y * s.w + x) * 4
+      s.pixels[o] = uint8((sr + half) div n)
+      s.pixels[o + 1] = uint8((sg + half) div n)
+      s.pixels[o + 2] = uint8((sb + half) div n)
+      s.pixels[o + 3] = uint8((sa + half) div n)
