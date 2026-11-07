@@ -26,3 +26,4 @@
 # | `text.nim`      | sizes, 3x4 alignment grid, spacing, line height, paints |
 # | `images.nim`    | image file loading into pattern paints           |
 # | `gpu.nim`       | all features through the Metal backend + blur      |
+# | `kaleidoscope.nim` | mirrored photo wedges, medallion, rings          |
