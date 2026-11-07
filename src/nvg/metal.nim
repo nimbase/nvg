@@ -34,6 +34,7 @@ const
   MSlotSolidOver* = 2
   MSlotRadial* = 3
   MSlotBox* = 4
+  MSlotBlend* = 5
 
 const solidMsl* = """
 #include <metal_stdlib>
@@ -144,10 +145,159 @@ type BoxParams* = object
   c0*: array[4, cfloat]
   c1*: array[4, cfloat]
 
+const blendMsl* = """
+#include <metal_stdlib>
+using namespace metal;
+// Op ordinals must match nvg CompOp order: 0 SourceOver, 1 SourceIn,
+// 2 SourceOut, 3 Atop, 4 DestinationOver, 5 DestinationIn,
+// 6 DestinationOut, 7 DestinationAtop, 8 Lighter, 9 Copy, 10 Xor,
+// 11 Multiply, 12 Screen, 13 Overlay, 14 Darken, 15 Lighten,
+// 16 ColorDodge, 17 ColorBurn, 18 HardLight, 19 SoftLight,
+// 20 Difference, 21 Exclusion, 22 Hue, 23 Saturation, 24 Color,
+// 25 Luminosity.
+float mblend(uint op, float cs, float cb) {
+  switch (op) {
+    case 11: return cs * cb;
+    case 12: return cs + cb - cs * cb;
+    case 13:
+      return cb <= 0.5 ? 2.0 * cs * cb
+                       : 1.0 - 2.0 * (1.0 - cs) * (1.0 - cb);
+    case 14: return min(cs, cb);
+    case 15: return max(cs, cb);
+    case 16:
+      if (cs <= 0.0) return 0.0;
+      if (cb >= 1.0) return 1.0;
+      return min(1.0, cs / (1.0 - cb));
+    case 17:
+      if (cs >= 1.0) return 1.0;
+      if (cb <= 0.0) return 0.0;
+      return 1.0 - min(1.0, (1.0 - cs) / cb);
+    case 18:
+      return cs <= 0.5 ? 2.0 * cs * cb
+                       : 1.0 - 2.0 * (1.0 - cs) * (1.0 - cb);
+    case 19: {
+      if (cs <= 0.5) return cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb);
+      float d = cb <= 0.25 ? ((16.0 * cb - 12.0) * cb + 4.0) * cb
+                           : sqrt(cb);
+      return cb + (2.0 * cs - 1.0) * (d - cb);
+    }
+    case 20: return abs(cs - cb);
+    default: return cs + cb - 2.0 * cs * cb;
+  }
+}
+float mlum(float3 c) { return 0.3 * c.r + 0.59 * c.g + 0.11 * c.b; }
+float3 mclip(float3 c) {
+  float l = mlum(c);
+  float n = min(c.r, min(c.g, c.b));
+  float x = max(c.r, max(c.g, c.b));
+  float3 r = c;
+  if (n < 0.0) r = l + ((c - l) * l / (l - n));
+  if (x > 1.0) r = l + ((r - l) * (1.0 - l) / (x - l));
+  return r;
+}
+float3 msetlum(float3 c, float l) {
+  float d = l - mlum(c);
+  return mclip(c + d);
+}
+float msat(float3 c) {
+  return max(c.r, max(c.g, c.b)) - min(c.r, min(c.g, c.b));
+}
+float3 msetsat(float3 c, float s) {
+  float vals[3] = {c.r, c.g, c.b};
+  float mx = max(c.r, max(c.g, c.b));
+  float mn = min(c.r, min(c.g, c.b));
+  if (mx == mn) return float3(0.0);
+  int iMax = c.r == mx ? 0 : (c.g == mx ? 1 : 2);
+  int iMin = c.r == mn ? 0 : (c.g == mn ? 1 : 2);
+  int iMid = 3 - iMax - iMin;
+  float o[3] = {0.0, 0.0, 0.0};
+  o[iMax] = s;
+  o[iMid] = ((vals[iMid] - vals[iMin]) * s) / (vals[iMax] - vals[iMin]);
+  return float3(o[0], o[1], o[2]);
+}
+struct BlendP { float4 col; uint op; float cov; };
+kernel void comp_blend(device uchar4 *io [[buffer(0)]],
+                       constant BlendP &u [[buffer(1)]],
+                       constant uint2 &dims [[buffer(2)]],
+                       uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= dims.x || gid.y >= dims.y) return;
+  uint i = gid.y * dims.x + gid.x;
+  float4 dd = float4(io[i]) * (1.0 / 255.0);
+  float3 sr3 = u.col.rgb;
+  float sa = clamp(u.col.a, 0.0, 1.0) * clamp(u.cov, 0.0, 1.0);
+  if (u.op == 0u) {
+    if (sa <= 0.0) return;
+    float inv = 1.0 - sa;
+    float3 rgb = sr3 * sa + dd.rgb * inv;
+    float a = sa + dd.a * inv;
+    io[i] = uchar4(saturate(float4(rgb, a)) * 255.0 + 0.5);
+    return;
+  }
+  float3 csr = sr3 * sa;
+  float3 cdr = dd.rgb * dd.a;
+  float da = dd.a;
+  float3 cor;
+  float ao;
+  switch (u.op) {
+    case 1: cor = csr * da; ao = sa * da; break;
+    case 2: cor = csr * (1.0 - da); ao = sa * (1.0 - da); break;
+    case 3: cor = csr * da + cdr * (1.0 - sa); ao = da; break;
+    case 4: cor = csr * (1.0 - da) + cdr; ao = sa + da * (1.0 - sa); break;
+    case 5: cor = cdr * sa; ao = da * sa; break;
+    case 6: cor = cdr * (1.0 - sa); ao = da * (1.0 - sa); break;
+    case 7: cor = csr * (1.0 - da) + cdr * sa; ao = sa; break;
+    case 8:
+      cor = csr + cdr;
+      ao = min(1.0, sa + da);
+      break;
+    case 9: cor = csr; ao = sa; break;
+    case 10:
+      cor = csr * (1.0 - da) + cdr * (1.0 - sa);
+      ao = sa + da - 2.0 * sa * da;
+      break;
+    default: {
+      float3 br = float3(mblend(u.op, sr3.r, dd.r),
+                         mblend(u.op, sr3.g, dd.g),
+                         mblend(u.op, sr3.b, dd.b));
+      if (u.op >= 22u) {
+        float3 sc = sr3;
+        float3 dc = dd.rgb;
+        if (u.op == 22u) {
+          br = msetlum(msetsat(sc, msat(dc)), mlum(dc));
+        } else if (u.op == 23u) {
+          br = msetlum(msetsat(dc, msat(sc)), mlum(dc));
+        } else if (u.op == 24u) {
+          br = msetlum(sc, mlum(dc));
+        } else {
+          br = msetlum(dc, mlum(sc));
+        }
+      }
+      cor = (1.0 - da) * sa * sr3 + (1.0 - sa) * da * dd.rgb + sa * da * br;
+      ao = sa + da * (1.0 - sa);
+      break;
+    }
+  }
+  uchar4 res;
+  if (ao <= 1e-6) {
+    res = uchar4(0, 0, 0, 0);
+  } else {
+    res = uchar4(saturate(float4(cor / ao, ao)) * 255.0 + 0.5);
+  }
+  io[i] = res;
+}
+"""
+
+type BlendParams* = object
+  ## Must match MSL `BlendP` layout: col, op, cov (24 bytes).
+  col*: array[4, cfloat]
+  op*: cuint
+  cov*: cfloat
+
 static:
   doAssert sizeof(LinearParams) == 48
   doAssert sizeof(RadialParams) == 48
   doAssert sizeof(BoxParams) == 64
+  doAssert sizeof(BlendParams) == 24
 
 when defined(macosx):
   proc nvgmtl_device_count(): cint {.importc.}
@@ -192,6 +342,7 @@ proc newMetalCtx*(w, h: int): MetalCtx =
       result.buildSlot(MSlotSolidOver, solidOverMsl, "comp_solid_over")
       result.buildSlot(MSlotRadial, radialMsl, "fill_radial")
       result.buildSlot(MSlotBox, boxMsl, "fill_box")
+      result.buildSlot(MSlotBlend, blendMsl, "comp_blend")
     except IOError:
       nvgmtl_destroy(p)
       result.p = nil
@@ -245,6 +396,18 @@ proc upload*(ctx: MetalCtx, pixels: openArray[uint8]) =
     if pixels.len != ctx.w * ctx.h * 4:
       raise newException(ValueError, "upload size mismatch")
     nvgmtl_upload(ctx.p, unsafeAddr pixels[0])
+
+proc compBlend*(ctx: MetalCtx, op: CompOp, r, g, b, a,
+    cov: float64) =
+  ## Composite a straight color onto the buffer under any `CompOp`,
+  ## mirroring scalar `blendPixel`. `cov` scales the source alpha like
+  ## the rasterizer coverage mask. Ordinal is passed through, so new
+  ## appended ops work without bridge changes.
+  when defined(macosx):
+    var u = BlendParams(
+      col: [cfloat(r), cfloat(g), cfloat(b), cfloat(a)],
+      op: cuint(ord(op)), cov: cfloat(cov))
+    nvgmtl_fill(ctx.p, cint(MSlotBlend), addr u, cint(sizeof(u)))
 
 proc compSolidOver*(ctx: MetalCtx, r, g, b, a: float64) =
   ## Source-over composite of a straight color onto the buffer content,

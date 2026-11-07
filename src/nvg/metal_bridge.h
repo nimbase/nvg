@@ -12,7 +12,7 @@ extern "C" {
 #endif
 
 // Pipeline slots (index into the context's pipeline table).
-#define NVGMTL_SLOTS 5
+#define NVGMTL_SLOTS 6
 
 // Number of Metal devices, or 0 when Metal is unavailable.
 int nvgmtl_device_count(void);

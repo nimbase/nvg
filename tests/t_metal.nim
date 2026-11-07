@@ -101,6 +101,60 @@ test "compute source-over matches cpu within 1 lsb":
   else:
     skip()
 
+test "compute all blend ops match cpu":
+  when defined(macosx):
+    if not mtlAvailable():
+      skip()
+    const W = 8
+    const H = 8
+    let dstCases = [
+      rgbf(1, 1, 1),
+      rgbf(0, 0, 0),
+      rgbf(1, 0, 0),
+      rgbaf(0, 0, 0, 0),
+      rgbaf(0.2, 0.6, 0.4, 0.5),
+    ]
+    let srcCases = [
+      rgbaf(1, 0, 0, 0.5),
+      rgbaf(1, 1, 1, 1.0),
+      rgbaf(0, 1, 1, 0.75),
+    ]
+    var ctx = newMetalCtx(W, H)
+    defer: ctx.close()
+    for op in low(CompOp) .. high(CompOp):
+      let bar = if ord(op) <= 21: 1 else: 2
+      for dst in dstCases:
+        for src in srcCases:
+          var s = newSurface(W, H)
+          s.clear(dst)
+          let before = s.pixels
+          for y in 0 ..< H:
+            for x in 0 ..< W:
+              s.blendPixel(x, y, src, 1.0, op)
+          ctx.upload(before)
+          ctx.compBlend(op, src.r, src.g, src.b, src.a, 1.0)
+          let got = ctx.readback()
+          var maxDiff = 0
+          for i in 0 ..< got.len:
+            let d = abs(int(got[i]) - int(s.pixels[i]))
+            if d > maxDiff:
+              maxDiff = d
+          check maxDiff <= bar
+    # Coverage scaling through the over path.
+    for cov in [0.0, 0.5]:
+      var s = newSurface(W, H)
+      s.clear(rgbf(0, 0, 1))
+      let before = s.pixels
+      let src = rgbaf(1, 0, 0, 0.8)
+      for y in 0 ..< H:
+        for x in 0 ..< W:
+          s.blendPixel(x, y, src, cov, coSourceOver)
+      ctx.upload(before)
+      ctx.compBlend(coSourceOver, src.r, src.g, src.b, src.a, cov)
+      check ctx.readback() == s.pixels
+  else:
+    skip()
+
 test "compute radial gradient matches cpu within 1 lsb":
   when defined(macosx):
     if not mtlAvailable():
