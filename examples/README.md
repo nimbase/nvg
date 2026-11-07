@@ -27,3 +27,4 @@
 # | `images.nim`    | image file loading into pattern paints           |
 # | `gpu.nim`       | all features through the Metal backend + blur      |
 # | `kaleidoscope.nim` | mirrored photo wedges (CPU, or Metal with nvgMetal) |
+# | `effects.nim`   | mosaic/blur/gauss/sharpen CLI with backend flag     |
