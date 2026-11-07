@@ -9,7 +9,7 @@
 @public
   id<MTLDevice> dev;
   id<MTLCommandQueue> queue;
-  id<MTLComputePipelineState> fillSolid;
+  id<MTLComputePipelineState> pipes[NVGMTL_SLOTS];
   id<MTLBuffer> buf;
   int w;
   int h;
@@ -33,7 +33,7 @@ void *nvgmtl_create(int w, int h) {
     NvgMtlCtx *c = [[NvgMtlCtx alloc] init];
     c->dev = [[all objectAtIndex:0] retain];
     c->queue = [[c->dev newCommandQueue] retain];
-    c->fillSolid = nil;
+    for (int i = 0; i < NVGMTL_SLOTS; i++) c->pipes[i] = nil;
     c->buf = [[c->dev newBufferWithLength:(NSUInteger)(w * h * 4)
                                  options:MTLResourceStorageModeShared] retain];
     if (c->buf == nil) {
@@ -52,54 +52,66 @@ void nvgmtl_destroy(void *p) {
     NvgMtlCtx *c = (NvgMtlCtx *)p;
     [c->dev release];
     [c->queue release];
-    [c->fillSolid release];
+    for (int i = 0; i < NVGMTL_SLOTS; i++) [c->pipes[i] release];
     [c->buf release];
     [c release];
   }
 }
 
-int nvgmtl_build_solid(void *p, const char *src, int len) {
+int nvgmtl_build(void *p, int slot, const char *src, int srclen,
+    const char *name, int namelen) {
   @autoreleasepool {
     NvgMtlCtx *c = (NvgMtlCtx *)p;
-    if (c == NULL || src == NULL || len <= 0) return -1;
+    if (c == NULL || slot < 0 || slot >= NVGMTL_SLOTS) return -1;
+    if (src == NULL || srclen <= 0 || name == NULL || namelen <= 0)
+      return -1;
     NSString *s = [[NSString alloc] initWithBytes:src
-                                           length:(NSUInteger)len
+                                           length:(NSUInteger)srclen
                                          encoding:NSUTF8StringEncoding];
     if (s == nil) return -2;
+    NSString *n =
+        [[NSString alloc] initWithBytes:name length:(NSUInteger)namelen
+                               encoding:NSUTF8StringEncoding];
+    if (n == nil) {
+      [s release];
+      return -2;
+    }
     NSError *err = nil;
     id<MTLLibrary> lib = [c->dev newLibraryWithSource:s options:nil error:&err];
     [s release];
     if (lib == nil) return -3;
-    id<MTLFunction> fn = [lib newFunctionWithName:@"fill_solid"];
+    id<MTLFunction> fn = [lib newFunctionWithName:n];
+    [n release];
     [lib release];
     if (fn == nil) return -4;
     id<MTLComputePipelineState> ps =
         [c->dev newComputePipelineStateWithFunction:fn error:&err];
     [fn release];
     if (ps == nil) return -5;
-    [c->fillSolid release];
-    c->fillSolid = [ps retain];
+    [c->pipes[slot] release];
+    c->pipes[slot] = [ps retain];
     [ps release];
     return 0;
   }
 }
 
-void nvgmtl_fill_solid(void *p, float r, float g, float b, float a) {
+void nvgmtl_fill(void *p, int slot, const void *params, int paramslen) {
   @autoreleasepool {
     NvgMtlCtx *c = (NvgMtlCtx *)p;
-    if (c == NULL || c->fillSolid == nil) return;
-    float col[4] = {r, g, b, a};
+    if (c == NULL || slot < 0 || slot >= NVGMTL_SLOTS) return;
+    if (c->pipes[slot] == nil) return;
     uint32_t dims[2] = {(uint32_t)c->w, (uint32_t)c->h};
     id<MTLCommandBuffer> cb = [c->queue commandBuffer];
     id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
-    [ce setComputePipelineState:c->fillSolid];
+    [ce setComputePipelineState:c->pipes[slot]];
     [ce setBuffer:c->buf offset:0 atIndex:0];
-    [ce setBytes:col length:sizeof(col) atIndex:1];
+    if (params != NULL && paramslen > 0)
+      [ce setBytes:params length:(NSUInteger)paramslen atIndex:1];
     [ce setBytes:dims length:sizeof(dims) atIndex:2];
-    NSUInteger n = (NSUInteger)(c->w * c->h);
-    NSUInteger tg = n < 256 ? n : 256;
-    [ce dispatchThreads:MTLSizeMake(n, 1, 1)
-        threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+    NSUInteger tx = (NSUInteger)c->w < 16 ? (NSUInteger)c->w : 16;
+    NSUInteger ty = (NSUInteger)c->h < 16 ? (NSUInteger)c->h : 16;
+    [ce dispatchThreads:MTLSizeMake((NSUInteger)c->w, (NSUInteger)c->h, 1)
+        threadsPerThreadgroup:MTLSizeMake(tx, ty, 1)];
     [ce endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
