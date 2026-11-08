@@ -28,3 +28,4 @@
 # | `gpu.nim`       | all features through the Metal backend + blur      |
 # | `kaleidoscope.nim` | mirrored photo wedges (CPU, or Metal with nvgMetal) |
 # | `effects.nim`   | mosaic/blur/gauss/sharpen CLI with backend flag     |
+# | `midsummer.nim` | A4 book pages of Midsummer II.1 with line guides    |
