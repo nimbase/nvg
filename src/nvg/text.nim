@@ -14,15 +14,25 @@
 ## - Glyph ink uses the nonzero fill rule (TrueType holes rely on contour
 ##   direction, which even-odd also handles, but nonzero is spec-correct).
 ## - Multiline means explicit `\n` breaks (split before shaping, so
-##   shaping never sees the newline). No automatic word wrap yet.
+##   shaping never sees the newline). `wrapParagraph` adds greedy word
+##   wrap to a width; `fillTextBox` (canvas) combines wrap, justify,
+##   fit, overflow and box-relative vertical alignment.
 ## - Horizontal layout only: vertical scripts fall back to horizontal
 ##   advances. COLR/CPAL color emoji is out of scope (harfnim has no color
 ##   tables); such glyphs draw nothing but still advance.
 ## - Vertical alignment is relative to measured ink (union of placed
 ##   glyph extents), not font ascent/descent (harfnim exposes no hhea
 ##   metrics accessor yet).
+## - `thaJustify` spreads words with spaces to a box width (a
+##   word-space feature: CJK runs without spaces do not spread, and
+##   mixed-direction lines lay words out in logical order). Outside a
+##   box it anchors like left.
+## - Line height is either a font-size multiplier or an absolute px
+##   value (`lineHeightAbs`); the two are kept distinct, absolute wins.
 
 import std/options
+import std/strutils
+import std/unicode
 import ./types
 import ./path
 import harfnim
@@ -44,12 +54,42 @@ type
     thaLeft
     thaCenter
     thaRight
+    thaJustify
+      ## Spread space-separated words to a box width (box APIs only;
+      ## anchors like left everywhere else).
 
   TextVAlign* = enum
     tvaBaseline
     tvaTop
     tvaMiddle
     tvaBottom
+
+  TextFit* = enum
+    tfNone
+      ## Keep the requested size even if lines exceed the box.
+    tfShrink
+      ## Shrink the font (whole pixels) until the wrapped natural
+      ## layout fits the box width. Never grows.
+    tfStretch
+      ## Grow the font (whole pixels) until the wrapped natural layout
+      ## fills the box width. Never shrinks below the requested size.
+
+  TextOverflow* = enum
+    toVisible
+      ## Draw everything, even past the box edges.
+    toClip
+      ## Clip drawing to the box rect (box APIs only).
+    toEllipsis
+      ## Trim over-wide lines and append "…" to fit the box width.
+
+  TextMetrics* = object
+    advance*: float64
+      ## Widest line advance (post scaleX).
+    width*, height*: float64
+      ## Measured ink bounds size.
+    lineCount*: int
+    sizePx*: float64
+      ## Font size laid out (post fit).
 
   PlacedGlyph* = object
     gid*: uint32
@@ -141,19 +181,23 @@ proc shapeLine*(font: TextFont, sizePx: float64, line: string,
 
 proc layoutText*(font: TextFont, sizePx: float64, s: string,
     letterSpacing = 0.0, lineHeightMul = 1.2,
-    features: openArray[Feature] = []): TextLayout =
+    features: openArray[Feature] = [],
+    lineHeightAbs = 0.0): TextLayout =
   ## Shape every `\n`-separated line. A nil font yields empty lines
-  ## (callers draw nothing and measure zero).
+  ## (callers draw nothing and measure zero). `lineHeightAbs > 0`
+  ## overrides the multiplier with an absolute baseline step in px.
   let px = max(1.0, sizePx)
+  let step = if lineHeightAbs > 0.0: lineHeightAbs
+    else: px * max(0.0, lineHeightMul)
   result = TextLayout(font: font, lines: @[], sizePx: px,
-    lineHeightPx: px * max(0.0, lineHeightMul))
+    lineHeightPx: step)
   for line in splitTextLines(s):
     result.lines.add(shapeLine(font, px, line, letterSpacing, features))
 
 proc linePenX*(advance: float64, ha: TextHAlign): float64 =
   ## Per-line pen start relative to the anchor x.
   case ha
-  of thaLeft: 0.0
+  of thaLeft, thaJustify: 0.0
   of thaCenter: -advance * 0.5
   of thaRight: -advance
 
@@ -207,6 +251,116 @@ proc valignShift*(lay: TextLayout, ha: TextHAlign,
   of tvaTop: -ink.y0
   of tvaMiddle: -(ink.y0 + ink.y1) * 0.5
   of tvaBottom: -ink.y1
+
+proc measureLayout*(lay: TextLayout, ha: TextHAlign): TextMetrics =
+  ## Widest advance, ink size and line count for an already shaped
+  ## layout. Anchor-free: alignment never changes these fields.
+  var adv = 0.0
+  for line in lay.lines:
+    adv = max(adv, line.advance)
+  let b = layoutBounds(lay, ha)
+  TextMetrics(advance: adv, width: b.w, height: b.h,
+    lineCount: lay.lines.len, sizePx: lay.sizePx)
+
+proc withScaleX*(lay: TextLayout, sx: float64): TextLayout =
+  ## Copy with every horizontal pen/ink coordinate scaled by `sx`
+  ## (geometric condensed/extended rendering; `sx <= 0` draws nothing).
+  ## Vertical metrics are untouched.
+  let k = max(0.0, sx)
+  result = TextLayout(font: lay.font, lines: @[], sizePx: lay.sizePx,
+    lineHeightPx: lay.lineHeightPx)
+  for line in lay.lines:
+    var nl = ShapedLine(glyphs: @[], advance: line.advance * k)
+    for g in line.glyphs:
+      var gg = g
+      gg.x *= k
+      if gg.hasInk:
+        gg.x0 *= k
+        gg.x1 *= k
+      nl.glyphs.add(gg)
+    result.lines.add(nl)
+
+proc wrapParagraph*(font: TextFont, sizePx: float64, para: string,
+    letterSpacing: float64, maxW: float64,
+    features: openArray[Feature]): seq[string] =
+  ## Greedy word wrap of one `\n`-free paragraph to `maxW`, measured
+  ## with the real shaper. Runs of spaces collapse; an over-wide
+  ## single word gets its own line.
+  result = @[]
+  var line = ""
+  for w in para.split(' '):
+    if w.len == 0:
+      continue
+    let trial = if line == "": w else: line & " " & w
+    if shapeLine(font, sizePx, trial, letterSpacing,
+        features).advance <= maxW or line == "":
+      line = trial
+    else:
+      result.add(line)
+      line = w
+  if line != "":
+    result.add(line)
+  if result.len == 0:
+    result.add("")
+
+proc justifyLine*(font: TextFont, sizePx: float64, line: string,
+    letterSpacing: float64, boxW: float64,
+    features: openArray[Feature]): ShapedLine =
+  ## Spread the words of `line` so the advance equals `boxW`, keeping
+  ## intra-word shaping (kerning, letter spacing) intact. Single words
+  ## and already-over-wide lines come back plainly shaped.
+  var words: seq[string] = @[]
+  for w in line.split(' '):
+    if w.len > 0:
+      words.add(w)
+  if words.len < 2:
+    return shapeLine(font, sizePx, line, letterSpacing, features)
+  let spaceAdv = shapeLine(font, sizePx, " ", letterSpacing,
+    features).advance
+  var shaped: seq[ShapedLine] = @[]
+  var natural = 0.0
+  for w in words:
+    let s = shapeLine(font, sizePx, w, letterSpacing, features)
+    shaped.add(s)
+    natural += s.advance
+  natural += spaceAdv * float64(words.len - 1)
+  if natural >= boxW:
+    return shapeLine(font, sizePx, line, letterSpacing, features)
+  let gap = spaceAdv + (boxW - natural) / float64(words.len - 1)
+  result = ShapedLine(glyphs: @[], advance: boxW)
+  var pen = 0.0
+  for s in shaped:
+    for g in s.glyphs:
+      var gg = g
+      gg.x += pen
+      if gg.hasInk:
+        gg.x0 += pen
+        gg.x1 += pen
+      result.glyphs.add(gg)
+    pen += s.advance + gap
+
+proc ellipsizeLine*(font: TextFont, sizePx: float64, line: string,
+    letterSpacing: float64, maxW: float64,
+    features: openArray[Feature]): ShapedLine =
+  ## Trim trailing runes and append "…" until the line fits `maxW`.
+  ## Fits already: plain shaping. Nothing fits (even "…" alone):
+  ## an empty line.
+  if maxW <= 0.0:
+    return ShapedLine(glyphs: @[], advance: 0.0)
+  var shaped = shapeLine(font, sizePx, line, letterSpacing, features)
+  if shaped.advance <= maxW:
+    return shaped
+  var runes = line.toRunes()
+  while runes.len > 0:
+    runes.setLen(runes.len - 1)
+    shaped = shapeLine(font, sizePx, $runes & "…", letterSpacing,
+      features)
+    if shaped.advance <= maxW:
+      return shaped
+  shaped = shapeLine(font, sizePx, "…", letterSpacing, features)
+  if shaped.advance <= maxW:
+    return shaped
+  ShapedLine(glyphs: @[], advance: 0.0)
 
 proc appendLayout*(p: var Path, xf: Xform, lay: TextLayout, x, y: float64,
     ha: TextHAlign, va: TextVAlign) =

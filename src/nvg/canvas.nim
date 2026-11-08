@@ -45,6 +45,7 @@ type
     textVAlign*: TextVAlign
     letterSpacing*: float64
     lineHeightMul*: float64
+    lineHeightAbs*: float64
 
   Canvas* = ref object
     surf*: Surface
@@ -67,7 +68,7 @@ proc defaultState*(): DrawState =
     dashOffset: 0.0, alpha: 1.0,
     clip: Clip(enabled: false), compOp: coSourceOver, fontFace: 0,
     fontSize: 16.0, textHAlign: thaLeft, textVAlign: tvaBaseline,
-    letterSpacing: 0.0, lineHeightMul: 1.2)
+    letterSpacing: 0.0, lineHeightMul: 1.2, lineHeightAbs: 0.0)
 
 proc newCanvas*(w, h: int, backend: Backend = nil): Canvas =
   result = Canvas(surf: newSurface(w, h), states: @[defaultState()],
@@ -449,8 +450,16 @@ proc setLetterSpacing*(c: Canvas, px: float64) =
   c.states[^1].letterSpacing = px
 
 proc setLineHeight*(c: Canvas, mul: float64) =
-  ## Line step as a multiple of the font size (default 1.2).
+  ## Line step as a multiple of the font size (default 1.2). Clears
+  ## any absolute line height set by `setLineHeightPx`.
   c.states[^1].lineHeightMul = max(0.0, mul)
+  c.states[^1].lineHeightAbs = 0.0
+
+proc setLineHeightPx*(c: Canvas, px: float64) =
+  ## Absolute baseline-to-baseline step in px, kept distinct from the
+  ## font's own metrics. `0` (default) falls back to the multiplier;
+  ## `setLineHeight` clears this back to `0`.
+  c.states[^1].lineHeightAbs = max(0.0, px)
 
 proc lookupFont(c: Canvas, id: int): TextFont =
   if id in c.fonts: c.fonts[id] else: nil
@@ -495,17 +504,18 @@ proc fillText*(c: Canvas, x, y: float64, s: string,
   ## line advance. Draws nothing when no font is selected.
   let st = c.states[^1]
   let lay = layoutText(c.lookupFont(st.fontFace), st.fontSize, s,
-    st.letterSpacing, st.lineHeightMul, features)
+    st.letterSpacing, st.lineHeightMul, features, st.lineHeightAbs)
   c.paintLayout(lay, x, y, st.textHAlign, st.textVAlign, false)
   widestAdvance(lay)
 
 proc fillText*(c: Canvas, font: TextFont, size: float64, x, y: float64,
     s: string, ha = thaLeft, va = tvaBaseline, letterSpacing = 0.0,
-    lineHeightMul = 1.2,
+    lineHeightMul = 1.2, lineHeightPx = 0.0,
     features: openArray[Feature] = []): float64 =
   ## Stateless overload: explicit font and style, canvas state untouched.
+  ## `lineHeightPx > 0` overrides the multiplier with an absolute step.
   let lay = layoutText(font, size, s, letterSpacing, lineHeightMul,
-    features)
+    features, lineHeightPx)
   c.paintLayout(lay, x, y, ha, va, false)
   widestAdvance(lay)
 
@@ -515,17 +525,17 @@ proc strokeText*(c: Canvas, x, y: float64, s: string,
   ## and return conventions as `fillText`.
   let st = c.states[^1]
   let lay = layoutText(c.lookupFont(st.fontFace), st.fontSize, s,
-    st.letterSpacing, st.lineHeightMul, features)
+    st.letterSpacing, st.lineHeightMul, features, st.lineHeightAbs)
   c.paintLayout(lay, x, y, st.textHAlign, st.textVAlign, true)
   widestAdvance(lay)
 
 proc strokeText*(c: Canvas, font: TextFont, size: float64, x, y: float64,
     s: string, ha = thaLeft, va = tvaBaseline, letterSpacing = 0.0,
-    lineHeightMul = 1.2,
+    lineHeightMul = 1.2, lineHeightPx = 0.0,
     features: openArray[Feature] = []): float64 =
   ## Stateless overload of `strokeText`.
   let lay = layoutText(font, size, s, letterSpacing, lineHeightMul,
-    features)
+    features, lineHeightPx)
   c.paintLayout(lay, x, y, ha, va, true)
   widestAdvance(lay)
 
@@ -534,19 +544,296 @@ proc textBounds*(c: Canvas, x, y: float64, s: string,
   ## Measured ink bounds for stateful text at `(x, y)` (user space).
   let st = c.states[^1]
   let lay = layoutText(c.lookupFont(st.fontFace), st.fontSize, s,
-    st.letterSpacing, st.lineHeightMul, features)
+    st.letterSpacing, st.lineHeightMul, features, st.lineHeightAbs)
   shiftBounds(lay, x, y, st.textHAlign, st.textVAlign)
 
 proc textBounds*(c: Canvas, font: TextFont, size: float64, x, y: float64,
     s: string, ha = thaLeft, va = tvaBaseline, letterSpacing = 0.0,
-    lineHeightMul = 1.2,
+    lineHeightMul = 1.2, lineHeightPx = 0.0,
     features: openArray[Feature] = []): Rect =
   ## Stateless overload of `textBounds` (no drawing).
   let lay = layoutText(font, size, s, letterSpacing, lineHeightMul,
-    features)
+    features, lineHeightPx)
   shiftBounds(lay, x, y, ha, va)
 
-# --- Draw ---
+# --- Text boxes: wrap, justify, fit, overflow, box alignment ---
+
+type BoxLayout* = object
+  lay*: TextLayout
+    ## Final shaped lines (post fit and scaleX).
+  shift*: float64
+    ## Baseline delta placing the block for the box vertical align
+    ## (0 for `tvaBaseline`).
+
+proc naturalBoxLines(font: TextFont, px: float64, s: string,
+    letterSpacing: float64, maxW: float64, wrap: bool,
+    features: openArray[Feature]): seq[tuple[para: int, idx: int,
+      last: int, line: string]] =
+  ## Wrapped physical lines tagged with their paragraph index, index
+  ## within the paragraph, and end-of-paragraph flag (for last-line
+  ## alignment under justify).
+  result = @[]
+  var pi = 0
+  for para in splitTextLines(s):
+    var lines: seq[string] = @[para]
+    if wrap and maxW > 0.0:
+      lines = wrapParagraph(font, px, para, letterSpacing, maxW,
+        features)
+    for i, ln in lines:
+      result.add((pi, i, ord(i == lines.len - 1), ln))
+    inc pi
+
+proc naturalWidest(font: TextFont, px: float64, s: string,
+    letterSpacing: float64, maxW: float64, wrap: bool,
+    features: openArray[Feature], scaleX: float64): float64 =
+  ## Widest natural (unjustified) advance at `px`, post scaleX.
+  let k = max(0.0, scaleX)
+  for wl in naturalBoxLines(font, px, s, letterSpacing, maxW, wrap,
+      features):
+    let a = shapeLine(font, px, wl.line, letterSpacing,
+      features).advance * k
+    result = max(result, a)
+
+proc fitWidthAt(font: TextFont, px: int32, s: string,
+    letterSpacing: float64, maxW: float64, wrap: bool, scaleX: float64,
+    features: openArray[Feature]): float64 =
+  naturalWidest(font, float64(px), s, letterSpacing, maxW, wrap,
+    features, scaleX)
+
+proc fitBoxPx(font: TextFont, sizePx: float64, s: string,
+    letterSpacing: float64, maxW: float64, wrap: bool, fit: TextFit,
+    scaleX: float64, features: openArray[Feature]): float64 =
+  ## Whole-pixel font size after fit (quantized shaping makes integer
+  ## search exact). No fit, non-positive width, or empty text keeps
+  ## the requested size.
+  let px0 = quantizePx(sizePx)
+  if fit == tfNone or maxW <= 0.0:
+    return float64(px0)
+  template w(px: int32): float64 =
+    fitWidthAt(font, px, s, letterSpacing, maxW, wrap, scaleX, features)
+  if w(px0) == 0.0:
+    return float64(px0)
+  case fit
+  of tfNone:
+    float64(px0)
+  of tfShrink:
+    if w(px0) <= maxW:
+      return float64(px0)
+    var lo = 1i32
+    var hi = px0 - 1i32
+    while lo < hi:
+      let mid = (lo + hi + 1i32) div 2i32
+      if w(mid) <= maxW:
+        lo = mid
+      else:
+        hi = mid - 1i32
+    float64(lo)
+  of tfStretch:
+    if w(px0) > maxW:
+      return float64(px0)
+    var hi = px0 + 1i32
+    while w(hi) <= maxW and hi < 8192i32:
+      hi *= 2i32
+    var lo = hi div 2i32
+    while lo < hi:
+      let mid = (lo + hi + 1i32) div 2i32
+      if w(mid) <= maxW:
+        lo = mid
+      else:
+        hi = mid - 1i32
+    float64(lo)
+
+proc layoutBox*(font: TextFont, sizePx: float64, s: string,
+    letterSpacing = 0.0, lineHeightMul = 1.2, lineHeightAbs = 0.0,
+    maxW = 0.0, boxH = 0.0, ha = thaLeft, va = tvaTop, wrap = true,
+    overflow = toVisible, fit = tfNone, scaleX = 1.0,
+    features: openArray[Feature] = []): tuple[lay: TextLayout,
+      shift: float64, sizePx: float64] =
+  ## Lay out `s` in a `maxW` x `boxH` box: wrap paragraphs, justify
+  ## (CSS rule: every line but each paragraph's last, which follows
+  ## `ha`, or left when `ha` itself is justify; a sole line
+  ## justifies), fit the size, trim over-wide lines for ellipsis,
+  ## then scale horizontally. Returns the final layout, the baseline
+  ## shift placing the block for the box vertical align (`va`;
+  ## `tvaBaseline` keeps the first baseline at the box top), and the
+  ## fitted size. Lines come back box-positioned (x relative to the
+  ## box left edge), so draw and measure the returned layout with
+  ## `thaLeft`; `ha` only steers justification here. Pure layout: no
+  ## drawing.
+  let px = fitBoxPx(font, sizePx, s, letterSpacing, maxW, wrap, fit,
+    scaleX, features)
+  let step = if lineHeightAbs > 0.0: lineHeightAbs
+    else: px * max(0.0, lineHeightMul)
+  var lay = TextLayout(font: font, lines: @[], sizePx: px,
+    lineHeightPx: step)
+  for wl in naturalBoxLines(font, px, s, letterSpacing, maxW, wrap,
+      features):
+    var shaped = shapeLine(font, px, wl.line, letterSpacing, features)
+    if overflow == toEllipsis and shaped.advance > maxW and maxW > 0.0:
+      shaped = ellipsizeLine(font, px, wl.line, letterSpacing, maxW,
+        features)
+    elif ha == thaJustify and maxW > 0.0 and
+        (wl.last == 0 or wl.idx == 0):
+      # Non-last lines spread; a paragraph's last line follows the
+      # CSS rule (left here), except a sole line, which justifies.
+      shaped = justifyLine(font, px, wl.line, letterSpacing, maxW,
+        features)
+    lay.lines.add(shaped)
+  lay = lay.withScaleX(scaleX)
+  if maxW > 0.0 and (ha == thaCenter or ha == thaRight):
+    # Box-relative alignment: x is always the box left edge, `ha`
+    # positions lines within [0, maxW]. Over-wide lines spill evenly
+    # (center) or left (right). Left/justify start at the edge.
+    for i in 0 ..< lay.lines.len:
+      let xoff = if ha == thaCenter: (maxW - lay.lines[i].advance) * 0.5
+        else: maxW - lay.lines[i].advance
+      if xoff != 0.0:
+        for j in 0 ..< lay.lines[i].glyphs.len:
+          lay.lines[i].glyphs[j].x += xoff
+          if lay.lines[i].glyphs[j].hasInk:
+            lay.lines[i].glyphs[j].x0 += xoff
+            lay.lines[i].glyphs[j].x1 += xoff
+  var shift = 0.0
+  if va != tvaBaseline:
+    let ink = layoutInk(lay, thaLeft)
+    if ink.found:
+      case va
+      of tvaBaseline:
+        discard
+      of tvaTop:
+        shift = -ink.y0
+      of tvaMiddle:
+        shift = (boxH - (ink.y1 - ink.y0)) * 0.5 - ink.y0
+      of tvaBottom:
+        shift = boxH - ink.y1
+  (lay, shift, px)
+
+proc paintBox(c: Canvas, bl: tuple[lay: TextLayout, shift: float64,
+    sizePx: float64], x, y, w, h: float64, ha: TextHAlign,
+    overflow: TextOverflow, strokeMode: bool) =
+  if overflow == toClip and w > 0.0 and h > 0.0:
+    c.save()
+    c.intersectScissor(x, y, w, h)
+    c.paintLayout(bl.lay, x, y + bl.shift, thaLeft, tvaBaseline, strokeMode)
+    c.restore()
+  else:
+    c.paintLayout(bl.lay, x, y + bl.shift, thaLeft, tvaBaseline, strokeMode)
+
+proc fillTextBox*(c: Canvas, x, y, w, h: float64, s: string,
+    ha = thaLeft, va = tvaTop, wrap = true, overflow = toVisible,
+    fit = tfNone, scaleX = 1.0,
+    features: openArray[Feature] = []): float64 =
+  ## Fill text laid out in the `(x, y, w, h)` box with the state
+  ## font/size/spacing/line-height. `(x, y)` is the box top-left;
+  ## `ha` aligns lines within the box width (`thaJustify` spreads
+  ## words to the box width); `va` aligns the block within the box
+  ## height (`tvaBaseline` anchors the first baseline at `y` instead).
+  ## `toClip` clips paint to the box. Returns the widest drawn
+  ## advance. Draws nothing without a font.
+  let st = c.states[^1]
+  let bl = layoutBox(c.lookupFont(st.fontFace), st.fontSize, s,
+    st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, w, h, ha, va,
+    wrap, overflow, fit, scaleX, features)
+  c.paintBox(bl, x, y, w, h, ha, overflow, false)
+  widestAdvance(bl.lay)
+
+proc fillTextBox*(c: Canvas, font: TextFont, size: float64, x, y, w,
+    h: float64, s: string, ha = thaLeft, va = tvaTop, wrap = true,
+    overflow = toVisible, fit = tfNone, scaleX = 1.0,
+    letterSpacing = 0.0, lineHeightMul = 1.2, lineHeightPx = 0.0,
+    features: openArray[Feature] = []): float64 =
+  ## Stateless overload of `fillTextBox` (no drawing without a font).
+  let bl = layoutBox(font, size, s, letterSpacing, lineHeightMul,
+    lineHeightPx, w, h, ha, va, wrap, overflow, fit, scaleX, features)
+  c.paintBox(bl, x, y, w, h, ha, overflow, false)
+  widestAdvance(bl.lay)
+
+proc strokeTextBox*(c: Canvas, x, y, w, h: float64, s: string,
+    ha = thaLeft, va = tvaTop, wrap = true, overflow = toVisible,
+    fit = tfNone, scaleX = 1.0,
+    features: openArray[Feature] = []): float64 =
+  ## Stroke box text outlines with the current stroke style. Same
+  ## layout and return conventions as `fillTextBox`.
+  let st = c.states[^1]
+  let bl = layoutBox(c.lookupFont(st.fontFace), st.fontSize, s,
+    st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, w, h, ha, va,
+    wrap, overflow, fit, scaleX, features)
+  c.paintBox(bl, x, y, w, h, ha, overflow, true)
+  widestAdvance(bl.lay)
+
+proc strokeTextBox*(c: Canvas, font: TextFont, size: float64, x, y, w,
+    h: float64, s: string, ha = thaLeft, va = tvaTop, wrap = true,
+    overflow = toVisible, fit = tfNone, scaleX = 1.0,
+    letterSpacing = 0.0, lineHeightMul = 1.2, lineHeightPx = 0.0,
+    features: openArray[Feature] = []): float64 =
+  ## Stateless overload of `strokeTextBox`.
+  let bl = layoutBox(font, size, s, letterSpacing, lineHeightMul,
+    lineHeightPx, w, h, ha, va, wrap, overflow, fit, scaleX, features)
+  c.paintBox(bl, x, y, w, h, ha, overflow, true)
+  widestAdvance(bl.lay)
+
+proc textBoxBounds*(c: Canvas, x, y, w, h: float64, s: string,
+    ha = thaLeft, va = tvaTop, wrap = true, overflow = toVisible,
+    fit = tfNone, scaleX = 1.0,
+    features: openArray[Feature] = []): Rect =
+  ## Measured ink bounds for box text at `(x, y)` (user space).
+  let st = c.states[^1]
+  let bl = layoutBox(c.lookupFont(st.fontFace), st.fontSize, s,
+    st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, w, h, ha, va,
+    wrap, overflow, fit, scaleX, features)
+  let b = layoutBounds(bl.lay, thaLeft)
+  rect(x + b.x, y + bl.shift + b.y, b.w, b.h)
+
+proc textBoxBounds*(c: Canvas, font: TextFont, size: float64, x, y, w,
+    h: float64, s: string, ha = thaLeft, va = tvaTop, wrap = true,
+    overflow = toVisible, fit = tfNone, scaleX = 1.0,
+    letterSpacing = 0.0, lineHeightMul = 1.2, lineHeightPx = 0.0,
+    features: openArray[Feature] = []): Rect =
+  ## Stateless overload of `textBoxBounds` (no drawing).
+  let bl = layoutBox(font, size, s, letterSpacing, lineHeightMul,
+    lineHeightPx, w, h, ha, va, wrap, overflow, fit, scaleX, features)
+  let b = layoutBounds(bl.lay, thaLeft)
+  rect(x + b.x, y + bl.shift + b.y, b.w, b.h)
+
+proc measureText*(c: Canvas, s: string,
+    features: openArray[Feature] = []): TextMetrics =
+  ## Widest advance, ink size, line count and size for stateful text
+  ## (no box: explicit `\n` breaks only). See also `layoutText`,
+  ## which exposes per-line breaks and glyph positions.
+  let st = c.states[^1]
+  let lay = layoutText(c.lookupFont(st.fontFace), st.fontSize, s,
+    st.letterSpacing, st.lineHeightMul, features, st.lineHeightAbs)
+  measureLayout(lay, st.textHAlign)
+
+proc measureText*(c: Canvas, font: TextFont, size: float64, s: string,
+    letterSpacing = 0.0, lineHeightMul = 1.2, lineHeightPx = 0.0,
+    features: openArray[Feature] = []): TextMetrics =
+  ## Stateless overload of `measureText`.
+  let lay = layoutText(font, size, s, letterSpacing, lineHeightMul,
+    features, lineHeightPx)
+  measureLayout(lay, thaLeft)
+
+proc measureTextBox*(c: Canvas, x, y, w, h: float64, s: string,
+    ha = thaLeft, va = tvaTop, wrap = true, overflow = toVisible,
+    fit = tfNone, scaleX = 1.0,
+    features: openArray[Feature] = []): TextMetrics =
+  ## Box-layout metrics: post-fit size, drawn advance, ink size and
+  ## physical line count.
+  let st = c.states[^1]
+  let bl = layoutBox(c.lookupFont(st.fontFace), st.fontSize, s,
+    st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, w, h, ha, va,
+    wrap, overflow, fit, scaleX, features)
+  measureLayout(bl.lay, thaLeft)
+
+proc measureTextBox*(c: Canvas, font: TextFont, size: float64, x, y, w,
+    h: float64, s: string, ha = thaLeft, va = tvaTop, wrap = true,
+    overflow = toVisible, fit = tfNone, scaleX = 1.0,
+    letterSpacing = 0.0, lineHeightMul = 1.2, lineHeightPx = 0.0,
+    features: openArray[Feature] = []): TextMetrics =
+  ## Stateless overload of `measureTextBox`.
+  let bl = layoutBox(font, size, s, letterSpacing, lineHeightMul,
+    lineHeightPx, w, h, ha, va, wrap, overflow, fit, scaleX, features)
+  measureLayout(bl.lay, thaLeft)
 
 proc flattened(c: Canvas): seq[SubPoly] =
   path.flatten(c.path, c.tessTol, DefaultDistTol)
