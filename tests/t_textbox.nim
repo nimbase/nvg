@@ -474,3 +474,58 @@ test "span box folds paragraph gap into baselines":
     o, [], [])
   check close(bl.lay.lineYs[1], 43.6) # 33.6 + 10 gap
   check close(layoutBounds(bl.lay, thaLeft).h, 57.6) # -14 .. 43.6
+
+test "justify spreads CJK without spaces":
+  let font = loadFontBytes(buildTestFont())
+  # Two sun glyphs: 12 + 12 = 24 natural, one slot takes 16.
+  let cjk = justifyLine(font, 20.0, "日日", 0.0, 40.0, [])
+  check cjk.advance == 40.0
+  check cjk.glyphs.len == 2
+  check close(cjk.glyphs[1].x, 28.0)
+  # A spaceless Latin word spreads like a CJK one (sole lines
+  # justify); only single glyphs come back plain.
+  let ab = justifyLine(font, 20.0, "AB", 0.0, 40.0, [])
+  check ab.advance == 40.0 # 12 + 14 = 26, gap takes 14
+  check close(ab.glyphs[1].x, 26.0)
+  check justifyLine(font, 20.0, "A", 0.0, 40.0, []).advance == 12.0
+  # CJK words with spaces still spread at word boundaries.
+  let words = justifyLine(font, 20.0, "日 本", 0.0, 40.0, [])
+  check words.advance == 40.0 # 12 + 10 + 12 = 34, gap takes 6
+  check close(words.glyphs[2].x, 28.0)
+  # A boundary touching CJK on either side spreads.
+  let mixed = justifyLine(font, 20.0, "A日", 0.0, 40.0, [])
+  check mixed.advance == 40.0
+  check close(mixed.glyphs[1].x, 28.0)
+
+test "CJK spread keeps marks glued":
+  let font = loadFontBytes(buildTestFont())
+  let m = justifyLine(font, 20.0, "日" & "́", 0.0, 40.0, [])
+  check m.glyphs.len == 2
+  check m.advance == 12.0 # no slot into the mark: stays plain
+  check close(m.glyphs[1].x, 12.0)
+
+test "span justify spreads CJK glyphs":
+  let font = loadFontBytes(buildTestFont())
+  let spans = [TextSpan(first: 3, last: 6, hasColor: true,
+    color: rgbf(1, 0, 0))]
+  var o = TextBoxOpts(maxW: 40, ha: thaJustify)
+  let bl = layoutBoxSpans(font, 20.0, "日日", spans, 0.0, 1.2, 0.0,
+    o, [], [])
+  check bl.lay.lines[0].advance == 40.0
+  check close(bl.lay.lines[0].glyphs[1].x, 28.0)
+  check not bl.lay.lines[0].glyphs[0].hasColor
+  check bl.lay.lines[0].glyphs[1].hasColor
+  check bl.lay.lines[0].glyphs[1].cluster == 3u32
+
+test "sole CJK word justifies in a box":
+  let font = loadFontBytes(buildTestFont())
+  let bl = layoutBox(font, 20.0, "日日", 0.0, 1.2, 0.0, 40.0, 0.0,
+    thaJustify, tvaTop, false, toVisible, tfNone, 1.0, [])
+  check bl.lay.lines[0].advance == 40.0
+  check close(bl.lay.lines[0].glyphs[1].x, 28.0)
+
+test "justified CJK inks both box edges":
+  let c = testCanvas()
+  discard c.fillTextBox(10, 30, 40, 60, "日日", thaJustify)
+  check c.surface.getPixel(15, 35).r < 0.1 # first sun at 10..20
+  check c.surface.getPixel(42, 35).r < 0.1 # second at 38..48

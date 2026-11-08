@@ -954,12 +954,17 @@ proc assembleSpanLine(font: TextFont, px: float64,
     spans: openArray[TextSpan], items: openArray[SpanPiece],
     letterSpacing: float64, features: openArray[Feature],
     cache: ShapeCache, fallbacks: openArray[TextFont],
-    justifyExtra = 0.0): ShapedLine =
+    justifyExtra = 0.0, glyphExtra = 0.0): ShapedLine =
   ## Concatenate shaped pieces with pen, line-local clusters, and
   ## span styles (size/color/decor; font stays nil unless a fallback
   ## shaped the glyph). `justifyExtra` adds fractional pen at each
-  ## word boundary crossed.
+  ## word boundary crossed; `glyphExtra` opens a gap before every
+  ## spread slot instead (see `isSpreadSlot`; the two never combine).
   result = ShapedLine(glyphs: @[], advance: 0.0)
+  var concat = ""
+  if glyphExtra != 0.0:
+    for pc in items:
+      concat.add(pc.text)
   var pen = 0.0
   var byteOff = 0
   var curWord = -2
@@ -972,11 +977,14 @@ proc assembleSpanLine(font: TextFont, px: float64,
       letterSpacing, features, cache, fallbacks)
     for g in sh.glyphs:
       var gg = g
+      gg.cluster += uint32(byteOff)
+      if glyphExtra != 0.0 and result.glyphs.len > 0 and
+          isSpreadSlot(concat, result.glyphs[^1], gg):
+        pen += glyphExtra
       gg.x += pen
       if gg.hasInk:
         gg.x0 += pen
         gg.x1 += pen
-      gg.cluster += uint32(byteOff)
       if pc.span >= 0:
         let (f, _) = spanFontSize(spans, pc.span, font, px)
         if f != font and gg.font == nil:
@@ -1208,21 +1216,45 @@ proc spanJustifyExtra(font: TextFont, px: float64,
     spans: openArray[TextSpan], items: openArray[SpanPiece],
     boxW: float64, letterSpacing: float64,
     features: openArray[Feature], cache: ShapeCache,
-    fallbacks: openArray[TextFont]): float64 =
-  ## Even share per word boundary spreading the line to `boxW` (`0`
-  ## when there is nothing to spread between). Applied as fractional
-  ## pen at assembly, so justification is exact.
+    fallbacks: openArray[TextFont]): tuple[wordExtra,
+      glyphExtra: float64] =
+  ## Spread shares for a line reaching `boxW`: per word boundary
+  ## when the line holds two or more words, else per inter-glyph
+  ## slot for a single word (see `isSpreadSlot`: cluster-advancing,
+  ## non-glue boundaries, mirroring the plain path). Applied as
+  ## fractional pen at assembly, so justification is exact.
   var ids: seq[int] = @[]
   for pc in items:
     if pc.word >= 0 and pc.word notin ids:
       ids.add(pc.word)
-  if ids.len < 2:
-    return 0.0
   let natural = piecesAdvance(font, px, spans, items, letterSpacing,
     features, cache, fallbacks)
   if natural >= boxW:
-    return 0.0
-  (boxW - natural) / float64(ids.len - 1)
+    return (0.0, 0.0)
+  if ids.len == 0:
+    return (0.0, 0.0) # gap-only line: nothing to spread between
+  if ids.len >= 2:
+    return ((boxW - natural) / float64(ids.len - 1), 0.0)
+  var concat = ""
+  for pc in items:
+    concat.add(pc.text)
+  var all: seq[PlacedGlyph] = @[]
+  var byteOff = 0
+  for pc in items:
+    let sh = shapeSpanPiece(font, px, spans, pc.span, pc.text,
+      letterSpacing, features, cache, fallbacks)
+    for g in sh.glyphs:
+      var gg = g
+      gg.cluster += uint32(byteOff)
+      all.add(gg)
+    byteOff += pc.text.len
+  var slots = 0
+  for i in 1 ..< all.len:
+    if isSpreadSlot(concat, all[i - 1], all[i]):
+      inc slots
+  if slots == 0:
+    return (0.0, 0.0)
+  (0.0, (boxW - natural) / float64(slots))
 
 proc spanEllipsizeLine(font: TextFont, px: float64,
     spans: openArray[TextSpan], items: openArray[SpanPiece],
@@ -1356,6 +1388,7 @@ proc layoutBoxSpans*(font: TextFont, sizePx: float64, s: string,
     let effW = maxW - indent
     var items = wl.items
     var extra = 0.0
+    var glyphExtra = 0.0
     if o.overflow == toEllipsis:
       let adv = piecesAdvance(font, px, spans, items, letterSpacing,
         features, cache, fallbacks)
@@ -1364,10 +1397,12 @@ proc layoutBoxSpans*(font: TextFont, sizePx: float64, s: string,
           o.ellipsis, letterSpacing, features, cache, fallbacks)
     elif o.ha == thaJustify and effW > 0.0 and
         (not wl.last or wl.idx == 0):
-      extra = spanJustifyExtra(font, px, spans, items, effW,
+      let jx = spanJustifyExtra(font, px, spans, items, effW,
         letterSpacing, features, cache, fallbacks)
+      extra = jx.wordExtra
+      glyphExtra = jx.glyphExtra
     var shaped = assembleSpanLine(font, px, spans, items,
-      letterSpacing, features, cache, fallbacks, extra)
+      letterSpacing, features, cache, fallbacks, extra, glyphExtra)
     if indent != 0.0:
       for j in 0 ..< shaped.glyphs.len:
         shaped.glyphs[j].x += indent

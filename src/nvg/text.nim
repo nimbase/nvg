@@ -23,10 +23,11 @@
 ## - Vertical alignment is relative to measured ink (union of placed
 ##   glyph extents), not font ascent/descent (harfnim exposes no hhea
 ##   metrics accessor yet).
-## - `thaJustify` spreads words with spaces to a box width (a
-##   word-space feature: CJK runs without spaces do not spread, and
-##   mixed-direction lines lay words out in logical order). Outside a
-##   box it anchors like left.
+## - `thaJustify` spreads space-separated words to a box width;
+##   spaceless runs (CJK included) spread between their runes, and
+##   combining marks stay glued to their base (mixed-direction lines
+##   still lay words out in logical order: full bidi is out of
+##   scope). Outside a box it anchors like left.
 ## - Line height is either a font-size multiplier or an absolute px
 ##   value (`lineHeightAbs`); the two are kept distinct, absolute wins.
 ##   Span lines with mixed sizes stack variable per-line boxes: each
@@ -313,6 +314,18 @@ proc isGlue*(cp: uint32): bool =
     cp == 0x200Du32 or
     (cp >= 0x1F3FBu32 and cp <= 0x1F3FFu32) or
     (cp >= 0x1F1E6u32 and cp <= 0x1F1FFu32)
+
+proc isSpreadSlot*(text: string, prev, next: PlacedGlyph): bool =
+  ## Whether a justification gap may open between two adjacent
+  ## glyphs: the next glyph starts a new character (`cluster`
+  ## advances) that is not glue (marks stay on their base). Mirrors
+  ## the plain path, where each rune shapes as its own chunk with
+  ## marks joined to their base.
+  let pc = int(prev.cluster)
+  let nc = int(next.cluster)
+  if nc <= pc or nc >= text.len or pc >= text.len:
+    return false
+  not isGlue(uint32(text.runeAt(nc)))
 
 proc shapeCached*(font: TextFont, sizePx: float64, line: string,
     letterSpacing: float64, features: openArray[Feature],
@@ -759,18 +772,24 @@ proc justifyLine*(font: TextFont, sizePx: float64, line: string,
     cache: ShapeCache = nil,
     fallbacks: openArray[TextFont] = []): ShapedLine =
   ## Spread the words of `line` so the advance equals `boxW`. Each
-  ## word (plus its trailing spaces) shapes as one chunk, so
+  ## rune (plus trailing spaces) shapes as its own chunk, so
   ## intra-word letter spacing and space runs survive; the leftover
-  ## spreads evenly over the word boundaries. Single words and
-  ## already-over-wide lines come back plainly shaped but
-  ## gap-preserving.
+  ## spreads evenly over the chunk boundaries. Spaceless runs (CJK
+  ## included) spread between their runes; combining marks join
+  ## their base and never take a gap. Already-over-wide lines come
+  ## back plainly shaped but gap-preserving.
   var words: seq[string] = @[]
   var gaps: seq[int] = @[]
   var cur = ""
   var sp = 0
-  for ch in line:
-    if ch == ' ':
+  for r in line.runes:
+    if uint32(r) == 0x20u32:
       inc sp
+    elif isGlue(uint32(r)) and cur != "":
+      # Combining marks join their base (never start a chunk), so
+      # justification gaps never detach them. Byte-splitting here
+      # used to shred multi-byte text into invalid chunks.
+      cur.add($r)
     else:
       if cur != "" or sp > 0:
         if cur != "":
@@ -780,7 +799,7 @@ proc justifyLine*(font: TextFont, sizePx: float64, line: string,
           gaps[^1] += sp
         cur = ""
         sp = 0
-      cur.add(ch)
+      cur.add($r)
   if cur != "":
     words.add(cur)
     gaps.add(sp)
@@ -805,7 +824,8 @@ proc justifyLine*(font: TextFont, sizePx: float64, line: string,
   result = ShapedLine(glyphs: @[], advance: natural)
   if natural >= boxW or words.len < 2:
     # No room (or nothing to spread between): sequential chunks,
-    # gaps preserved.
+    # gaps preserved. Spaceless runs spread between their runes
+    # through this same path (each rune is its own chunk).
     var pen = 0.0
     for i, ch in chunks:
       for g in ch.glyphs:

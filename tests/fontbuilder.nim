@@ -6,7 +6,10 @@
 ##   gid 2 'B': square 400x500 at origin, advance 700
 ##   gid 3 U+05D0: triangle (0,0),(200,0),(100,300), advance 500
 ##   gid 4 U+05D1: square 600x200 at origin, advance 700
-## At size 20 advances are exact: 10 / 12 / 14 px.
+##   gid 5 U+65E5: square 500x500 at origin, advance 600
+##   gid 6 U+672C: square 400x500 at origin, advance 600
+##   gid 7 U+0301: empty (zero advance, stands in for a mark)
+## At size 20 advances are exact: 10 / 12 / 14 px (marks: 0).
 
 proc putU16*(s: var seq[uint8], v: uint16) =
   s.add(uint8(v shr 8))
@@ -57,23 +60,26 @@ proc simpleGlyph*(pts: seq[tuple[x, y: int32, on: bool]],
     result.add(0u8)
 
 proc buildCmap*(): seq[uint8] =
-  # Format 4: A-B -> 1-2, U+05D0-U+05D1 -> 3-4, plus the 0xFFFF sentinel.
+  # Format 4 (segments sorted): A-B -> 1-2, U+0301 -> 7,
+  # U+05D0-U+05D1 -> 3-4, U+65E5 -> 5, U+672C -> 6, plus sentinel.
   var sub: seq[uint8] = @[]
   sub.putU16(4u16)
-  sub.putU16(40u16)
+  sub.putU16(64u16)
   sub.putU16(0u16)
-  sub.putU16(6u16)
-  sub.putU16(4u16)
-  sub.putU16(1u16)
+  sub.putU16(12u16)
+  sub.putU16(8u16)
   sub.putU16(2u16)
-  for e in [0x42u16, 0x5D1u16, 0xFFFFu16]:
+  sub.putU16(4u16)
+  for e in [0x42u16, 0x0301u16, 0x5D1u16, 0x65E5u16, 0x672Cu16,
+      0xFFFFu16]:
     sub.putU16(e)
   sub.putU16(0u16)
-  for e in [0x41u16, 0x5D0u16, 0xFFFFu16]:
+  for e in [0x41u16, 0x0301u16, 0x5D0u16, 0x65E5u16, 0x672Cu16,
+      0xFFFFu16]:
     sub.putU16(e)
-  for d in [-64i16, -1485i16, 1i16]:
+  for d in [-64i16, -762i16, -1485i16, -26080i16, -26406i16, 1i16]:
     sub.putI16(d)
-  for _ in 0 ..< 3:
+  for _ in 0 ..< 6:
     sub.putU16(0u16)
   result = @[]
   result.putU16(0u16)
@@ -199,12 +205,13 @@ proc buildTestFont*(): seq[uint8] =
   hhea.putU16(600u16)
   for _ in 0 ..< 11:
     hhea.putI16(0i16)
-  hhea.putU16(5u16)
+  hhea.putU16(8u16)
   var maxp = newSeq[uint8]()
   maxp.putU32(0x00005000u32)
-  maxp.putU16(5u16)
+  maxp.putU16(8u16)
   var hmtx = newSeq[uint8]()
-  for a in [500u16, 600u16, 700u16, 500u16, 700u16]:
+  for a in [500u16, 600u16, 700u16, 500u16, 700u16, 600u16, 600u16,
+      0u16]:
     hmtx.putU16(a)
     hmtx.putI16(0i16)
   let triA = simpleGlyph(@[(0i32, 0i32, true), (500i32, 0i32, true),
@@ -215,11 +222,16 @@ proc buildTestFont*(): seq[uint8] =
     (100i32, 300i32, true)], @[2])
   let sq4 = simpleGlyph(@[(0i32, 0i32, true), (600i32, 0i32, true),
     (600i32, 200i32, true), (0i32, 200i32, true)], @[3])
+  let sq5 = simpleGlyph(@[(0i32, 0i32, true), (500i32, 0i32, true),
+    (500i32, 500i32, true), (0i32, 500i32, true)], @[3])
+  let sq6 = simpleGlyph(@[(0i32, 0i32, true), (400i32, 0i32, true),
+    (400i32, 500i32, true), (0i32, 500i32, true)], @[3])
   var glyf: seq[uint8] = @[]
-  var offs = @[0, 0] # gid 0 is empty; five glyphs need six loca entries
-  for g in [triA, sqB, tri3, sq4]:
+  var offs = @[0, 0] # gid 0 is empty; seven glyphs need eight entries
+  for g in [triA, sqB, tri3, sq4, sq5, sq6]:
     glyf.add(g)
     offs.add(glyf.len)
+  offs.add(glyf.len) # gid 7 (mark) is empty too
   var loca = newSeq[uint8]()
   for o in offs:
     loca.putU16(uint16(o div 2))
