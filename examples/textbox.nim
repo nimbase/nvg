@@ -166,10 +166,16 @@ proc main(fontPath, outDir: string) =
   caption(c, 40, 1932, "hit test (carets + byte offsets)")
   var ho = TextBoxOpts(maxW: 500, boxH: 60)
   c.boxFrame(40, 1948, 520, 90)
-  discard c.fillTextBox(48, 1954, "Pack my box with five dozen", ho)
   let hfont = loadFontFile(fontPath)
   let hbl = layoutBoxOpts(hfont, 19.0, "Pack my box with five dozen",
     0.0, 1.35, 0.0, ho, [])
+  c.setFillColor(rgbaf(0.65, 0.8, 1.0, 0.6))
+  for r in selectionRects(hbl.lay, 0, 5, 0, 14):
+    c.beginPath()
+    c.rect(48 + r.x, 1954 + hbl.shift + r.y, r.w, r.h)
+    c.fill()
+  c.setFillColor(rgbf(0.1, 0.1, 0.1))
+  discard c.fillTextBox(48, 1954, "Pack my box with five dozen", ho)
   c.setStrokeColor(rgbf(0.85, 0.2, 0.2))
   c.setStrokeWidth(1.5)
   c.setFontSize(13.0)

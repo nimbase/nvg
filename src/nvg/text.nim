@@ -33,6 +33,7 @@
 import std/options
 import std/math
 import std/strutils
+import std/tables
 import std/unicode
 import ./types
 import ./path
@@ -176,6 +177,12 @@ type
     advance*: float64
       ## Total pen advance including inter-glyph letter spacing.
 
+  ShapeCache* = ref object
+    ## Per-layout shaping memo: one cache per font (the key carries
+    ## size, spacing and string, but not font identity). Returned
+    ## layouts are copies, so callers may mutate them freely.
+    tab*: Table[string, ShapedLine]
+
   TextLayout* = object
     font*: TextFont
     lines*: seq[ShapedLine]
@@ -207,6 +214,10 @@ proc splitTextLines*(s: string): seq[string] =
 
 proc quantizePx*(sizePx: float64): int32 =
   max(1i32, int32(sizePx + 0.5))
+
+proc newShapeCache*(): ShapeCache =
+  ## Empty per-font shaping memo for one layout pass.
+  ShapeCache(tab: initTable[string, ShapedLine]())
 
 proc shapeLine*(font: TextFont, sizePx: float64, line: string,
     letterSpacing: float64,
@@ -249,6 +260,20 @@ proc shapeLine*(font: TextFont, sizePx: float64, line: string,
     if adv != 0.0 and i + 1 < n:
       pen += letterSpacing
   result.advance = pen
+
+proc shapeCached*(font: TextFont, sizePx: float64, line: string,
+    letterSpacing: float64, features: openArray[Feature],
+    cache: ShapeCache = nil): ShapedLine =
+  ## `shapeLine` through `cache` (direct shaping when nil). Hits
+  ## return copies, so mutating the result never corrupts the memo.
+  if cache == nil:
+    return shapeLine(font, sizePx, line, letterSpacing, features)
+  let key = $sizePx & "\x1F" & $letterSpacing & "\x1F" & line
+  if key in cache.tab:
+    return cache.tab[key]
+  let shaped = shapeLine(font, sizePx, line, letterSpacing, features)
+  cache.tab[key] = shaped
+  shaped
 
 proc layoutText*(font: TextFont, sizePx: float64, s: string,
     letterSpacing = 0.0, lineHeightMul = 1.2,
@@ -375,6 +400,60 @@ proc caretX*(lay: TextLayout, hit: TextHit,
     return pen + line.glyphs[i].x
   pen + line.advance
 
+proc caretAtByte*(line: ShapedLine, byteIdx: int): float64 =
+  ## Caret x for a line-local byte offset: origin of the first glyph
+  ## at or past it, else the line advance.
+  for g in line.glyphs:
+    if int(g.cluster) >= byteIdx:
+      return g.x
+  line.advance
+
+proc selectionRects*(lay: TextLayout, fromLine, fromByte, toLine,
+    toByte: int, ha = thaLeft): seq[Rect] =
+  ## Highlight rects for the byte range
+  ## `[fromLine:fromByte, toLine:toByte)` (line-local byte offsets,
+  ## reversed ranges normalized, empty ranges yield nothing). One
+  ## rect per covered line: caret to caret horizontally, line ink
+  ## vertically (an 0.8/0.2 size band for inkless lines).
+  ## Anchor-relative like `hitTest`.
+  result = @[]
+  if lay.lines.len == 0:
+    return
+  var fl = fromLine
+  var fb = fromByte
+  var tl = toLine
+  var tb = toByte
+  if fl > tl or (fl == tl and fb > tb):
+    swap(fl, tl)
+    swap(fb, tb)
+  if fl == tl and fb == tb:
+    return
+  fl = clamp(fl, 0, lay.lines.len - 1)
+  tl = clamp(tl, 0, lay.lines.len - 1)
+  for li in fl .. tl:
+    let line = lay.lines[li]
+    let pen = linePenX(line.advance, ha)
+    let x0 = pen + (if li == fl: caretAtByte(line, fb) else: 0.0)
+    let x1 = pen + (if li == tl: caretAtByte(line, tb)
+      else: line.advance)
+    if x1 <= x0:
+      continue
+    let base = float64(li) * lay.lineHeightPx
+    var y0 = base - lay.sizePx * 0.8
+    var y1 = base + lay.sizePx * 0.2
+    var found = false
+    for g in line.glyphs:
+      if g.hasInk:
+        if not found:
+          y0 = base + g.y0
+          y1 = base + g.y1
+          found = true
+        else:
+          y0 = min(y0, base + g.y0)
+          y1 = max(y1, base + g.y1)
+    if y1 > y0:
+      result.add(rect(x0, y0, x1 - x0, y1 - y0))
+
 proc measureLayout*(lay: TextLayout, ha: TextHAlign): TextMetrics =
   ## Widest advance, ink size and line count for an already shaped
   ## layout. Anchor-free: alignment never changes these fields.
@@ -428,7 +507,8 @@ proc wrapParagraph*(font: TextFont, sizePx: float64, para: string,
 
 proc justifyLine*(font: TextFont, sizePx: float64, line: string,
     letterSpacing: float64, boxW: float64,
-    features: openArray[Feature]): ShapedLine =
+    features: openArray[Feature],
+    cache: ShapeCache = nil): ShapedLine =
   ## Spread the words of `line` so the advance equals `boxW`. Each
   ## word (plus its trailing spaces) shapes as one chunk, so
   ## intra-word letter spacing and space runs survive; the leftover
@@ -468,7 +548,8 @@ proc justifyLine*(font: TextFont, sizePx: float64, line: string,
     for _ in 0 ..< gaps[i]:
       chunk.add(' ')
     pos += chunk.len
-    chunks.add(shapeLine(font, sizePx, chunk, letterSpacing, features))
+    chunks.add(shapeCached(font, sizePx, chunk, letterSpacing, features,
+      cache))
   var natural = 0.0
   for ch in chunks:
     natural += ch.advance
@@ -506,23 +587,26 @@ proc justifyLine*(font: TextFont, sizePx: float64, line: string,
 
 proc ellipsizeLine*(font: TextFont, sizePx: float64, line: string,
     letterSpacing: float64, maxW: float64,
-    features: openArray[Feature], marker = "…"): ShapedLine =
+    features: openArray[Feature], marker = "…",
+    cache: ShapeCache = nil): ShapedLine =
   ## Trim trailing runes and append `marker` until the line fits
   ## `maxW`. Fits already: plain shaping. Nothing fits (even the
   ## marker alone): an empty line.
   if maxW <= 0.0:
     return ShapedLine(glyphs: @[], advance: 0.0)
-  var shaped = shapeLine(font, sizePx, line, letterSpacing, features)
+  var shaped = shapeCached(font, sizePx, line, letterSpacing, features,
+    cache)
   if shaped.advance <= maxW:
     return shaped
   var runes = line.toRunes()
   while runes.len > 0:
     runes.setLen(runes.len - 1)
-    shaped = shapeLine(font, sizePx, $runes & marker, letterSpacing,
-      features)
+    shaped = shapeCached(font, sizePx, $runes & marker, letterSpacing,
+      features, cache)
     if shaped.advance <= maxW:
       return shaped
-  shaped = shapeLine(font, sizePx, marker, letterSpacing, features)
+  shaped = shapeCached(font, sizePx, marker, letterSpacing, features,
+    cache)
   if shaped.advance <= maxW:
     return shaped
   ShapedLine(glyphs: @[], advance: 0.0)

@@ -583,11 +583,11 @@ proc stopPad(spaceAdv, tabW, cur: float64): string =
 
 proc expandRun(font: TextFont, px: float64, lineSoFar: string,
     run: string, letterSpacing: float64, spaceAdv: float64,
-    tabW: float64, features: openArray[Feature]): string =
+    tabW: float64, features: openArray[Feature], cache: ShapeCache): string =
   ## Preserve-semantics expansion of one whitespace run: spaces
   ## verbatim, tabs to stops with a running advance.
-  var cur = shapeLine(font, px, lineSoFar, letterSpacing,
-    features).advance
+  var cur = shapeCached(font, px, lineSoFar, letterSpacing,
+    features, cache).advance
   for ch in run:
     if ch == ' ':
       result.add(' ')
@@ -599,7 +599,7 @@ proc expandRun(font: TextFont, px: float64, lineSoFar: string,
 
 proc renderGap(font: TextFont, px: float64, lineSoFar: string, run: string,
     letterSpacing: float64, collapse: bool, spaceAdv: float64,
-    tabW: float64, features: openArray[Feature]): string =
+    tabW: float64, features: openArray[Feature], cache: ShapeCache): string =
   ## Render a raw whitespace run for layout. Collapsed: a single
   ## space, or a single tab stop when the run holds a tab (leading
   ## runs vanish). Preserved: spaces verbatim, tabs to stops with a
@@ -610,16 +610,16 @@ proc renderGap(font: TextFont, px: float64, lineSoFar: string, run: string,
     if lineSoFar == "":
       return ""
     if '\t' in run:
-      let adv0 = shapeLine(font, px, lineSoFar, letterSpacing,
-        features).advance
+      let adv0 = shapeCached(font, px, lineSoFar, letterSpacing,
+        features, cache).advance
       return stopPad(spaceAdv, tabW, adv0)
     return " "
   expandRun(font, px, lineSoFar, run, letterSpacing, spaceAdv, tabW,
-    features)
+    features, cache)
 
 proc expandPara(font: TextFont, px: float64, para: string,
     letterSpacing: float64, spaceAdv: float64, tabW: float64,
-    features: openArray[Feature]): string =
+    features: openArray[Feature], cache: ShapeCache): string =
   ## Preserve-semantics expansion of a whole paragraph (for `twPre`):
   ## word chars verbatim, whitespace runs via `expandRun`.
   var run = ""
@@ -629,32 +629,32 @@ proc expandPara(font: TextFont, px: float64, para: string,
     else:
       if run != "":
         result.add(expandRun(font, px, result, run, letterSpacing,
-          spaceAdv, tabW, features))
+          spaceAdv, tabW, features, cache))
         run = ""
       result.add(ch)
   if run != "":
     result.add(expandRun(font, px, result, run, letterSpacing,
-      spaceAdv, tabW, features))
+      spaceAdv, tabW, features, cache))
 
 proc breakPieces(font: TextFont, px: float64, word: string,
     letterSpacing: float64, budget: float64, hyphen: string,
-    features: openArray[Feature]): seq[string] =
+    features: openArray[Feature], cache: ShapeCache): seq[string] =
   ## Emergency-break `word` into budget-fitting fragments, `hyphen`
   ## suffixed but on the last. Never returns empty (a lone rune
   ## always fits somewhere).
   result = @[]
   var runes = word.toRunes()
   while runes.len > 0:
-    if shapeLine(font, px, $runes, letterSpacing,
-        features).advance <= budget:
+    if shapeCached(font, px, $runes, letterSpacing,
+        features, cache).advance <= budget:
       result.add($runes)
       break
     var n = runes.len - 1
-    while n > 1 and shapeLine(font, px, $runes[0 ..< n] & hyphen,
-        letterSpacing, features).advance > budget:
+    while n > 1 and shapeCached(font, px, $runes[0 ..< n] & hyphen,
+        letterSpacing, features, cache).advance > budget:
       dec n
-    if n == 1 and shapeLine(font, px, $runes[0 ..< 1] & hyphen,
-        letterSpacing, features).advance > budget:
+    if n == 1 and shapeCached(font, px, $runes[0 ..< 1] & hyphen,
+        letterSpacing, features, cache).advance > budget:
       # Even one rune plus hyphen overflows: bare rune, retry rest.
       result.add($runes[0 ..< 1])
       runes = runes[1 .. ^1]
@@ -664,7 +664,7 @@ proc breakPieces(font: TextFont, px: float64, word: string,
 
 proc wrapAll(font: TextFont, px: float64, s: string,
     letterSpacing: float64, maxW: float64, indent: float64,
-    o: TextBoxOpts, features: openArray[Feature]): seq[WrapLine] =
+    o: TextBoxOpts, features: openArray[Feature], cache: ShapeCache): seq[WrapLine] =
   ## Greedy word wrap per paragraph, tagged with paragraph index,
   ## index within the paragraph, and end-of-paragraph flag (for
   ## last-line alignment under justify). A paragraph's first line
@@ -675,8 +675,8 @@ proc wrapAll(font: TextFont, px: float64, s: string,
   result = @[]
   let collapse = o.whiteSpace == twNormal
   let doWrap = o.wrap and o.whiteSpace != twPre
-  let spaceAdv = shapeLine(font, px, " ", letterSpacing,
-    features).advance
+  let spaceAdv = shapeCached(font, px, " ", letterSpacing,
+    features, cache).advance
   let tabW = if o.tabWidth > 0.0: o.tabWidth else: 8.0 * spaceAdv
   var pi = 0
   for para in splitTextLines(s):
@@ -712,19 +712,19 @@ proc wrapAll(font: TextFont, px: float64, s: string,
         var joiner = ""
         if line != "":
           joiner = renderGap(font, px, line, runs[wi - 1], letterSpacing,
-            collapse, spaceAdv, tabW, features)
+            collapse, spaceAdv, tabW, features, cache)
         elif not leadDone:
           joiner = renderGap(font, px, "", lead, letterSpacing,
-            collapse, spaceAdv, tabW, features)
+            collapse, spaceAdv, tabW, features, cache)
         let trial = line & joiner & words[wi]
-        if shapeLine(font, px, trial, letterSpacing,
-            features).advance <= budget or line == "":
-          if line == "" and shapeLine(font, px, trial, letterSpacing,
-              features).advance > budget:
+        if shapeCached(font, px, trial, letterSpacing,
+            features, cache).advance <= budget or line == "":
+          if line == "" and shapeCached(font, px, trial, letterSpacing,
+              features, cache).advance > budget:
             # Over-wide word alone on the line.
             if o.breakWord:
               let parts = breakPieces(font, px, words[wi],
-                letterSpacing, budget, o.hyphenChar, features)
+                letterSpacing, budget, o.hyphenChar, features, cache)
               for k in 0 ..< parts.len - 1:
                 lines.add(if k == 0: joiner & parts[k]
                   else: parts[k])
@@ -741,12 +741,12 @@ proc wrapAll(font: TextFont, px: float64, s: string,
           first = false
       if words.len == 0:
         lines.add(renderGap(font, px, "", lead, letterSpacing,
-          collapse, spaceAdv, tabW, features))
+          collapse, spaceAdv, tabW, features, cache))
       else:
         if not collapse and runs[^1].len > 0 and line != "":
           # Trailing whitespace belongs to the line in preserve modes.
           line.add(renderGap(font, px, line, runs[^1], letterSpacing,
-            collapse, spaceAdv, tabW, features))
+            collapse, spaceAdv, tabW, features, cache))
         if line != "":
           lines.add(line)
       if lines.len == 0:
@@ -763,7 +763,7 @@ proc wrapAll(font: TextFont, px: float64, s: string,
       else:
         # No wrap, preserved: expand tabs with a running advance.
         lines.add(expandPara(font, px, para, letterSpacing, spaceAdv,
-          tabW, features))
+          tabW, features, cache))
     for i, ln in lines:
       result.add((pi, i, i == lines.len - 1, ln))
     inc pi
@@ -777,11 +777,11 @@ proc clampCount(lines: var seq[WrapLine], maxLines: int) =
 
 proc widestStrings(font: TextFont, px: float64, lines: seq[WrapLine],
     letterSpacing: float64,
-    features: openArray[Feature]): float64 =
+    features: openArray[Feature], cache: ShapeCache): float64 =
   ## Widest natural (unjustified) advance over already wrapped lines.
   for wl in lines:
-    let a = shapeLine(font, px, wl.text, letterSpacing,
-      features).advance
+    let a = shapeCached(font, px, wl.text, letterSpacing,
+      features, cache).advance
     result = max(result, a)
 
 proc layoutBoxOpts*(font: TextFont, sizePx: float64, s: string,
@@ -829,12 +829,13 @@ proc layoutBoxOpts*(font: TextFont, sizePx: float64, s: string,
   ## align, and the fitted size. Pure layout: no drawing.
   let maxW = o.maxW
   let k = max(0.0, o.scaleX)
+  let cache = newShapeCache()
   template widestAt(px: int32): float64 =
     var lines = wrapAll(font, float64(px), s, letterSpacing, maxW,
-      o.firstLineIndent, o, features)
+      o.firstLineIndent, o, features, cache)
     clampCount(lines, o.maxLines)
     widestStrings(font, float64(px), lines, letterSpacing,
-      features) * k
+      features, cache) * k
   let px0 = quantizePx(sizePx)
   var px = float64(px0)
   if o.fit != tfNone and maxW > 0.0:
@@ -886,22 +887,23 @@ proc layoutBoxOpts*(font: TextFont, sizePx: float64, s: string,
   var lay = TextLayout(font: font, lines: @[], sizePx: px,
     lineHeightPx: step)
   var lines = wrapAll(font, px, s, letterSpacing, maxW,
-    o.firstLineIndent, o, features)
+    o.firstLineIndent, o, features, cache)
   clampCount(lines, o.maxLines)
   for wl in lines:
     let indent = if wl.idx == 0: o.firstLineIndent else: 0.0
     let effW = maxW - indent
-    var shaped = shapeLine(font, px, wl.text, letterSpacing, features)
+    var shaped = shapeCached(font, px, wl.text, letterSpacing, features,
+      cache)
     if o.overflow == toEllipsis and shaped.advance > effW and
         effW > 0.0:
       shaped = ellipsizeLine(font, px, wl.text, letterSpacing, effW,
-        features, o.ellipsis)
+        features, o.ellipsis, cache)
     elif o.ha == thaJustify and effW > 0.0 and
         (not wl.last or wl.idx == 0):
       # Non-last lines spread; a paragraph's last line follows the
       # CSS rule (left here), except a sole line, which justifies.
       shaped = justifyLine(font, px, wl.text, letterSpacing, effW,
-        features)
+        features, cache)
     if indent != 0.0:
       for j in 0 ..< shaped.glyphs.len:
         shaped.glyphs[j].x += indent

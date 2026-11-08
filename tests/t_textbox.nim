@@ -230,6 +230,40 @@ test "break-word hyphenates over-wide words":
   o = TextBoxOpts(maxW: 25)
   check c.measureTextBox(0, 0, "AB", o).lineCount == 1 # overflow
 
+test "shape cache hits equal direct shaping":
+  let font = loadFontBytes(buildTestFont())
+  let cache = newShapeCache()
+  let a = shapeCached(font, 20.0, "AB", 0.0, [], cache)
+  let b = shapeCached(font, 20.0, "AB", 0.0, [], cache)
+  check a.advance == b.advance
+  check a.glyphs.len == b.glyphs.len
+  check a.glyphs[1].x == b.glyphs[1].x
+  # Mutating a hit never corrupts later hits.
+  var m = a
+  m.glyphs[0].x = 999.0
+  m.advance = 999.0
+  let c = shapeCached(font, 20.0, "AB", 0.0, [], cache)
+  check c.advance == 26.0
+  check c.glyphs[0].x == 0.0
+  let d = shapeCached(font, 20.0, "AB", 0.0, [], nil)
+  check d.advance == 26.0
+
+test "selection rects cover byte ranges per line":
+  let font = loadFontBytes(buildTestFont())
+  let lay = layoutText(font, 20.0, "AB")
+  let r = selectionRects(lay, 0, 0, 0, 1)
+  check r.len == 1
+  check close(r[0].x, 0.0) and close(r[0].w, 12.0)
+  check close(r[0].y, -14.0) and close(r[0].h, 14.0)
+  check selectionRects(lay, 0, 1, 0, 1).len == 0 # empty range
+  check selectionRects(lay, 0, 1, 0, 0) == selectionRects(lay, 0, 0,
+    0, 1) # reversed normalizes
+  let two = layoutText(font, 20.0, "A\nB")
+  let rr = selectionRects(two, 0, 0, 1, 1)
+  check rr.len == 2
+  check close(rr[0].x, 0.0) and close(rr[0].w, 12.0)
+  check close(rr[1].x, 0.0) and close(rr[1].w, 14.0)
+
 test "hit test maps points to glyphs":
   let font = loadFontBytes(buildTestFont())
   let lay = layoutText(font, 20.0, "AB")
