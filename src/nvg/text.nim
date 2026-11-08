@@ -31,6 +31,7 @@
 ##   value (`lineHeightAbs`); the two are kept distinct, absolute wins.
 
 import std/options
+import std/algorithm
 import std/math
 import std/strutils
 import std/tables
@@ -173,6 +174,26 @@ type
       ## (from harfnim buffer clusters; line-local).
     font*: TextFont
       ## Fallback font that shaped this glyph (`nil` = layout font).
+    size*: float64
+      ## Glyph size in px (`0` = layout size; spans set their own).
+    color*: Color
+    hasColor*: bool
+      ## Per-glyph ink color (spans); otherwise the layout paint.
+    decor*: TextDecor
+      ## Per-glyph decoration override (`tdNone` = layout decor).
+
+  TextSpan* = object
+    ## A byte range `[first, last)` in shared text with its own font
+    ## (`nil` = layout font), size (`<= 0` = layout size), color
+    ## (`hasColor` off = layout paint) and decor (`tdNone` = layout
+    ## decor). Ranges must be sorted, non-overlapping, and inside
+    ## the text; gaps use the layout style.
+    first*, last*: int
+    font*: TextFont
+    size*: float64
+    color*: Color
+    hasColor*: bool
+    decor*: TextDecor
 
   ShapedLine* = object
     glyphs*: seq[PlacedGlyph]
@@ -363,6 +384,78 @@ proc layoutText*(font: TextFont, sizePx: float64, s: string,
   for line in splitTextLines(s):
     result.lines.add(shapeCached(font, px, line, letterSpacing,
       features, cache, fallbacks))
+
+proc spanAt*(spans: openArray[TextSpan], bytePos: int): int =
+  ## Index of the span containing `bytePos`, else -1. Linear scan;
+  ## span counts are small.
+  for i, sp in spans:
+    if bytePos >= sp.first and bytePos < sp.last:
+      return i
+  -1
+
+proc layoutSpans*(font: TextFont, sizePx: float64, s: string,
+    spans: openArray[TextSpan], letterSpacing = 0.0,
+    lineHeightMul = 1.2, features: openArray[Feature] = [],
+    lineHeightAbs = 0.0,
+    fallbacks: openArray[TextFont] = []): TextLayout =
+  ## Shape explicit-`\n` lines with per-range fonts, sizes, colors
+  ## and decorations. Unspanned bytes use the layout font/size/paint.
+  ## Ranges index `s` after `\r\n`/`\r` normalization to `\n`.
+  ## Clusters stay line-local; glyphs carry their span style.
+  let src = s.replace("\r\n", "\n").replace("\r", "\n")
+  let px = max(1.0, sizePx)
+  let step = if lineHeightAbs > 0.0: lineHeightAbs
+    else: px * max(0.0, lineHeightMul)
+  result = TextLayout(font: font, lines: @[], sizePx: px,
+    lineHeightPx: step)
+  let cache = newShapeCache()
+  var lineStart = 0
+  for para in splitTextLines(src):
+    var shaped = ShapedLine(glyphs: @[], advance: 0.0)
+    if para.len > 0:
+      var edges: seq[int] = @[0, para.len]
+      for sp in spans:
+        let a = clamp(sp.first - lineStart, 0, para.len)
+        let b = clamp(sp.last - lineStart, 0, para.len)
+        if a < b:
+          edges.add(a)
+          edges.add(b)
+      edges.sort(system.cmp)
+      var pen = 0.0
+      var prev = -1
+      for e in edges:
+        if e == prev:
+          continue
+        if prev >= 0:
+          let si = spanAt(spans, lineStart + prev)
+          let sub = para[prev ..< e]
+          let pf = if si >= 0 and spans[si].font != nil:
+              spans[si].font else: font
+          let psz = if si >= 0 and spans[si].size > 0.0:
+              spans[si].size else: px
+          let sh = shapeCached(pf, psz, sub, letterSpacing, features,
+            cache, fallbacks)
+          for g in sh.glyphs:
+            var gg = g
+            gg.x += pen
+            if gg.hasInk:
+              gg.x0 += pen
+              gg.x1 += pen
+            gg.cluster += uint32(prev)
+            if si >= 0:
+              if pf != font and gg.font == nil:
+                gg.font = pf
+              if spans[si].size > 0.0:
+                gg.size = spans[si].size
+              gg.hasColor = spans[si].hasColor
+              gg.color = spans[si].color
+              gg.decor = spans[si].decor
+            shaped.glyphs.add(gg)
+          pen += sh.advance
+        prev = e
+      shaped.advance = pen
+    result.lines.add(shaped)
+    lineStart += para.len + 1
 
 proc linePenX*(advance: float64, ha: TextHAlign): float64 =
   ## Per-line pen start relative to the anchor x.
@@ -687,6 +780,53 @@ proc ellipsizeLine*(font: TextFont, sizePx: float64, line: string,
     return shaped
   ShapedLine(glyphs: @[], advance: 0.0)
 
+proc sameColor*(a, b: Color): bool =
+  a.r == b.r and a.g == b.g and a.b == b.b and a.a == b.a
+
+proc appendLayoutSpan*(p: var Path, xf: Xform, lay: TextLayout, x, y: float64,
+    ha: TextHAlign, va: TextVAlign, wantColor: bool, color: Color) =
+  ## Like `appendLayout` but only emits one color group: uncolored
+  ## glyphs (`wantColor` false) or glyphs exactly matching `color`.
+  let dy = valignShift(lay, ha, va)
+  for i, line in lay.lines:
+    let ox = x + linePenX(line.advance, ha)
+    let oy = y + dy + float64(i) * lay.lineHeightPx
+    for g in line.glyphs:
+      if g.hasColor != wantColor:
+        continue
+      if wantColor and not sameColor(g.color, color):
+        continue
+      let gf = if g.font != nil: g.font else: lay.font
+      if gf == nil:
+        continue
+      var ops: seq[DrawOp] = @[]
+      var sf = gf.shaper
+      if not sf.drawGlyph(newGlyphId(g.gid),
+          proc(op: DrawOp) = ops.add(op)):
+        continue
+      let gs = (if g.size > 0.0: g.size else: lay.sizePx) / gf.upem
+      let gx = ox + g.x
+      let gy = oy + g.y
+      for op in ops:
+        case op.kind
+        of moveTo:
+          p.moveTo(gx + float64(op.to.x) * gs, gy - float64(op.to.y) * gs,
+            xf)
+        of lineTo:
+          p.lineTo(gx + float64(op.to.x) * gs, gy - float64(op.to.y) * gs,
+            xf)
+        of quadraticTo:
+          p.quadTo(gx + float64(op.qCtrl.x) * gs,
+            gy - float64(op.qCtrl.y) * gs, gx + float64(op.qTo.x) * gs,
+            gy - float64(op.qTo.y) * gs, xf)
+        of cubicTo:
+          p.bezierTo(gx + float64(op.c1.x) * gs,
+            gy - float64(op.c1.y) * gs, gx + float64(op.c2.x) * gs,
+            gy - float64(op.c2.y) * gs, gx + float64(op.cTo.x) * gs,
+            gy - float64(op.cTo.y) * gs, xf)
+        of closePath:
+          p.closePath()
+
 proc appendLayout*(p: var Path, xf: Xform, lay: TextLayout, x, y: float64,
     ha: TextHAlign, va: TextVAlign) =
   ## Emit the laid-out glyph outlines as path verbs (transform captured
@@ -708,25 +848,25 @@ proc appendLayout*(p: var Path, xf: Xform, lay: TextLayout, x, y: float64,
       if not sf.drawGlyph(newGlyphId(g.gid),
           proc(op: DrawOp) = ops.add(op)):
         continue
-      let s = lay.sizePx / gf.upem
+      let gs = (if g.size > 0.0: g.size else: lay.sizePx) / gf.upem
       let gx = ox + g.x
       let gy = oy + g.y
       for op in ops:
         case op.kind
         of moveTo:
-          p.moveTo(gx + float64(op.to.x) * s, gy - float64(op.to.y) * s,
+          p.moveTo(gx + float64(op.to.x) * gs, gy - float64(op.to.y) * gs,
             xf)
         of lineTo:
-          p.lineTo(gx + float64(op.to.x) * s, gy - float64(op.to.y) * s,
+          p.lineTo(gx + float64(op.to.x) * gs, gy - float64(op.to.y) * gs,
             xf)
         of quadraticTo:
-          p.quadTo(gx + float64(op.qCtrl.x) * s,
-            gy - float64(op.qCtrl.y) * s, gx + float64(op.qTo.x) * s,
-            gy - float64(op.qTo.y) * s, xf)
+          p.quadTo(gx + float64(op.qCtrl.x) * gs,
+            gy - float64(op.qCtrl.y) * gs, gx + float64(op.qTo.x) * gs,
+            gy - float64(op.qTo.y) * gs, xf)
         of cubicTo:
-          p.bezierTo(gx + float64(op.c1.x) * s,
-            gy - float64(op.c1.y) * s, gx + float64(op.c2.x) * s,
-            gy - float64(op.c2.y) * s, gx + float64(op.cTo.x) * s,
-            gy - float64(op.cTo.y) * s, xf)
+          p.bezierTo(gx + float64(op.c1.x) * gs,
+            gy - float64(op.c1.y) * gs, gx + float64(op.c2.x) * gs,
+            gy - float64(op.c2.y) * gs, gx + float64(op.cTo.x) * gs,
+            gy - float64(op.cTo.y) * gs, xf)
         of closePath:
           p.closePath()

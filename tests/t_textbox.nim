@@ -322,6 +322,52 @@ test "stateful fallback draws both fonts":
     0.0, 1.2, 0.0, [], [fontB])
   check d.surface.getPixel(27, 25).r < 0.1
 
+test "spans mix sizes in one line":
+  let font = loadFontBytes(buildTestFont())
+  let spans = [TextSpan(first: 1, last: 2, size: 30.0)]
+  let lay = layoutSpans(font, 20.0, "AB", spans)
+  check lay.lines[0].advance == 33.0 # 12 + 21
+  check lay.lines[0].glyphs[0].size == 0.0
+  check lay.lines[0].glyphs[1].size == 30.0
+  check close(lay.lines[0].glyphs[1].x, 12.0)
+
+test "spans mix fonts and colors":
+  let font = loadFontBytes(buildTestFont())
+  let fontB = loadFontBytes(buildTestFontSingle(0x42u16))
+  let spans = [TextSpan(first: 1, last: 2, font: fontB,
+    hasColor: true, color: rgbf(1, 0, 0))]
+  let lay = layoutSpans(font, 20.0, "AB", spans)
+  check lay.lines[0].advance == 24.0 # 12 + triangle 12
+  check lay.lines[0].glyphs[1].font == fontB
+  check lay.lines[0].glyphs[1].hasColor
+  check lay.lines[0].glyphs[0].hasColor == false
+
+test "span box draws mixed colors":
+  let c = newCanvas(120, 120)
+  c.clear(rgb(255, 255, 255))
+  let font = loadFontBytes(buildTestFont())
+  let spans = [TextSpan(first: 1, last: 2, hasColor: true,
+    color: rgbf(1, 0, 0))]
+  var o = TextBoxOpts(maxW: 200, boxH: 40, va: tvaBaseline)
+  discard c.fillSpanBox(font, 20.0, 10, 30, "AB", spans, o)
+  let aPx = c.surface.getPixel(15, 25)
+  check aPx.r < 0.1 and aPx.g < 0.1 and aPx.b < 0.1 # A layout-black
+  let bPx = c.surface.getPixel(29, 25)
+  check bPx.r > 0.9 and bPx.g < 0.1 and bPx.b < 0.1 # B span-red
+
+test "span justify and measure":
+  let c = testCanvas()
+  let font = loadFontBytes(buildTestFont())
+  let spans = [TextSpan(first: 2, last: 3, size: 30.0)]
+  var o = TextBoxOpts(maxW: 56, ha: thaJustify)
+  let m = c.measureSpanBox(font, 20.0, 0, 0, "A B", spans, o)
+  check m.lineCount == 1
+  # A(12) + space(10) + B@30(21) = 43 natural, spread to 56.
+  let bl = layoutBoxSpans(font, 20.0, "A B", spans, 0.0, 1.2, 0.0,
+    o, [], [])
+  check bl.lay.lines[0].advance == 56.0
+  check close(bl.lay.lines[0].glyphs[2].x, 35.0) # 22 + extra 13
+
 test "hit test maps points to glyphs":
   let font = loadFontBytes(buildTestFont())
   let lay = layoutText(font, 20.0, "AB")

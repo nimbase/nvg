@@ -29,7 +29,7 @@ proc caption(c: Canvas, x, y: float64, s: string) =
 
 proc main(fontPath, outDir: string) =
   createDir(outDir)
-  let c = newCanvas(960, 2100)
+  let c = newCanvas(960, 2240)
   c.clear(rgb(255, 255, 255))
   let id = c.createFont("demo", fontPath)
   if id == 0:
@@ -188,6 +188,30 @@ proc main(fontPath, outDir: string) =
     c.lineTo(48 + cx, 1980)
     c.stroke()
     discard c.fillText(48 + cx + 3, 1986, $h.byteIndex)
+
+  # --- Span row: mixed sizes, colors and decor in two boxes. ---
+  caption(c, 40, 2070, "rich spans (sizes, colors, decor, justify)")
+  c.setFontSize(19.0)
+  c.setFillColor(rgbf(0.1, 0.1, 0.1))
+  c.boxFrame(40, 2086, 440, 120)
+  let headline = "A Midsummer Night's Dream"
+  let hspans = [
+    TextSpan(first: 0, last: 1, size: 34.0),
+    TextSpan(first: 2, last: 12, hasColor: true,
+      color: rgbf(0.7, 0.12, 0.1)),
+    TextSpan(first: 12, last: 19, decor: tdUnderline),
+  ]
+  var hso = TextBoxOpts(maxW: 424, boxH: 110, va: tvaMiddle)
+  discard c.fillSpanBox(48, 2091, headline, hspans, hso)
+  c.boxFrame(500, 2086, 420, 120)
+  let stext = "Over hill, over dale, thorough bush, thorough brier."
+  let sspans = [
+    TextSpan(first: 11, last: 20, size: 24.0),
+    TextSpan(first: 22, last: 35, hasColor: true,
+      color: rgbf(0.1, 0.35, 0.65), decor: tdUnderline),
+  ]
+  var sso = TextBoxOpts(maxW: 404, boxH: 110, ha: thaJustify)
+  discard c.fillSpanBox(508, 2091, stext, sspans, sso)
 
   c.savePng(outDir / "textbox.png")
   echo "wrote ", outDir / "textbox.png"

@@ -491,14 +491,44 @@ proc widestAdvance(lay: TextLayout): float64 =
   for line in lay.lines:
     result = max(result, line.advance)
 
+proc paintGroup(c: Canvas, lay: TextLayout, x, y: float64,
+    ha: TextHAlign, va: TextVAlign, strokeMode: bool, wantColor: bool,
+    color: Color)
+
 proc paintLayout(c: Canvas, lay: TextLayout, x, y: float64,
     ha: TextHAlign, va: TextVAlign, strokeMode: bool) =
+  var cols: seq[Color] = @[]
+  for line in lay.lines:
+    for g in line.glyphs:
+      if g.hasColor:
+        var seen = false
+        for col in cols:
+          if sameColor(col, g.color):
+            seen = true
+            break
+        if not seen:
+          cols.add(g.color)
+  if cols.len == 0:
+    c.paintGroup(lay, x, y, ha, va, strokeMode, false,
+      rgbf(0, 0, 0))
+  else:
+    c.paintGroup(lay, x, y, ha, va, strokeMode, false,
+      rgbf(0, 0, 0))
+    for col in cols:
+      c.paintGroup(lay, x, y, ha, va, strokeMode, true, col)
+
+proc paintGroup(c: Canvas, lay: TextLayout, x, y: float64,
+    ha: TextHAlign, va: TextVAlign, strokeMode: bool, wantColor: bool,
+    color: Color) =
   var p = Path()
-  p.appendLayout(c.states[^1].xform, lay, x, y, ha, va)
+  p.appendLayoutSpan(c.states[^1].xform, lay, x, y, ha, va, wantColor,
+    color)
   let polys = p.flatten(c.tessTol, DefaultDistTol)
   if polys.len == 0:
     return
   let st = c.states[^1]
+  let paint = if wantColor: solidPaint(color) else:
+    (if strokeMode: st.stroke else: st.fill)
   if strokeMode:
     let w = clamp(st.strokeWidth * averageScale(st.xform), 0.0, 200.0)
     if w <= 0.0:
@@ -506,11 +536,11 @@ proc paintLayout(c: Canvas, lay: TextLayout, x, y: float64,
     let dashed = applyDash(polys, st.dash, st.dashOffset)
     if dashed.len == 0:
       return
-    c.backend.stroke(c.surf, dashed, st.stroke, w, st.lineCap,
+    c.backend.stroke(c.surf, dashed, paint, w, st.lineCap,
       st.lineJoin, st.miterLimit, st.alpha, st.clip, c.shapeAA,
       st.compOp)
   else:
-    c.backend.fill(c.surf, polys, st.fill, st.alpha, st.clip,
+    c.backend.fill(c.surf, polys, paint, st.alpha, st.clip,
       c.shapeAA, st.compOp, frNonZero)
 
 proc shiftBounds(lay: TextLayout, x, y: float64, ha: TextHAlign,
@@ -811,6 +841,579 @@ proc widestStrings(font: TextFont, px: float64, lines: seq[WrapLine],
       features, cache, fallbacks).advance
     result = max(result, a)
 
+# --- Rich text spans: shared text, per-range fonts/sizes/colors ---
+
+type
+  SpanPiece = tuple[span: int, text: string, word: int]
+    ## A maximal same-span run (`span` -1 = layout style, `word`
+    ## the word index in its line, -1 for gaps).
+  SpanLine = object
+    items*: seq[SpanPiece]
+    para*: int
+    idx*: int
+    last*: bool
+
+proc splitSpanPieces(spans: openArray[TextSpan], pos: int,
+    text: string, word = -1): seq[SpanPiece] =
+  ## Split `text` (starting at byte `pos`) at span boundaries.
+  result = @[]
+  var cur = -2
+  var start = 0
+  var i = 0
+  while i < text.len:
+    let si = spanAt(spans, pos + i)
+    if si != cur:
+      if cur != -2:
+        result.add((cur, text[start ..< i], word))
+      cur = si
+      start = i
+    # Advance one rune (pieces stay valid UTF-8).
+    var w = 1
+    while i + w < text.len and (ord(text[i + w]) and 0xC0) == 0x80:
+      inc w
+    i += w
+  if cur != -2:
+    result.add((cur, text[start ..< i], word))
+
+proc spanFontSize(spans: openArray[TextSpan], si: int,
+    font: TextFont, px: float64): tuple[font: TextFont, size: float64] =
+  if si >= 0:
+    let f = if spans[si].font != nil: spans[si].font else: font
+    let sz = if spans[si].size > 0.0: spans[si].size else: px
+    (f, sz)
+  else:
+    (font, px)
+
+proc shapeSpanPiece(font: TextFont, px: float64,
+    spans: openArray[TextSpan], si: int, text: string,
+    letterSpacing: float64, features: openArray[Feature],
+    cache: ShapeCache,
+    fallbacks: openArray[TextFont]): ShapedLine =
+  let (f, sz) = spanFontSize(spans, si, font, px)
+  shapeCached(f, sz, text, letterSpacing, features, cache, fallbacks)
+
+proc renderSpanGap(font: TextFont, px: float64,
+    spans: openArray[TextSpan], lineAdv: float64, atStart: bool,
+    run: string, runPos: int, letterSpacing: float64, collapse: bool,
+    tabW: float64, features: openArray[Feature],
+    cache: ShapeCache,
+    fallbacks: openArray[TextFont]): seq[SpanPiece] =
+  ## Render a raw whitespace run for span layout, split at span
+  ## boundaries so metrics follow each piece's span. Collapsed: one
+  ## space (leading runs vanish), or one tab stop from `lineAdv`.
+  ## Preserved: spaces verbatim, tabs to stops with a running
+  ## advance from `lineAdv`.
+  if run.len == 0:
+    return @[]
+  if collapse:
+    if atStart:
+      return @[]
+    if '\t' in run:
+      let si = spanAt(spans, runPos)
+      let (f, sz) = spanFontSize(spans, si, font, px)
+      let sa = shapeCached(f, sz, " ", letterSpacing, features,
+        cache, fallbacks).advance
+      return @[(si, stopPad(sa, tabW, lineAdv), -1)]
+    return @[(spanAt(spans, runPos), " ", -1)]
+  result = @[]
+  var cur = lineAdv
+  for pc in splitSpanPieces(spans, runPos, run):
+    let (f, sz) = spanFontSize(spans, pc.span, font, px)
+    let sa = shapeCached(f, sz, " ", letterSpacing, features,
+      cache, fallbacks).advance
+    var outp = ""
+    for ch in pc.text:
+      if ch == ' ':
+        outp.add(' ')
+        cur += sa
+      else:
+        let pad = stopPad(sa, tabW, cur)
+        outp.add(pad)
+        cur += float64(pad.len) * sa
+    if outp != "":
+      result.add((pc.span, outp, -1))
+
+proc pieceAdvance(font: TextFont, px: float64,
+    spans: openArray[TextSpan], pc: SpanPiece, letterSpacing: float64,
+    features: openArray[Feature], cache: ShapeCache,
+    fallbacks: openArray[TextFont]): float64 =
+  let (f, sz) = spanFontSize(spans, pc.span, font, px)
+  shapeCached(f, sz, pc.text, letterSpacing, features, cache,
+    fallbacks).advance
+
+proc piecesAdvance(font: TextFont, px: float64,
+    spans: openArray[TextSpan], pcs: openArray[SpanPiece],
+    letterSpacing: float64, features: openArray[Feature],
+    cache: ShapeCache,
+    fallbacks: openArray[TextFont]): float64 =
+  for pc in pcs:
+    result += pieceAdvance(font, px, spans, pc, letterSpacing,
+      features, cache, fallbacks)
+
+proc assembleSpanLine(font: TextFont, px: float64,
+    spans: openArray[TextSpan], items: openArray[SpanPiece],
+    letterSpacing: float64, features: openArray[Feature],
+    cache: ShapeCache, fallbacks: openArray[TextFont],
+    justifyExtra = 0.0): ShapedLine =
+  ## Concatenate shaped pieces with pen, line-local clusters, and
+  ## span styles (size/color/decor; font stays nil unless a fallback
+  ## shaped the glyph). `justifyExtra` adds fractional pen at each
+  ## word boundary crossed.
+  result = ShapedLine(glyphs: @[], advance: 0.0)
+  var pen = 0.0
+  var byteOff = 0
+  var curWord = -2
+  for pc in items:
+    if pc.word >= 0 and pc.word != curWord:
+      if curWord != -2:
+        pen += justifyExtra
+      curWord = pc.word
+    let sh = shapeSpanPiece(font, px, spans, pc.span, pc.text,
+      letterSpacing, features, cache, fallbacks)
+    for g in sh.glyphs:
+      var gg = g
+      gg.x += pen
+      if gg.hasInk:
+        gg.x0 += pen
+        gg.x1 += pen
+      gg.cluster += uint32(byteOff)
+      if pc.span >= 0:
+        let (f, _) = spanFontSize(spans, pc.span, font, px)
+        if f != font and gg.font == nil:
+          gg.font = f
+        if spans[pc.span].size > 0.0:
+          gg.size = spans[pc.span].size
+        gg.hasColor = spans[pc.span].hasColor
+        gg.color = spans[pc.span].color
+        gg.decor = spans[pc.span].decor
+      result.glyphs.add(gg)
+    pen += sh.advance
+    byteOff += pc.text.len
+  result.advance = pen
+
+proc breakSpanPiece(font: TextFont, px: float64,
+    spans: openArray[TextSpan], pcs: openArray[SpanPiece], room: float64,
+    hyphen: string, letterSpacing: float64,
+    features: openArray[Feature], cache: ShapeCache,
+    fallbacks: openArray[TextFont]): tuple[kept, rest: seq[SpanPiece]]
+
+proc wrapSpansAll(font: TextFont, px: float64, s: string,
+    spans: openArray[TextSpan], letterSpacing: float64, maxW: float64,
+    indent: float64, o: TextBoxOpts, features: openArray[Feature],
+    cache: ShapeCache,
+    fallbacks: openArray[TextFont]): seq[SpanLine] =
+  ## Greedy word wrap over span-tagged text. Words keep their span
+  ## pieces; gaps render per whitespace mode. Over-wide words
+  ## emergency-break (`breakWord`) inside their pieces, else take
+  ## their own line.
+  result = @[]
+  let collapse = o.whiteSpace == twNormal
+  let doWrap = o.wrap and o.whiteSpace != twPre
+  let spaceAdv = shapeCached(font, px, " ", letterSpacing, features,
+    cache, fallbacks).advance
+  let tabW = if o.tabWidth > 0.0: o.tabWidth else: 8.0 * spaceAdv
+  var paraStart = 0
+  var pi = 0
+  for para in splitTextLines(s):
+    # Words and raw gap runs with byte offsets.
+    var words: seq[tuple[text: string, pos: int]] = @[]
+    var gaps: seq[tuple[text: string, pos: int]] = @[]
+    var cur = ""
+    var lead = ""
+    var leadPos = paraStart
+    var pos = paraStart
+    for ch in para:
+      if ch == ' ' or ch == '\t':
+        if cur != "":
+          words.add((cur, pos - cur.len))
+          gaps.add(("", pos))
+          cur = ""
+        if words.len > 0:
+          gaps[^1].text.add(ch)
+        else:
+          lead.add(ch)
+      else:
+        cur.add(ch)
+      inc pos
+    if cur != "":
+      words.add((cur, pos - cur.len))
+      gaps.add(("", pos))
+    var lines: seq[seq[SpanPiece]] = @[]
+    if doWrap and maxW > 0.0:
+      var line: seq[SpanPiece] = @[]
+      var lineAdv = 0.0
+      var first = true
+      var leadDone = collapse
+      var wi = 0
+      var wordId = 0
+      while wi < words.len:
+        let budget = maxW - (if first: indent else: 0.0)
+        var join: seq[SpanPiece] = @[]
+        if line.len > 0:
+          join = renderSpanGap(font, px, spans, lineAdv, false,
+            gaps[wi - 1].text, gaps[wi - 1].pos, letterSpacing,
+            collapse, tabW, features, cache, fallbacks)
+        elif not leadDone:
+          join = renderSpanGap(font, px, spans, 0.0, true, lead,
+            leadPos, letterSpacing, collapse, tabW, features, cache,
+            fallbacks)
+        var wpcs: seq[SpanPiece] = @[]
+        for pc in splitSpanPieces(spans, words[wi].pos,
+            words[wi].text, wordId):
+          wpcs.add(pc)
+        let trialAdv = lineAdv + piecesAdvance(font, px, spans, join,
+          letterSpacing, features, cache, fallbacks) +
+          piecesAdvance(font, px, spans, wpcs, letterSpacing,
+            features, cache, fallbacks)
+        if trialAdv <= budget or line.len == 0:
+          if line.len == 0 and trialAdv > budget:
+            # Over-wide word alone on the line.
+            if o.breakWord:
+              var rest = wpcs
+              var firstFrag = true
+              while rest.len > 0:
+                let room = budget - (if firstFrag: lineAdv +
+                    piecesAdvance(font, px, spans, join,
+                      letterSpacing, features, cache,
+                      fallbacks) else: 0.0)
+                let frag = breakSpanPiece(font, px, spans, rest,
+                  room, o.hyphenChar, letterSpacing, features,
+                  cache, fallbacks)
+                if firstFrag:
+                  line = line & join & frag.kept
+                  lineAdv += piecesAdvance(font, px, spans, join,
+                    letterSpacing, features, cache, fallbacks) +
+                    piecesAdvance(font, px, spans, frag.kept,
+                      letterSpacing, features, cache, fallbacks)
+                  firstFrag = false
+                else:
+                  lines.add(line)
+                  line = frag.kept
+                  lineAdv = piecesAdvance(font, px, spans, frag.kept,
+                    letterSpacing, features, cache, fallbacks)
+                rest = frag.rest
+                if frag.kept.len == 0 and rest.len > 0:
+                  # No progress guard (should not happen).
+                  line = line & rest
+                  break
+            else:
+              line = line & join & wpcs
+              lineAdv = trialAdv
+          else:
+            line = line & join & wpcs
+            lineAdv = trialAdv
+          leadDone = true
+          inc wi
+          inc wordId
+        else:
+          lines.add(line)
+          line = @[]
+          lineAdv = 0.0
+          first = false
+      if words.len == 0:
+        let solo = renderSpanGap(font, px, spans, 0.0, true, lead,
+          leadPos, letterSpacing, collapse, tabW, features, cache,
+          fallbacks)
+        lines.add(solo)
+      else:
+        if not collapse and gaps[^1].text.len > 0 and line.len > 0:
+          let tail = renderSpanGap(font, px, spans, lineAdv, false,
+            gaps[^1].text, gaps[^1].pos, letterSpacing, collapse,
+            tabW, features, cache, fallbacks)
+          line = line & tail
+        if line.len > 0:
+          lines.add(line)
+      if lines.len == 0:
+        lines.add(@[])
+    else:
+      # No wrap: one line; collapse joins words, preserve expands.
+      var items: seq[SpanPiece] = @[]
+      if collapse:
+        var flatAdv = 0.0
+        for i, w in words:
+          if i > 0:
+            let gp = renderSpanGap(font, px, spans, flatAdv, false,
+              " ", w.pos - 1, letterSpacing, true, tabW, features,
+              cache, fallbacks)
+            items = items & gp
+            flatAdv += piecesAdvance(font, px, spans, gp,
+              letterSpacing, features, cache, fallbacks)
+          for pc in splitSpanPieces(spans, w.pos, w.text, i):
+            items.add(pc)
+            flatAdv += pieceAdvance(font, px, spans, pc,
+              letterSpacing, features, cache, fallbacks)
+        lines.add(items)
+      else:
+        var adv = 0.0
+        if lead.len > 0:
+          let lp = renderSpanGap(font, px, spans, 0.0, true, lead,
+            leadPos, letterSpacing, false, tabW, features, cache,
+            fallbacks)
+          items = items & lp
+          adv += piecesAdvance(font, px, spans, lp, letterSpacing,
+            features, cache, fallbacks)
+        for i, w in words:
+          for pc in splitSpanPieces(spans, w.pos, w.text, i):
+            items.add(pc)
+            adv += pieceAdvance(font, px, spans, pc, letterSpacing,
+              features, cache, fallbacks)
+          let gp = renderSpanGap(font, px, spans, adv, false,
+            gaps[i].text, gaps[i].pos, letterSpacing, false, tabW,
+            features, cache, fallbacks)
+          items = items & gp
+          adv += piecesAdvance(font, px, spans, gp, letterSpacing,
+            features, cache, fallbacks)
+        lines.add(items)
+    for i, ln in lines:
+      result.add(SpanLine(items: ln, para: pi, idx: i,
+        last: i == lines.len - 1))
+    inc pi
+    paraStart += para.len + 1
+
+proc breakSpanPiece(font: TextFont, px: float64,
+    spans: openArray[TextSpan], pcs: openArray[SpanPiece], room: float64,
+    hyphen: string, letterSpacing: float64,
+    features: openArray[Feature], cache: ShapeCache,
+    fallbacks: openArray[TextFont]): tuple[kept, rest: seq[SpanPiece]] =
+  ## Take a prefix of the word pieces fitting `room`, hyphenating
+  ## inside the last taken piece. Progress is guaranteed (a bare
+  ## rune always fits somewhere).
+  var kept: seq[SpanPiece] = @[]
+  var rest: seq[SpanPiece] = @[]
+  var used = 0.0
+  var i = 0
+  while i < pcs.len and used + pieceAdvance(font, px, spans, pcs[i],
+      letterSpacing, features, cache, fallbacks) <= room:
+    kept.add(pcs[i])
+    used += pieceAdvance(font, px, spans, pcs[i], letterSpacing,
+      features, cache, fallbacks)
+    inc i
+  for j in i ..< pcs.len:
+    rest.add(pcs[j])
+  if rest.len == 0:
+    return (kept, rest)
+  let (f, sz) = spanFontSize(spans, rest[0].span, font, px)
+  let frags = breakPieces(f, sz, rest[0].text, letterSpacing, room,
+    hyphen, features, cache, fallbacks)
+  for k in 0 ..< frags.len - 1:
+    kept.add((rest[0].span, frags[k], rest[0].word))
+  var tail: seq[SpanPiece] = @[]
+  if frags[^1] != "":
+    tail.add((rest[0].span, frags[^1], rest[0].word))
+  for j in 1 ..< rest.len:
+    tail.add(rest[j])
+  (kept, tail)
+
+proc spanJustifyExtra(font: TextFont, px: float64,
+    spans: openArray[TextSpan], items: openArray[SpanPiece],
+    boxW: float64, letterSpacing: float64,
+    features: openArray[Feature], cache: ShapeCache,
+    fallbacks: openArray[TextFont]): float64 =
+  ## Even share per word boundary spreading the line to `boxW` (`0`
+  ## when there is nothing to spread between). Applied as fractional
+  ## pen at assembly, so justification is exact.
+  var ids: seq[int] = @[]
+  for pc in items:
+    if pc.word >= 0 and pc.word notin ids:
+      ids.add(pc.word)
+  if ids.len < 2:
+    return 0.0
+  let natural = piecesAdvance(font, px, spans, items, letterSpacing,
+    features, cache, fallbacks)
+  if natural >= boxW:
+    return 0.0
+  (boxW - natural) / float64(ids.len - 1)
+
+proc spanEllipsizeLine(font: TextFont, px: float64,
+    spans: openArray[TextSpan], items: openArray[SpanPiece],
+    maxW: float64, marker: string, letterSpacing: float64,
+    features: openArray[Feature], cache: ShapeCache,
+    fallbacks: openArray[TextFont]): seq[SpanPiece] =
+  ## Trim trailing items (then runes) and append `marker` in the last
+  ## kept piece's span until the line fits `maxW`.
+  var kept: seq[SpanPiece] = @items
+  while true:
+    let adv = piecesAdvance(font, px, spans, kept, letterSpacing,
+      features, cache, fallbacks)
+    if adv <= maxW or kept.len == 0:
+      return kept
+    while kept.len > 0 and kept[^1].word < 0:
+      kept.setLen(kept.len - 1)
+    if kept.len == 0:
+      return kept
+    let last = kept[^1]
+    let rest = piecesAdvance(font, px, spans,
+      kept[0 ..< kept.len - 1], letterSpacing, features, cache,
+      fallbacks)
+    let (f, sz) = spanFontSize(spans, last.span, font, px)
+    var runes = last.text.toRunes()
+    var done = false
+    while runes.len > 0:
+      runes.setLen(runes.len - 1)
+      let t = $runes & marker
+      if shapeCached(f, sz, t, letterSpacing, features, cache,
+          fallbacks).advance <= maxW - rest:
+        kept[^1] = (last.span, t, last.word)
+        done = true
+        break
+    if done:
+      return kept
+    if shapeCached(f, sz, marker, letterSpacing, features, cache,
+        fallbacks).advance <= maxW - rest:
+      kept[^1] = (last.span, marker, last.word)
+      return kept
+    kept.setLen(kept.len - 1)
+
+proc widestSpanLines(font: TextFont, px: float64,
+    spans: openArray[TextSpan], lines: openArray[SpanLine],
+    letterSpacing: float64, features: openArray[Feature],
+    cache: ShapeCache,
+    fallbacks: openArray[TextFont]): float64 =
+  for ln in lines:
+    result = max(result, piecesAdvance(font, px, spans, ln.items,
+      letterSpacing, features, cache, fallbacks))
+
+proc layoutBoxSpans*(font: TextFont, sizePx: float64, s: string,
+    spans: openArray[TextSpan], letterSpacing = 0.0,
+    lineHeightMul = 1.2, lineHeightAbs = 0.0, o: TextBoxOpts,
+    features: openArray[Feature] = [],
+    fallbacks: openArray[TextFont] = []): tuple[lay: TextLayout,
+      shift: float64, sizePx: float64] =
+  ## Box layout over span-tagged text: mirrors `layoutBoxOpts`
+  ## (wrap, clamp, fit, justify, ellipsis, scale, align, gap,
+  ## indent) with per-range fonts, sizes, colors and decorations.
+  ## Ranges index `s` after `\r\n`/`\r` normalization. Pure layout.
+  let src = s.replace("\r\n", "\n").replace("\r", "\n")
+  let maxW = o.maxW
+  let k = max(0.0, o.scaleX)
+  let cache = newShapeCache()
+  template widestAt(px: int32): float64 =
+    var wlines = wrapSpansAll(font, float64(px), src, spans,
+      letterSpacing, maxW, o.firstLineIndent, o, features, cache,
+      fallbacks)
+    if o.maxLines > 0 and wlines.len > o.maxLines:
+      wlines.setLen(o.maxLines)
+    widestSpanLines(font, float64(px), spans, wlines, letterSpacing,
+      features, cache, fallbacks) * k
+  let px0 = quantizePx(sizePx)
+  var px = float64(px0)
+  if o.fit != tfNone and maxW > 0.0:
+    let w0 = widestAt(px0)
+    if w0 != 0.0:
+      case o.fit
+      of tfNone:
+        discard
+      of tfShrink:
+        if w0 > maxW:
+          let floor = if o.minSize > 0.0: quantizePx(o.minSize)
+            else: 1i32
+          if floor >= px0:
+            px = float64(px0) # bound above request: keep request
+          elif widestAt(floor) > maxW:
+            px = float64(floor) # floor: overflows, keeps the bound
+          else:
+            var lo = floor
+            var hi = px0 - 1i32
+            while lo < hi:
+              let mid = (lo + hi + 1i32) div 2i32
+              if widestAt(mid) <= maxW:
+                lo = mid
+              else:
+                hi = mid - 1i32
+            px = float64(lo)
+      of tfStretch:
+        if w0 <= maxW:
+          let cap = max(px0, if o.maxSize > 0.0: quantizePx(o.maxSize)
+            else: 8192i32)
+          if not (widestAt(cap) <= maxW):
+            var hi = px0 + 1i32
+            while hi <= cap and widestAt(hi) <= maxW:
+              hi *= 2i32
+            var lo = min(px0, hi div 2i32)
+            hi = min(hi, cap + 1i32)
+            while lo < hi:
+              let mid = (lo + hi + 1i32) div 2i32
+              if mid > cap or widestAt(mid) > maxW:
+                hi = mid - 1i32
+              else:
+                lo = mid
+            px = float64(lo)
+          else:
+            px = float64(cap)
+  let step = if lineHeightAbs > 0.0: lineHeightAbs
+    else: px * max(0.0, lineHeightMul)
+  var lay = TextLayout(font: font, lines: @[], sizePx: px,
+    lineHeightPx: step)
+  var lines = wrapSpansAll(font, px, src, spans, letterSpacing, maxW,
+    o.firstLineIndent, o, features, cache, fallbacks)
+  if o.maxLines > 0 and lines.len > o.maxLines:
+    lines.setLen(o.maxLines)
+    lines[^1].last = true
+  for wl in lines:
+    let indent = if wl.idx == 0: o.firstLineIndent else: 0.0
+    let effW = maxW - indent
+    var items = wl.items
+    var extra = 0.0
+    if o.overflow == toEllipsis:
+      let adv = piecesAdvance(font, px, spans, items, letterSpacing,
+        features, cache, fallbacks)
+      if adv > effW and effW > 0.0:
+        items = spanEllipsizeLine(font, px, spans, items, effW,
+          o.ellipsis, letterSpacing, features, cache, fallbacks)
+    elif o.ha == thaJustify and effW > 0.0 and
+        (not wl.last or wl.idx == 0):
+      extra = spanJustifyExtra(font, px, spans, items, effW,
+        letterSpacing, features, cache, fallbacks)
+    var shaped = assembleSpanLine(font, px, spans, items,
+      letterSpacing, features, cache, fallbacks, extra)
+    if indent != 0.0:
+      for j in 0 ..< shaped.glyphs.len:
+        shaped.glyphs[j].x += indent
+        if shaped.glyphs[j].hasInk:
+          shaped.glyphs[j].x0 += indent
+          shaped.glyphs[j].x1 += indent
+    lay.lines.add(shaped)
+  lay = lay.withScaleX(o.scaleX)
+  if maxW > 0.0 and (o.ha == thaCenter or o.ha == thaRight):
+    for i in 0 ..< lay.lines.len:
+      let xoff = if o.ha == thaCenter:
+          (maxW - lay.lines[i].advance) * 0.5
+        else:
+          maxW - lay.lines[i].advance
+      if xoff != 0.0:
+        for j in 0 ..< lay.lines[i].glyphs.len:
+          lay.lines[i].glyphs[j].x += xoff
+          if lay.lines[i].glyphs[j].hasInk:
+            lay.lines[i].glyphs[j].x0 += xoff
+            lay.lines[i].glyphs[j].x1 += xoff
+  if o.paragraphGap != 0.0 and lay.lines.len > 0:
+    var acc = 0.0
+    var prevPara = lines[0].para
+    for i in 0 ..< lay.lines.len:
+      if lines[i].para != prevPara:
+        acc += o.paragraphGap
+        prevPara = lines[i].para
+      if acc != 0.0:
+        for j in 0 ..< lay.lines[i].glyphs.len:
+          lay.lines[i].glyphs[j].y += acc
+          if lay.lines[i].glyphs[j].hasInk:
+            lay.lines[i].glyphs[j].y0 += acc
+            lay.lines[i].glyphs[j].y1 += acc
+  var shift = 0.0
+  if o.va != tvaBaseline:
+    let ink = layoutInk(lay, thaLeft)
+    if ink.found:
+      case o.va
+      of tvaBaseline:
+        discard
+      of tvaTop:
+        shift = -ink.y0
+      of tvaMiddle:
+        shift = (o.boxH - (ink.y1 - ink.y0)) * 0.5 - ink.y0
+      of tvaBottom:
+        shift = o.boxH - ink.y1
+  (lay, shift, px)
+
 proc layoutBoxOpts*(font: TextFont, sizePx: float64, s: string,
     letterSpacing: float64, lineHeightMul: float64,
     lineHeightAbs: float64, o: TextBoxOpts,
@@ -989,32 +1592,50 @@ proc layoutBoxOpts*(font: TextFont, sizePx: float64, s: string,
 
 proc paintDeco(c: Canvas, lay: TextLayout, x, y: float64,
     decor: TextDecor, strokeMode: bool) =
-  ## Underline/strikethrough rules from per-line ink extents, drawn
-  ## at `(x, y)` like the glyphs (caller adds the box shift).
-  ## Underline sits below each line's deepest ink; strike crosses at
-  ## ~x-height/2. Thickness scales with the laid-out size.
-  if decor == tdNone or lay.lines.len == 0:
+  ## Underline/strikethrough rules from ink extents, drawn at `(x, y)`
+  ## like the glyphs (caller adds the box shift). Consecutive glyphs
+  ## sharing an effective decor (per-glyph override, else `decor`)
+  ## share one rule: underline sits below the group's deepest ink,
+  ## strike crosses at ~x-height/2 of the group's largest size.
+  ## Thickness scales with size.
+  if lay.lines.len == 0:
     return
-  let t = max(1.0, lay.sizePx / 16.0)
   var p = Path()
   for i, line in lay.lines:
-    var x0 = Inf
-    var x1 = -Inf
-    var desc = 0.0
-    for g in line.glyphs:
-      if g.hasInk:
-        x0 = min(x0, g.x0)
-        x1 = max(x1, g.x1)
-        desc = max(desc, g.y1)
-    if x1 <= x0:
-      continue
     let base = y + float64(i) * lay.lineHeightPx
-    if decor == tdUnderline or decor == tdUnderStrike:
-      let uy = base + desc + max(1.0, lay.sizePx * 0.06)
-      p.rect(x + x0, uy, x1 - x0, t, c.states[^1].xform)
-    if decor == tdStrike or decor == tdUnderStrike:
-      let sy = base - lay.sizePx * 0.28 - t * 0.5
-      p.rect(x + x0, sy, x1 - x0, t, c.states[^1].xform)
+    var gi = 0
+    while gi < line.glyphs.len:
+      let eff = if line.glyphs[gi].decor != tdNone:
+          line.glyphs[gi].decor else: decor
+      if eff == tdNone:
+        inc gi
+        continue
+      var x0 = Inf
+      var x1 = -Inf
+      var desc = 0.0
+      var gsize = lay.sizePx
+      while gi < line.glyphs.len:
+        let e2 = if line.glyphs[gi].decor != tdNone:
+            line.glyphs[gi].decor else: decor
+        if e2 != eff:
+          break
+        let g = line.glyphs[gi]
+        if g.hasInk:
+          x0 = min(x0, g.x0)
+          x1 = max(x1, g.x1)
+          desc = max(desc, g.y1)
+        if g.size > 0.0:
+          gsize = max(gsize, g.size)
+        inc gi
+      if x1 <= x0:
+        continue
+      let t = max(1.0, gsize / 16.0)
+      if eff == tdUnderline or eff == tdUnderStrike:
+        let uy = base + desc + max(1.0, gsize * 0.06)
+        p.rect(x + x0, uy, x1 - x0, t, c.states[^1].xform)
+      if eff == tdStrike or eff == tdUnderStrike:
+        let sy = base - gsize * 0.28 - t * 0.5
+        p.rect(x + x0, sy, x1 - x0, t, c.states[^1].xform)
   let polys = p.flatten(c.tessTol, DefaultDistTol)
   if polys.len == 0:
     return
@@ -1274,6 +1895,99 @@ proc textHitBox*(c: Canvas, font: TextFont, size: float64, px, py: float64,
   let bl = layoutBoxOpts(font, size, s, letterSpacing, lineHeightMul,
     lineHeightPx, o, features, fallbacks)
   hitTest(bl.lay, px, py - bl.shift, thaLeft)
+
+# --- Rich text spans: shared text, per-range style ---
+
+proc fillSpans*(c: Canvas, x, y: float64, s: string,
+    spans: openArray[TextSpan], ha = thaLeft, va = tvaBaseline,
+    features: openArray[Feature] = []): float64 =
+  ## Fill span-styled text with the state font/size/spacing as the
+  ## base style (unspanned bytes) and the state fill paint for
+  ## uncolored glyphs. Same positioning as `fillText`. Returns the
+  ## widest line advance.
+  let st = c.states[^1]
+  let lay = layoutSpans(c.lookupFont(st.fontFace), st.fontSize, s,
+    spans, st.letterSpacing, st.lineHeightMul, features,
+    st.lineHeightAbs, c.fallbackFonts())
+  c.paintLayout(lay, x, y, ha, va, false)
+  widestAdvance(lay)
+
+proc fillSpans*(c: Canvas, font: TextFont, size: float64, x, y: float64,
+    s: string, spans: openArray[TextSpan], ha = thaLeft,
+    va = tvaBaseline, letterSpacing = 0.0, lineHeightMul = 1.2,
+    lineHeightPx = 0.0, features: openArray[Feature] = [],
+    fallbacks: openArray[TextFont] = []): float64 =
+  ## Stateless overload of `fillSpans`.
+  let lay = layoutSpans(font, size, s, spans, letterSpacing,
+    lineHeightMul, features, lineHeightPx, fallbacks)
+  c.paintLayout(lay, x, y, ha, va, false)
+  widestAdvance(lay)
+
+proc fillSpanBox*(c: Canvas, x, y: float64, s: string,
+    spans: openArray[TextSpan], o: TextBoxOpts,
+    features: openArray[Feature] = []): float64 =
+  ## `TextBoxOpts` box layout over span-tagged text with the state
+  ## base style. `(x, y)` is the box top-left. Returns the widest
+  ## drawn advance.
+  let st = c.states[^1]
+  let bl = layoutBoxSpans(c.lookupFont(st.fontFace), st.fontSize, s,
+    spans, st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, o,
+    features, c.fallbackFonts())
+  c.paintBox(bl, x, y, o.maxW, o.boxH, o.overflow, false, o.decor)
+  widestAdvance(bl.lay)
+
+proc fillSpanBox*(c: Canvas, font: TextFont, size: float64, x, y: float64,
+    s: string, spans: openArray[TextSpan], o: TextBoxOpts,
+    letterSpacing = 0.0, lineHeightMul = 1.2, lineHeightPx = 0.0,
+    features: openArray[Feature] = [],
+    fallbacks: openArray[TextFont] = []): float64 =
+  ## Stateless overload of `fillSpanBox`.
+  let bl = layoutBoxSpans(font, size, s, spans, letterSpacing,
+    lineHeightMul, lineHeightPx, o, features, fallbacks)
+  c.paintBox(bl, x, y, o.maxW, o.boxH, o.overflow, false, o.decor)
+  widestAdvance(bl.lay)
+
+proc textSpanBounds*(c: Canvas, x, y: float64, s: string,
+    spans: openArray[TextSpan], o: TextBoxOpts,
+    features: openArray[Feature] = []): Rect =
+  ## Measured ink bounds for span box text (user space).
+  let st = c.states[^1]
+  let bl = layoutBoxSpans(c.lookupFont(st.fontFace), st.fontSize, s,
+    spans, st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, o,
+    features, c.fallbackFonts())
+  let b = layoutBounds(bl.lay, thaLeft)
+  rect(x + b.x, y + bl.shift + b.y, b.w, b.h)
+
+proc textSpanBounds*(c: Canvas, font: TextFont, size: float64, x, y: float64,
+    s: string, spans: openArray[TextSpan], o: TextBoxOpts,
+    letterSpacing = 0.0, lineHeightMul = 1.2, lineHeightPx = 0.0,
+    features: openArray[Feature] = [],
+    fallbacks: openArray[TextFont] = []): Rect =
+  ## Stateless overload of `textSpanBounds`.
+  let bl = layoutBoxSpans(font, size, s, spans, letterSpacing,
+    lineHeightMul, lineHeightPx, o, features, fallbacks)
+  let b = layoutBounds(bl.lay, thaLeft)
+  rect(x + b.x, y + bl.shift + b.y, b.w, b.h)
+
+proc measureSpanBox*(c: Canvas, x, y: float64, s: string,
+    spans: openArray[TextSpan], o: TextBoxOpts,
+    features: openArray[Feature] = []): TextMetrics =
+  ## Span box-layout metrics.
+  let st = c.states[^1]
+  let bl = layoutBoxSpans(c.lookupFont(st.fontFace), st.fontSize, s,
+    spans, st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, o,
+    features, c.fallbackFonts())
+  measureLayout(bl.lay, thaLeft)
+
+proc measureSpanBox*(c: Canvas, font: TextFont, size: float64, x, y: float64,
+    s: string, spans: openArray[TextSpan], o: TextBoxOpts,
+    letterSpacing = 0.0, lineHeightMul = 1.2, lineHeightPx = 0.0,
+    features: openArray[Feature] = [],
+    fallbacks: openArray[TextFont] = []): TextMetrics =
+  ## Stateless overload of `measureSpanBox`.
+  let bl = layoutBoxSpans(font, size, s, spans, letterSpacing,
+    lineHeightMul, lineHeightPx, o, features, fallbacks)
+  measureLayout(bl.lay, thaLeft)
 
 proc flattened(c: Canvas): seq[SubPoly] =
   path.flatten(c.path, c.tessTol, DefaultDistTol)
