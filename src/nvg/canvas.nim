@@ -49,6 +49,7 @@ type
     letterSpacing*: float64
     lineHeightMul*: float64
     lineHeightAbs*: float64
+    fallbackFaces*: seq[int]
 
   Canvas* = ref object
     surf*: Surface
@@ -71,7 +72,8 @@ proc defaultState*(): DrawState =
     dashOffset: 0.0, alpha: 1.0,
     clip: Clip(enabled: false), compOp: coSourceOver, fontFace: 0,
     fontSize: 16.0, textHAlign: thaLeft, textVAlign: tvaBaseline,
-    letterSpacing: 0.0, lineHeightMul: 1.2, lineHeightAbs: 0.0)
+    letterSpacing: 0.0, lineHeightMul: 1.2, lineHeightAbs: 0.0,
+    fallbackFaces: @[])
 
 proc newCanvas*(w, h: int, backend: Backend = nil): Canvas =
   result = Canvas(surf: newSurface(w, h), states: @[defaultState()],
@@ -467,6 +469,24 @@ proc setLineHeightPx*(c: Canvas, px: float64) =
 proc lookupFont(c: Canvas, id: int): TextFont =
   if id in c.fonts: c.fonts[id] else: nil
 
+proc setFallbackFonts*(c: Canvas, names: varargs[string]) =
+  ## Fallback faces for characters missing from the current font,
+  ## tried in order (see `shapeCached`). Unknown names are skipped.
+  ## Stateful: applies to every text call until changed.
+  var ids: seq[int] = @[]
+  for n in names:
+    let id = c.findFont(n)
+    if id != 0:
+      ids.add(id)
+  c.states[^1].fallbackFaces = ids
+
+proc fallbackFonts(c: Canvas): seq[TextFont] =
+  result = @[]
+  for id in c.states[^1].fallbackFaces:
+    let f = c.lookupFont(id)
+    if f != nil:
+      result.add(f)
+
 proc widestAdvance(lay: TextLayout): float64 =
   for line in lay.lines:
     result = max(result, line.advance)
@@ -507,18 +527,20 @@ proc fillText*(c: Canvas, x, y: float64, s: string,
   ## line advance. Draws nothing when no font is selected.
   let st = c.states[^1]
   let lay = layoutText(c.lookupFont(st.fontFace), st.fontSize, s,
-    st.letterSpacing, st.lineHeightMul, features, st.lineHeightAbs)
+    st.letterSpacing, st.lineHeightMul, features, st.lineHeightAbs,
+    c.fallbackFonts())
   c.paintLayout(lay, x, y, st.textHAlign, st.textVAlign, false)
   widestAdvance(lay)
 
 proc fillText*(c: Canvas, font: TextFont, size: float64, x, y: float64,
     s: string, ha = thaLeft, va = tvaBaseline, letterSpacing = 0.0,
     lineHeightMul = 1.2, lineHeightPx = 0.0,
-    features: openArray[Feature] = []): float64 =
+    features: openArray[Feature] = [],
+    fallbacks: openArray[TextFont] = []): float64 =
   ## Stateless overload: explicit font and style, canvas state untouched.
   ## `lineHeightPx > 0` overrides the multiplier with an absolute step.
   let lay = layoutText(font, size, s, letterSpacing, lineHeightMul,
-    features, lineHeightPx)
+    features, lineHeightPx, fallbacks)
   c.paintLayout(lay, x, y, ha, va, false)
   widestAdvance(lay)
 
@@ -528,17 +550,19 @@ proc strokeText*(c: Canvas, x, y: float64, s: string,
   ## and return conventions as `fillText`.
   let st = c.states[^1]
   let lay = layoutText(c.lookupFont(st.fontFace), st.fontSize, s,
-    st.letterSpacing, st.lineHeightMul, features, st.lineHeightAbs)
+    st.letterSpacing, st.lineHeightMul, features, st.lineHeightAbs,
+    c.fallbackFonts())
   c.paintLayout(lay, x, y, st.textHAlign, st.textVAlign, true)
   widestAdvance(lay)
 
 proc strokeText*(c: Canvas, font: TextFont, size: float64, x, y: float64,
     s: string, ha = thaLeft, va = tvaBaseline, letterSpacing = 0.0,
     lineHeightMul = 1.2, lineHeightPx = 0.0,
-    features: openArray[Feature] = []): float64 =
+    features: openArray[Feature] = [],
+    fallbacks: openArray[TextFont] = []): float64 =
   ## Stateless overload of `strokeText`.
   let lay = layoutText(font, size, s, letterSpacing, lineHeightMul,
-    features, lineHeightPx)
+    features, lineHeightPx, fallbacks)
   c.paintLayout(lay, x, y, ha, va, true)
   widestAdvance(lay)
 
@@ -547,16 +571,18 @@ proc textBounds*(c: Canvas, x, y: float64, s: string,
   ## Measured ink bounds for stateful text at `(x, y)` (user space).
   let st = c.states[^1]
   let lay = layoutText(c.lookupFont(st.fontFace), st.fontSize, s,
-    st.letterSpacing, st.lineHeightMul, features, st.lineHeightAbs)
+    st.letterSpacing, st.lineHeightMul, features, st.lineHeightAbs,
+    c.fallbackFonts())
   shiftBounds(lay, x, y, st.textHAlign, st.textVAlign)
 
 proc textBounds*(c: Canvas, font: TextFont, size: float64, x, y: float64,
     s: string, ha = thaLeft, va = tvaBaseline, letterSpacing = 0.0,
     lineHeightMul = 1.2, lineHeightPx = 0.0,
-    features: openArray[Feature] = []): Rect =
+    features: openArray[Feature] = [],
+    fallbacks: openArray[TextFont] = []): Rect =
   ## Stateless overload of `textBounds` (no drawing).
   let lay = layoutText(font, size, s, letterSpacing, lineHeightMul,
-    features, lineHeightPx)
+    features, lineHeightPx, fallbacks)
   shiftBounds(lay, x, y, ha, va)
 
 # --- Text boxes: wrap, justify, fit, overflow, box alignment ---
@@ -583,11 +609,11 @@ proc stopPad(spaceAdv, tabW, cur: float64): string =
 
 proc expandRun(font: TextFont, px: float64, lineSoFar: string,
     run: string, letterSpacing: float64, spaceAdv: float64,
-    tabW: float64, features: openArray[Feature], cache: ShapeCache): string =
+    tabW: float64, features: openArray[Feature], cache: ShapeCache, fallbacks: openArray[TextFont]): string =
   ## Preserve-semantics expansion of one whitespace run: spaces
   ## verbatim, tabs to stops with a running advance.
   var cur = shapeCached(font, px, lineSoFar, letterSpacing,
-    features, cache).advance
+    features, cache, fallbacks).advance
   for ch in run:
     if ch == ' ':
       result.add(' ')
@@ -599,7 +625,7 @@ proc expandRun(font: TextFont, px: float64, lineSoFar: string,
 
 proc renderGap(font: TextFont, px: float64, lineSoFar: string, run: string,
     letterSpacing: float64, collapse: bool, spaceAdv: float64,
-    tabW: float64, features: openArray[Feature], cache: ShapeCache): string =
+    tabW: float64, features: openArray[Feature], cache: ShapeCache, fallbacks: openArray[TextFont]): string =
   ## Render a raw whitespace run for layout. Collapsed: a single
   ## space, or a single tab stop when the run holds a tab (leading
   ## runs vanish). Preserved: spaces verbatim, tabs to stops with a
@@ -611,15 +637,15 @@ proc renderGap(font: TextFont, px: float64, lineSoFar: string, run: string,
       return ""
     if '\t' in run:
       let adv0 = shapeCached(font, px, lineSoFar, letterSpacing,
-        features, cache).advance
+        features, cache, fallbacks).advance
       return stopPad(spaceAdv, tabW, adv0)
     return " "
   expandRun(font, px, lineSoFar, run, letterSpacing, spaceAdv, tabW,
-    features, cache)
+    features, cache, fallbacks)
 
 proc expandPara(font: TextFont, px: float64, para: string,
     letterSpacing: float64, spaceAdv: float64, tabW: float64,
-    features: openArray[Feature], cache: ShapeCache): string =
+    features: openArray[Feature], cache: ShapeCache, fallbacks: openArray[TextFont]): string =
   ## Preserve-semantics expansion of a whole paragraph (for `twPre`):
   ## word chars verbatim, whitespace runs via `expandRun`.
   var run = ""
@@ -629,16 +655,16 @@ proc expandPara(font: TextFont, px: float64, para: string,
     else:
       if run != "":
         result.add(expandRun(font, px, result, run, letterSpacing,
-          spaceAdv, tabW, features, cache))
+          spaceAdv, tabW, features, cache, fallbacks))
         run = ""
       result.add(ch)
   if run != "":
     result.add(expandRun(font, px, result, run, letterSpacing,
-      spaceAdv, tabW, features, cache))
+      spaceAdv, tabW, features, cache, fallbacks))
 
 proc breakPieces(font: TextFont, px: float64, word: string,
     letterSpacing: float64, budget: float64, hyphen: string,
-    features: openArray[Feature], cache: ShapeCache): seq[string] =
+    features: openArray[Feature], cache: ShapeCache, fallbacks: openArray[TextFont]): seq[string] =
   ## Emergency-break `word` into budget-fitting fragments, `hyphen`
   ## suffixed but on the last. Never returns empty (a lone rune
   ## always fits somewhere).
@@ -646,15 +672,15 @@ proc breakPieces(font: TextFont, px: float64, word: string,
   var runes = word.toRunes()
   while runes.len > 0:
     if shapeCached(font, px, $runes, letterSpacing,
-        features, cache).advance <= budget:
+        features, cache, fallbacks).advance <= budget:
       result.add($runes)
       break
     var n = runes.len - 1
     while n > 1 and shapeCached(font, px, $runes[0 ..< n] & hyphen,
-        letterSpacing, features, cache).advance > budget:
+        letterSpacing, features, cache, fallbacks).advance > budget:
       dec n
     if n == 1 and shapeCached(font, px, $runes[0 ..< 1] & hyphen,
-        letterSpacing, features, cache).advance > budget:
+        letterSpacing, features, cache, fallbacks).advance > budget:
       # Even one rune plus hyphen overflows: bare rune, retry rest.
       result.add($runes[0 ..< 1])
       runes = runes[1 .. ^1]
@@ -664,7 +690,7 @@ proc breakPieces(font: TextFont, px: float64, word: string,
 
 proc wrapAll(font: TextFont, px: float64, s: string,
     letterSpacing: float64, maxW: float64, indent: float64,
-    o: TextBoxOpts, features: openArray[Feature], cache: ShapeCache): seq[WrapLine] =
+    o: TextBoxOpts, features: openArray[Feature], cache: ShapeCache, fallbacks: openArray[TextFont]): seq[WrapLine] =
   ## Greedy word wrap per paragraph, tagged with paragraph index,
   ## index within the paragraph, and end-of-paragraph flag (for
   ## last-line alignment under justify). A paragraph's first line
@@ -676,7 +702,7 @@ proc wrapAll(font: TextFont, px: float64, s: string,
   let collapse = o.whiteSpace == twNormal
   let doWrap = o.wrap and o.whiteSpace != twPre
   let spaceAdv = shapeCached(font, px, " ", letterSpacing,
-    features, cache).advance
+    features, cache, fallbacks).advance
   let tabW = if o.tabWidth > 0.0: o.tabWidth else: 8.0 * spaceAdv
   var pi = 0
   for para in splitTextLines(s):
@@ -712,19 +738,20 @@ proc wrapAll(font: TextFont, px: float64, s: string,
         var joiner = ""
         if line != "":
           joiner = renderGap(font, px, line, runs[wi - 1], letterSpacing,
-            collapse, spaceAdv, tabW, features, cache)
+            collapse, spaceAdv, tabW, features, cache, fallbacks)
         elif not leadDone:
           joiner = renderGap(font, px, "", lead, letterSpacing,
-            collapse, spaceAdv, tabW, features, cache)
+            collapse, spaceAdv, tabW, features, cache, fallbacks)
         let trial = line & joiner & words[wi]
         if shapeCached(font, px, trial, letterSpacing,
-            features, cache).advance <= budget or line == "":
+            features, cache, fallbacks).advance <= budget or line == "":
           if line == "" and shapeCached(font, px, trial, letterSpacing,
-              features, cache).advance > budget:
+              features, cache, fallbacks).advance > budget:
             # Over-wide word alone on the line.
             if o.breakWord:
               let parts = breakPieces(font, px, words[wi],
-                letterSpacing, budget, o.hyphenChar, features, cache)
+                letterSpacing, budget, o.hyphenChar, features, cache,
+                fallbacks)
               for k in 0 ..< parts.len - 1:
                 lines.add(if k == 0: joiner & parts[k]
                   else: parts[k])
@@ -741,12 +768,12 @@ proc wrapAll(font: TextFont, px: float64, s: string,
           first = false
       if words.len == 0:
         lines.add(renderGap(font, px, "", lead, letterSpacing,
-          collapse, spaceAdv, tabW, features, cache))
+          collapse, spaceAdv, tabW, features, cache, fallbacks))
       else:
         if not collapse and runs[^1].len > 0 and line != "":
           # Trailing whitespace belongs to the line in preserve modes.
           line.add(renderGap(font, px, line, runs[^1], letterSpacing,
-            collapse, spaceAdv, tabW, features, cache))
+            collapse, spaceAdv, tabW, features, cache, fallbacks))
         if line != "":
           lines.add(line)
       if lines.len == 0:
@@ -763,7 +790,7 @@ proc wrapAll(font: TextFont, px: float64, s: string,
       else:
         # No wrap, preserved: expand tabs with a running advance.
         lines.add(expandPara(font, px, para, letterSpacing, spaceAdv,
-          tabW, features, cache))
+          tabW, features, cache, fallbacks))
     for i, ln in lines:
       result.add((pi, i, i == lines.len - 1, ln))
     inc pi
@@ -777,24 +804,26 @@ proc clampCount(lines: var seq[WrapLine], maxLines: int) =
 
 proc widestStrings(font: TextFont, px: float64, lines: seq[WrapLine],
     letterSpacing: float64,
-    features: openArray[Feature], cache: ShapeCache): float64 =
+    features: openArray[Feature], cache: ShapeCache, fallbacks: openArray[TextFont]): float64 =
   ## Widest natural (unjustified) advance over already wrapped lines.
   for wl in lines:
     let a = shapeCached(font, px, wl.text, letterSpacing,
-      features, cache).advance
+      features, cache, fallbacks).advance
     result = max(result, a)
 
 proc layoutBoxOpts*(font: TextFont, sizePx: float64, s: string,
     letterSpacing: float64, lineHeightMul: float64,
     lineHeightAbs: float64, o: TextBoxOpts,
-    features: openArray[Feature]): tuple[lay: TextLayout,
+    features: openArray[Feature],
+    fallbacks: openArray[TextFont] = []): tuple[lay: TextLayout,
       shift: float64, sizePx: float64]
 
 proc layoutBox*(font: TextFont, sizePx: float64, s: string,
     letterSpacing = 0.0, lineHeightMul = 1.2, lineHeightAbs = 0.0,
     maxW = 0.0, boxH = 0.0, ha = thaLeft, va = tvaTop, wrap = true,
     overflow = toVisible, fit = tfNone, scaleX = 1.0,
-    features: openArray[Feature] = []): tuple[lay: TextLayout,
+    features: openArray[Feature] = [],
+    fallbacks: openArray[TextFont] = []): tuple[lay: TextLayout,
       shift: float64, sizePx: float64] =
   ## Lay out `s` in a `maxW` x `boxH` box: wrap paragraphs, justify
   ## (CSS rule: every line but each paragraph's last, which follows
@@ -812,12 +841,13 @@ proc layoutBox*(font: TextFont, sizePx: float64, s: string,
   var o = TextBoxOpts(maxW: maxW, boxH: boxH, ha: ha, va: va,
     wrap: wrap, overflow: overflow, fit: fit, scaleX: scaleX)
   layoutBoxOpts(font, sizePx, s, letterSpacing, lineHeightMul,
-    lineHeightAbs, o, features)
+    lineHeightAbs, o, features, fallbacks)
 
 proc layoutBoxOpts*(font: TextFont, sizePx: float64, s: string,
     letterSpacing: float64, lineHeightMul: float64,
     lineHeightAbs: float64, o: TextBoxOpts,
-    features: openArray[Feature]): tuple[lay: TextLayout,
+    features: openArray[Feature],
+    fallbacks: openArray[TextFont] = []): tuple[lay: TextLayout,
       shift: float64, sizePx: float64] =
   ## Full box layout: wrap paragraphs (first lines budget
   ## `maxW - firstLineIndent`), clamp to `maxLines`, fit the size
@@ -832,10 +862,10 @@ proc layoutBoxOpts*(font: TextFont, sizePx: float64, s: string,
   let cache = newShapeCache()
   template widestAt(px: int32): float64 =
     var lines = wrapAll(font, float64(px), s, letterSpacing, maxW,
-      o.firstLineIndent, o, features, cache)
+      o.firstLineIndent, o, features, cache, fallbacks)
     clampCount(lines, o.maxLines)
     widestStrings(font, float64(px), lines, letterSpacing,
-      features, cache) * k
+      features, cache, fallbacks) * k
   let px0 = quantizePx(sizePx)
   var px = float64(px0)
   if o.fit != tfNone and maxW > 0.0:
@@ -887,7 +917,7 @@ proc layoutBoxOpts*(font: TextFont, sizePx: float64, s: string,
   var lay = TextLayout(font: font, lines: @[], sizePx: px,
     lineHeightPx: step)
   var lines = wrapAll(font, px, s, letterSpacing, maxW,
-    o.firstLineIndent, o, features, cache)
+    o.firstLineIndent, o, features, cache, fallbacks)
   clampCount(lines, o.maxLines)
   for wl in lines:
     let indent = if wl.idx == 0: o.firstLineIndent else: 0.0
@@ -897,13 +927,13 @@ proc layoutBoxOpts*(font: TextFont, sizePx: float64, s: string,
     if o.overflow == toEllipsis and shaped.advance > effW and
         effW > 0.0:
       shaped = ellipsizeLine(font, px, wl.text, letterSpacing, effW,
-        features, o.ellipsis, cache)
+        features, o.ellipsis, cache, fallbacks)
     elif o.ha == thaJustify and effW > 0.0 and
         (not wl.last or wl.idx == 0):
       # Non-last lines spread; a paragraph's last line follows the
       # CSS rule (left here), except a sole line, which justifies.
       shaped = justifyLine(font, px, wl.text, letterSpacing, effW,
-        features, cache)
+        features, cache, fallbacks)
     if indent != 0.0:
       for j in 0 ..< shaped.glyphs.len:
         shaped.glyphs[j].x += indent
@@ -1020,7 +1050,7 @@ proc fillTextBox*(c: Canvas, x, y, w, h: float64, s: string,
   let st = c.states[^1]
   let bl = layoutBox(c.lookupFont(st.fontFace), st.fontSize, s,
     st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, w, h, ha, va,
-    wrap, overflow, fit, scaleX, features)
+    wrap, overflow, fit, scaleX, features, c.fallbackFonts())
   c.paintBox(bl, x, y, w, h, overflow, false)
   widestAdvance(bl.lay)
 
@@ -1028,10 +1058,12 @@ proc fillTextBox*(c: Canvas, font: TextFont, size: float64, x, y, w,
     h: float64, s: string, ha = thaLeft, va = tvaTop, wrap = true,
     overflow = toVisible, fit = tfNone, scaleX = 1.0,
     letterSpacing = 0.0, lineHeightMul = 1.2, lineHeightPx = 0.0,
-    features: openArray[Feature] = []): float64 =
+    features: openArray[Feature] = [],
+    fallbacks: openArray[TextFont] = []): float64 =
   ## Stateless overload of `fillTextBox` (no drawing without a font).
   let bl = layoutBox(font, size, s, letterSpacing, lineHeightMul,
-    lineHeightPx, w, h, ha, va, wrap, overflow, fit, scaleX, features)
+    lineHeightPx, w, h, ha, va, wrap, overflow, fit, scaleX, features,
+    fallbacks)
   c.paintBox(bl, x, y, w, h, overflow, false)
   widestAdvance(bl.lay)
 
@@ -1044,7 +1076,7 @@ proc strokeTextBox*(c: Canvas, x, y, w, h: float64, s: string,
   let st = c.states[^1]
   let bl = layoutBox(c.lookupFont(st.fontFace), st.fontSize, s,
     st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, w, h, ha, va,
-    wrap, overflow, fit, scaleX, features)
+    wrap, overflow, fit, scaleX, features, c.fallbackFonts())
   c.paintBox(bl, x, y, w, h, overflow, true)
   widestAdvance(bl.lay)
 
@@ -1052,10 +1084,12 @@ proc strokeTextBox*(c: Canvas, font: TextFont, size: float64, x, y, w,
     h: float64, s: string, ha = thaLeft, va = tvaTop, wrap = true,
     overflow = toVisible, fit = tfNone, scaleX = 1.0,
     letterSpacing = 0.0, lineHeightMul = 1.2, lineHeightPx = 0.0,
-    features: openArray[Feature] = []): float64 =
+    features: openArray[Feature] = [],
+    fallbacks: openArray[TextFont] = []): float64 =
   ## Stateless overload of `strokeTextBox`.
   let bl = layoutBox(font, size, s, letterSpacing, lineHeightMul,
-    lineHeightPx, w, h, ha, va, wrap, overflow, fit, scaleX, features)
+    lineHeightPx, w, h, ha, va, wrap, overflow, fit, scaleX, features,
+    fallbacks)
   c.paintBox(bl, x, y, w, h, overflow, true)
   widestAdvance(bl.lay)
 
@@ -1067,7 +1101,7 @@ proc textBoxBounds*(c: Canvas, x, y, w, h: float64, s: string,
   let st = c.states[^1]
   let bl = layoutBox(c.lookupFont(st.fontFace), st.fontSize, s,
     st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, w, h, ha, va,
-    wrap, overflow, fit, scaleX, features)
+    wrap, overflow, fit, scaleX, features, c.fallbackFonts())
   let b = layoutBounds(bl.lay, thaLeft)
   rect(x + b.x, y + bl.shift + b.y, b.w, b.h)
 
@@ -1075,10 +1109,12 @@ proc textBoxBounds*(c: Canvas, font: TextFont, size: float64, x, y, w,
     h: float64, s: string, ha = thaLeft, va = tvaTop, wrap = true,
     overflow = toVisible, fit = tfNone, scaleX = 1.0,
     letterSpacing = 0.0, lineHeightMul = 1.2, lineHeightPx = 0.0,
-    features: openArray[Feature] = []): Rect =
+    features: openArray[Feature] = [],
+    fallbacks: openArray[TextFont] = []): Rect =
   ## Stateless overload of `textBoxBounds` (no drawing).
   let bl = layoutBox(font, size, s, letterSpacing, lineHeightMul,
-    lineHeightPx, w, h, ha, va, wrap, overflow, fit, scaleX, features)
+    lineHeightPx, w, h, ha, va, wrap, overflow, fit, scaleX, features,
+    fallbacks)
   let b = layoutBounds(bl.lay, thaLeft)
   rect(x + b.x, y + bl.shift + b.y, b.w, b.h)
 
@@ -1089,15 +1125,17 @@ proc measureText*(c: Canvas, s: string,
   ## which exposes per-line breaks and glyph positions.
   let st = c.states[^1]
   let lay = layoutText(c.lookupFont(st.fontFace), st.fontSize, s,
-    st.letterSpacing, st.lineHeightMul, features, st.lineHeightAbs)
+    st.letterSpacing, st.lineHeightMul, features, st.lineHeightAbs,
+    c.fallbackFonts())
   measureLayout(lay, st.textHAlign)
 
 proc measureText*(c: Canvas, font: TextFont, size: float64, s: string,
     letterSpacing = 0.0, lineHeightMul = 1.2, lineHeightPx = 0.0,
-    features: openArray[Feature] = []): TextMetrics =
+    features: openArray[Feature] = [],
+    fallbacks: openArray[TextFont] = []): TextMetrics =
   ## Stateless overload of `measureText`.
   let lay = layoutText(font, size, s, letterSpacing, lineHeightMul,
-    features, lineHeightPx)
+    features, lineHeightPx, fallbacks)
   measureLayout(lay, thaLeft)
 
 proc measureTextBox*(c: Canvas, x, y, w, h: float64, s: string,
@@ -1109,17 +1147,19 @@ proc measureTextBox*(c: Canvas, x, y, w, h: float64, s: string,
   let st = c.states[^1]
   let bl = layoutBox(c.lookupFont(st.fontFace), st.fontSize, s,
     st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, w, h, ha, va,
-    wrap, overflow, fit, scaleX, features)
+    wrap, overflow, fit, scaleX, features, c.fallbackFonts())
   measureLayout(bl.lay, thaLeft)
 
 proc measureTextBox*(c: Canvas, font: TextFont, size: float64, x, y, w,
     h: float64, s: string, ha = thaLeft, va = tvaTop, wrap = true,
     overflow = toVisible, fit = tfNone, scaleX = 1.0,
     letterSpacing = 0.0, lineHeightMul = 1.2, lineHeightPx = 0.0,
-    features: openArray[Feature] = []): TextMetrics =
+    features: openArray[Feature] = [],
+    fallbacks: openArray[TextFont] = []): TextMetrics =
   ## Stateless overload of `measureTextBox`.
   let bl = layoutBox(font, size, s, letterSpacing, lineHeightMul,
-    lineHeightPx, w, h, ha, va, wrap, overflow, fit, scaleX, features)
+    lineHeightPx, w, h, ha, va, wrap, overflow, fit, scaleX, features,
+    fallbacks)
   measureLayout(bl.lay, thaLeft)
 
 # --- Text boxes via `TextBoxOpts`: clamp, markers, fit bounds,
@@ -1132,17 +1172,19 @@ proc fillTextBox*(c: Canvas, x, y: float64, s: string, o: TextBoxOpts,
   ## box top-left (`o.maxW`/`o.boxH` size it).
   let st = c.states[^1]
   let bl = layoutBoxOpts(c.lookupFont(st.fontFace), st.fontSize, s,
-    st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, o, features)
+    st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, o, features,
+    c.fallbackFonts())
   c.paintBox(bl, x, y, o.maxW, o.boxH, o.overflow, false, o.decor)
   widestAdvance(bl.lay)
 
 proc fillTextBox*(c: Canvas, font: TextFont, size: float64, x, y: float64,
     s: string, o: TextBoxOpts, letterSpacing = 0.0,
     lineHeightMul = 1.2, lineHeightPx = 0.0,
-    features: openArray[Feature] = []): float64 =
+    features: openArray[Feature] = [],
+    fallbacks: openArray[TextFont] = []): float64 =
   ## Stateless `TextBoxOpts` overload of `fillTextBox`.
   let bl = layoutBoxOpts(font, size, s, letterSpacing, lineHeightMul,
-    lineHeightPx, o, features)
+    lineHeightPx, o, features, fallbacks)
   c.paintBox(bl, x, y, o.maxW, o.boxH, o.overflow, false, o.decor)
   widestAdvance(bl.lay)
 
@@ -1152,17 +1194,19 @@ proc strokeTextBox*(c: Canvas, x, y: float64, s: string,
   ## `TextBoxOpts` overload of `strokeTextBox`.
   let st = c.states[^1]
   let bl = layoutBoxOpts(c.lookupFont(st.fontFace), st.fontSize, s,
-    st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, o, features)
+    st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, o, features,
+    c.fallbackFonts())
   c.paintBox(bl, x, y, o.maxW, o.boxH, o.overflow, true, o.decor)
   widestAdvance(bl.lay)
 
 proc strokeTextBox*(c: Canvas, font: TextFont, size: float64, x, y: float64,
     s: string, o: TextBoxOpts, letterSpacing = 0.0,
     lineHeightMul = 1.2, lineHeightPx = 0.0,
-    features: openArray[Feature] = []): float64 =
+    features: openArray[Feature] = [],
+    fallbacks: openArray[TextFont] = []): float64 =
   ## Stateless `TextBoxOpts` overload of `strokeTextBox`.
   let bl = layoutBoxOpts(font, size, s, letterSpacing, lineHeightMul,
-    lineHeightPx, o, features)
+    lineHeightPx, o, features, fallbacks)
   c.paintBox(bl, x, y, o.maxW, o.boxH, o.overflow, true, o.decor)
   widestAdvance(bl.lay)
 
@@ -1173,17 +1217,19 @@ proc textBoxBounds*(c: Canvas, x, y: float64, s: string,
   ## decoration rules are ignored).
   let st = c.states[^1]
   let bl = layoutBoxOpts(c.lookupFont(st.fontFace), st.fontSize, s,
-    st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, o, features)
+    st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, o, features,
+    c.fallbackFonts())
   let b = layoutBounds(bl.lay, thaLeft)
   rect(x + b.x, y + bl.shift + b.y, b.w, b.h)
 
 proc textBoxBounds*(c: Canvas, font: TextFont, size: float64, x, y: float64,
     s: string, o: TextBoxOpts, letterSpacing = 0.0,
     lineHeightMul = 1.2, lineHeightPx = 0.0,
-    features: openArray[Feature] = []): Rect =
+    features: openArray[Feature] = [],
+    fallbacks: openArray[TextFont] = []): Rect =
   ## Stateless `TextBoxOpts` overload of `textBoxBounds`.
   let bl = layoutBoxOpts(font, size, s, letterSpacing, lineHeightMul,
-    lineHeightPx, o, features)
+    lineHeightPx, o, features, fallbacks)
   let b = layoutBounds(bl.lay, thaLeft)
   rect(x + b.x, y + bl.shift + b.y, b.w, b.h)
 
@@ -1193,16 +1239,18 @@ proc measureTextBox*(c: Canvas, x, y: float64, s: string,
   ## `TextBoxOpts` overload of `measureTextBox`.
   let st = c.states[^1]
   let bl = layoutBoxOpts(c.lookupFont(st.fontFace), st.fontSize, s,
-    st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, o, features)
+    st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, o, features,
+    c.fallbackFonts())
   measureLayout(bl.lay, thaLeft)
 
 proc measureTextBox*(c: Canvas, font: TextFont, size: float64, x, y: float64,
     s: string, o: TextBoxOpts, letterSpacing = 0.0,
     lineHeightMul = 1.2, lineHeightPx = 0.0,
-    features: openArray[Feature] = []): TextMetrics =
+    features: openArray[Feature] = [],
+    fallbacks: openArray[TextFont] = []): TextMetrics =
   ## Stateless `TextBoxOpts` overload of `measureTextBox`.
   let bl = layoutBoxOpts(font, size, s, letterSpacing, lineHeightMul,
-    lineHeightPx, o, features)
+    lineHeightPx, o, features, fallbacks)
   measureLayout(bl.lay, thaLeft)
 
 proc textHitBox*(c: Canvas, px, py: float64, s: string, o: TextBoxOpts,
@@ -1213,16 +1261,18 @@ proc textHitBox*(c: Canvas, px, py: float64, s: string, o: TextBoxOpts,
   ## are box-relative (the box top-left is the origin).
   let st = c.states[^1]
   let bl = layoutBoxOpts(c.lookupFont(st.fontFace), st.fontSize, s,
-    st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, o, features)
+    st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, o, features,
+    c.fallbackFonts())
   hitTest(bl.lay, px, py - bl.shift, thaLeft)
 
 proc textHitBox*(c: Canvas, font: TextFont, size: float64, px, py: float64,
     s: string, o: TextBoxOpts, letterSpacing = 0.0,
     lineHeightMul = 1.2, lineHeightPx = 0.0,
-    features: openArray[Feature] = []): TextHit =
+    features: openArray[Feature] = [],
+    fallbacks: openArray[TextFont] = []): TextHit =
   ## Stateless overload of `textHitBox`.
   let bl = layoutBoxOpts(font, size, s, letterSpacing, lineHeightMul,
-    lineHeightPx, o, features)
+    lineHeightPx, o, features, fallbacks)
   hitTest(bl.lay, px, py - bl.shift, thaLeft)
 
 proc flattened(c: Canvas): seq[SubPoly] =

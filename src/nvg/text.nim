@@ -171,6 +171,8 @@ type
     cluster*: uint32
       ## Byte offset of the source character in the shaped string
       ## (from harfnim buffer clusters; line-local).
+    font*: TextFont
+      ## Fallback font that shaped this glyph (`nil` = layout font).
 
   ShapedLine* = object
     glyphs*: seq[PlacedGlyph]
@@ -261,34 +263,106 @@ proc shapeLine*(font: TextFont, sizePx: float64, line: string,
       pen += letterSpacing
   result.advance = pen
 
+proc isGlue*(cp: uint32): bool =
+  ## Characters that must not start a fallback run (they modify or
+  ## join the previous character).
+  (cp >= 0x0300u32 and cp <= 0x036Fu32) or
+    (cp >= 0x1AB0u32 and cp <= 0x1AFFu32) or
+    (cp >= 0x1DC0u32 and cp <= 0x1DFFu32) or
+    (cp >= 0x20D0u32 and cp <= 0x20FFu32) or
+    (cp >= 0xFE00u32 and cp <= 0xFE0Fu32) or
+    (cp >= 0xFE20u32 and cp <= 0xFE2Fu32) or
+    cp == 0x200Du32 or
+    (cp >= 0x1F3FBu32 and cp <= 0x1F3FFu32) or
+    (cp >= 0x1F1E6u32 and cp <= 0x1F1FFu32)
+
 proc shapeCached*(font: TextFont, sizePx: float64, line: string,
     letterSpacing: float64, features: openArray[Feature],
-    cache: ShapeCache = nil): ShapedLine =
-  ## `shapeLine` through `cache` (direct shaping when nil). Hits
-  ## return copies, so mutating the result never corrupts the memo.
-  if cache == nil:
+    cache: ShapeCache = nil,
+    fallbacks: openArray[TextFont] = []): ShapedLine =
+  ## `shapeLine` through `cache` (direct shaping when nil), splitting
+  ## into per-font runs when `fallbacks` is non-empty: each rune goes
+  ## to the first font covering it (primary first, uncovered runes
+  ## stay primary and render `.notdef`). Glue characters (combining
+  ## marks, variation selectors, ZWJ, skin tones, regional
+  ## indicators) always join the previous run so sequences never
+  ## split across fonts. Run glyphs carry their font (nil = primary).
+  ## Hits return copies, so mutating the result never corrupts the
+  ## memo (the memo key carries font identity).
+  if font == nil:
     return shapeLine(font, sizePx, line, letterSpacing, features)
-  let key = $sizePx & "\x1F" & $letterSpacing & "\x1F" & line
-  if key in cache.tab:
-    return cache.tab[key]
-  let shaped = shapeLine(font, sizePx, line, letterSpacing, features)
-  cache.tab[key] = shaped
-  shaped
+  if fallbacks.len == 0:
+    if cache == nil:
+      return shapeLine(font, sizePx, line, letterSpacing, features)
+    let key = $cast[int](font) & "\x1F" & $sizePx & "\x1F" &
+      $letterSpacing & "\x1F" & line
+    if key in cache.tab:
+      return cache.tab[key]
+    let shaped = shapeLine(font, sizePx, line, letterSpacing, features)
+    cache.tab[key] = shaped
+    return shaped
+  # Split into (byteStart, fontIndex) runs; 0 = primary.
+  var runs: seq[tuple[start: int, fi: int]] = @[]
+  var pos = 0
+  var curFi = -1
+  for r in line.runes:
+    let cp = uint32(r)
+    let w = ($r).len
+    var fi: int
+    if curFi >= 0 and isGlue(cp):
+      fi = curFi
+    else:
+      fi = 0
+      if not font.shaper.hasGlyph(cp):
+        for i, fb in fallbacks:
+          if fb != nil and fb.shaper.hasGlyph(cp):
+            fi = i + 1
+            break
+    if fi != curFi:
+      runs.add((pos, fi))
+      curFi = fi
+    pos += w
+  result = ShapedLine(glyphs: @[], advance: 0.0)
+  if runs.len == 0:
+    return
+  var pen = 0.0
+  for i, rn in runs:
+    let stop = if i + 1 < runs.len: runs[i + 1].start else: line.len
+    let sub = line[rn.start ..< stop]
+    let rf = if rn.fi == 0: font else: fallbacks[rn.fi - 1]
+    let sh = shapeCached(rf, sizePx, sub, letterSpacing, features,
+      cache)
+    for g in sh.glyphs:
+      var gg = g
+      gg.x += pen
+      if gg.hasInk:
+        gg.x0 += pen
+        gg.x1 += pen
+      gg.cluster += uint32(rn.start)
+      gg.font = if rn.fi == 0: nil else: rf
+      result.glyphs.add(gg)
+    pen += sh.advance
+  result.advance = pen
 
 proc layoutText*(font: TextFont, sizePx: float64, s: string,
     letterSpacing = 0.0, lineHeightMul = 1.2,
     features: openArray[Feature] = [],
-    lineHeightAbs = 0.0): TextLayout =
+    lineHeightAbs = 0.0,
+    fallbacks: openArray[TextFont] = []): TextLayout =
   ## Shape every `\n`-separated line. A nil font yields empty lines
   ## (callers draw nothing and measure zero). `lineHeightAbs > 0`
   ## overrides the multiplier with an absolute baseline step in px.
+  ## `fallbacks` covers characters missing from `font` (see
+  ## `shapeCached`); shaping memoizes within the call.
   let px = max(1.0, sizePx)
   let step = if lineHeightAbs > 0.0: lineHeightAbs
     else: px * max(0.0, lineHeightMul)
   result = TextLayout(font: font, lines: @[], sizePx: px,
     lineHeightPx: step)
+  let cache = newShapeCache()
   for line in splitTextLines(s):
-    result.lines.add(shapeLine(font, px, line, letterSpacing, features))
+    result.lines.add(shapeCached(font, px, line, letterSpacing,
+      features, cache, fallbacks))
 
 proc linePenX*(advance: float64, ha: TextHAlign): float64 =
   ## Per-line pen start relative to the anchor x.
@@ -508,7 +582,8 @@ proc wrapParagraph*(font: TextFont, sizePx: float64, para: string,
 proc justifyLine*(font: TextFont, sizePx: float64, line: string,
     letterSpacing: float64, boxW: float64,
     features: openArray[Feature],
-    cache: ShapeCache = nil): ShapedLine =
+    cache: ShapeCache = nil,
+    fallbacks: openArray[TextFont] = []): ShapedLine =
   ## Spread the words of `line` so the advance equals `boxW`. Each
   ## word (plus its trailing spaces) shapes as one chunk, so
   ## intra-word letter spacing and space runs survive; the leftover
@@ -549,7 +624,7 @@ proc justifyLine*(font: TextFont, sizePx: float64, line: string,
       chunk.add(' ')
     pos += chunk.len
     chunks.add(shapeCached(font, sizePx, chunk, letterSpacing, features,
-      cache))
+      cache, fallbacks))
   var natural = 0.0
   for ch in chunks:
     natural += ch.advance
@@ -588,25 +663,26 @@ proc justifyLine*(font: TextFont, sizePx: float64, line: string,
 proc ellipsizeLine*(font: TextFont, sizePx: float64, line: string,
     letterSpacing: float64, maxW: float64,
     features: openArray[Feature], marker = "…",
-    cache: ShapeCache = nil): ShapedLine =
+    cache: ShapeCache = nil,
+    fallbacks: openArray[TextFont] = []): ShapedLine =
   ## Trim trailing runes and append `marker` until the line fits
   ## `maxW`. Fits already: plain shaping. Nothing fits (even the
   ## marker alone): an empty line.
   if maxW <= 0.0:
     return ShapedLine(glyphs: @[], advance: 0.0)
   var shaped = shapeCached(font, sizePx, line, letterSpacing, features,
-    cache)
+    cache, fallbacks)
   if shaped.advance <= maxW:
     return shaped
   var runes = line.toRunes()
   while runes.len > 0:
     runes.setLen(runes.len - 1)
     shaped = shapeCached(font, sizePx, $runes & marker, letterSpacing,
-      features, cache)
+      features, cache, fallbacks)
     if shaped.advance <= maxW:
       return shaped
   shaped = shapeCached(font, sizePx, marker, letterSpacing, features,
-    cache)
+    cache, fallbacks)
   if shaped.advance <= maxW:
     return shaped
   ShapedLine(glyphs: @[], advance: 0.0)
@@ -615,20 +691,24 @@ proc appendLayout*(p: var Path, xf: Xform, lay: TextLayout, x, y: float64,
     ha: TextHAlign, va: TextVAlign) =
   ## Emit the laid-out glyph outlines as path verbs (transform captured
   ## per verb, like all `Path` input). Glyphs without outlines advance
-  ## the pen but emit nothing.
-  if lay.font == nil:
+  ## the pen but emit nothing. Fallback glyphs draw with their own
+  ## shaper at the layout size over their own upem.
+  if lay.lines.len == 0:
     return
-  let s = lay.sizePx / lay.font.upem
   let dy = valignShift(lay, ha, va)
   for i, line in lay.lines:
     let ox = x + linePenX(line.advance, ha)
     let oy = y + dy + float64(i) * lay.lineHeightPx
     for g in line.glyphs:
+      let gf = if g.font != nil: g.font else: lay.font
+      if gf == nil:
+        continue
       var ops: seq[DrawOp] = @[]
-      var sf = lay.font.shaper
+      var sf = gf.shaper
       if not sf.drawGlyph(newGlyphId(g.gid),
           proc(op: DrawOp) = ops.add(op)):
         continue
+      let s = lay.sizePx / gf.upem
       let gx = ox + g.x
       let gy = oy + g.y
       for op in ops:

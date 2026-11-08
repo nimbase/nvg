@@ -83,6 +83,97 @@ proc buildCmap*(): seq[uint8] =
   result.putU32(12u32)
   result.add(sub)
 
+proc buildCmapSingle*(cp: uint16): seq[uint8] =
+  ## Format 4 with one segment mapping `cp` to gid 1, plus sentinel.
+  var sub: seq[uint8] = @[]
+  sub.putU16(4u16)
+  sub.putU16(24u16)
+  sub.putU16(0u16)
+  sub.putU16(4u16)
+  sub.putU16(4u16)
+  sub.putU16(1u16)
+  sub.putU16(0u16)
+  for e in [cp, 0xFFFFu16]:
+    sub.putU16(e)
+  sub.putU16(0u16)
+  for e in [cp, 0xFFFFu16]:
+    sub.putU16(e)
+  sub.putI16(int16(1 - int(cp)))
+  sub.putI16(1i16)
+  for _ in 0 ..< 2:
+    sub.putU16(0u16)
+  result = @[]
+  result.putU16(0u16)
+  result.putU16(1u16)
+  result.putU16(3u16)
+  result.putU16(1u16)
+  result.putU32(12u32)
+  result.add(sub)
+
+proc buildTestFontSingle*(cp: uint16): seq[uint8] =
+  ## Two-glyph font (empty .notdef + triangle, advance 600) mapping
+  ## only `cp` to gid 1. Pair two of these for fallback tests.
+  var head = newSeq[uint8]()
+  head.putU32(0x00010000u32)
+  head.putU32(0u32)
+  head.putU32(0u32)
+  head.putU32(0x5F0F3CF5u32)
+  head.putU16(0u16)
+  head.putU16(1000u16)
+  for _ in 0 ..< 4:
+    head.putU32(0u32)
+  for _ in 0 ..< 4:
+    head.putI16(0i16)
+  head.putU16(0u16)
+  head.putU16(0u16)
+  head.putI16(0i16)
+  head.putI16(0i16)
+  head.putU16(0u16)
+  var hhea = newSeq[uint8]()
+  hhea.putU32(0x00010000u32)
+  hhea.putI16(800i16)
+  hhea.putI16(-200i16)
+  hhea.putI16(0i16)
+  hhea.putU16(600u16)
+  for _ in 0 ..< 11:
+    hhea.putI16(0i16)
+  hhea.putU16(2u16)
+  var maxp = newSeq[uint8]()
+  maxp.putU32(0x00005000u32)
+  maxp.putU16(2u16)
+  var hmtx = newSeq[uint8]()
+  for a in [500u16, 600u16]:
+    hmtx.putU16(a)
+    hmtx.putI16(0i16)
+  let tri = simpleGlyph(@[(0i32, 0i32, true), (500i32, 0i32, true),
+    (250i32, 700i32, true)], @[2])
+  var loca = newSeq[uint8]()
+  loca.putU16(0u16)
+  loca.putU16(0u16)
+  loca.putU16(uint16(tri.len div 2))
+  let cmap = buildCmapSingle(cp)
+  var tables = @[
+    ("head", head), ("hhea", hhea), ("maxp", maxp), ("hmtx", hmtx),
+    ("cmap", cmap), ("loca", loca), ("glyf", tri),
+  ]
+  result = @[]
+  result.putU32(0x00010000u32)
+  result.putU16(uint16(tables.len))
+  result.putU16(32u16)
+  result.putU16(1u16)
+  result.putU16(16u16)
+  var off = 12 + tables.len * 16
+  for (name, data) in tables:
+    for ch in name:
+      result.add(uint8(ch))
+    result.putU32(0u32)
+    result.putU32(uint32(off))
+    result.putU32(uint32((data.len + 3) and not 3))
+    off += (data.len + 3) and not 3
+  for (_, data) in tables:
+    result.add(data)
+    result.pad4()
+
 proc buildTestFont*(): seq[uint8] =
   var head = newSeq[uint8]()
   head.putU32(0x00010000u32)

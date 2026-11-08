@@ -3,6 +3,7 @@
 ## A ink y -14..0, B ink y -10..0. All expectations hand-computed.
 
 import std/unittest
+import harfnim
 import nvg
 import ./fontbuilder
 
@@ -206,7 +207,6 @@ test "pre-wrap preserves space runs":
   check w.lineCount == 2 # "A" then "B"
 
 test "tabs stop at multiples":
-  let c = testCanvas()
   var o = TextBoxOpts(maxW: 300, tabWidth: 40.0)
   let bl = layoutBoxOpts(loadFontBytes(buildTestFont()), 20.0, "A\tB",
     0.0, 1.2, 0.0, o, [])
@@ -263,6 +263,64 @@ test "selection rects cover byte ranges per line":
   check rr.len == 2
   check close(rr[0].x, 0.0) and close(rr[0].w, 12.0)
   check close(rr[1].x, 0.0) and close(rr[1].w, 14.0)
+
+test "fallback covers missing characters per rune":
+  let fontA = loadFontBytes(buildTestFontSingle(0x41u16))
+  let fontB = loadFontBytes(buildTestFontSingle(0x42u16))
+  check fontA.shaper.hasGlyph(0x41u32)
+  check not fontA.shaper.hasGlyph(0x42u32)
+  let noFb = layoutText(fontA, 20.0, "AB")
+  check noFb.lines[0].advance == 22.0 # 12 + .notdef 10
+  check not noFb.lines[0].glyphs[1].hasInk
+  let lay = layoutText(fontA, 20.0, "AB", 0.0, 1.2, [], 0.0, [fontB])
+  check lay.lines[0].advance == 24.0 # 12 + 12
+  check lay.lines[0].glyphs.len == 2
+  check lay.lines[0].glyphs[0].font == nil
+  check lay.lines[0].glyphs[1].font == fontB
+  check lay.lines[0].glyphs[1].cluster == 1u32
+  check lay.lines[0].glyphs[1].hasInk
+  # Uncovered anywhere stays primary .notdef.
+  let miss = layoutText(fontA, 20.0, "A?", 0.0, 1.2, [], 0.0, [fontB])
+  check miss.lines[0].advance == 22.0
+  check miss.lines[0].glyphs[1].font == nil
+
+test "first covering fallback wins":
+  let fontA = loadFontBytes(buildTestFontSingle(0x41u16))
+  let fontB1 = loadFontBytes(buildTestFontSingle(0x42u16))
+  let fontB2 = loadFontBytes(buildTestFontSingle(0x42u16))
+  let lay = layoutText(fontA, 20.0, "AB", 0.0, 1.2, [], 0.0,
+    [fontB1, fontB2])
+  check lay.lines[0].glyphs[1].font == fontB1
+
+test "glue characters never start a run":
+  let fontA = loadFontBytes(buildTestFontSingle(0x41u16))
+  let fontB = loadFontBytes(buildTestFontSingle(0x42u16))
+  let lay = layoutText(fontA, 20.0, "A\u0301B", 0.0, 1.2, [], 0.0,
+    [fontB])
+  check lay.lines[0].glyphs.len == 3
+  check lay.lines[0].glyphs[1].font == nil # acute glued to A run
+  check lay.lines[0].glyphs[2].font == fontB
+
+test "stateful fallback draws both fonts":
+  let c = newCanvas(120, 120)
+  c.clear(rgb(255, 255, 255))
+  discard c.createFontMem("a", buildTestFontSingle(0x41u16))
+  discard c.createFontMem("b", buildTestFontSingle(0x42u16))
+  c.setFontFace("a")
+  c.setFallbackFonts("b")
+  c.setFontSize(20.0)
+  c.setFillColor(rgbf(0, 0, 0))
+  check c.fillText(10, 30, "AB") == 24.0
+  check c.surface.getPixel(15, 25).r < 0.1 # A ink (primary)
+  check c.surface.getPixel(27, 25).r < 0.1 # B ink (fallback)
+  let fontB = loadFontBytes(buildTestFontSingle(0x42u16))
+  let d = newCanvas(120, 120)
+  d.clear(rgb(255, 255, 255))
+  d.setFillColor(rgbf(0, 0, 0))
+  let fontA = loadFontBytes(buildTestFontSingle(0x41u16))
+  discard d.fillText(fontA, 20.0, 10, 30, "AB", thaLeft, tvaBaseline,
+    0.0, 1.2, 0.0, [], [fontB])
+  check d.surface.getPixel(27, 25).r < 0.1
 
 test "hit test maps points to glyphs":
   let font = loadFontBytes(buildTestFont())
