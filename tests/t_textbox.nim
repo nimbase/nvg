@@ -539,11 +539,12 @@ test "soft hyphens break without breakWord":
   check bl.lay.lines.len == 2
   check bl.lay.lines[0].advance == 36.0
   check bl.lay.lines[1].advance == 26.0
-  # No shy, no breakWord: the over-wide word overflows whole.
+  # No shy, no breakWord: the over-wide word overflows whole
+  # ("ABAB" kerns its BA pair: 50, not 52).
   let whole = layoutBoxOpts(font, 20.0, "ABAB", 0.0, 1.2, 0.0, o,
     [], [])
   check whole.lay.lines.len == 1
-  check whole.lay.lines[0].advance == 52.0
+  check whole.lay.lines[0].advance == 50.0
 
 test "soft-hyphen break inks the next baseline":
   let font = loadFontBytes(buildTestFont())
@@ -590,3 +591,33 @@ test "plain layouts strip soft hyphens":
   let sl = layoutSpans(font, 20.0, "A­B", spans)
   check sl.lines[0].advance == 26.0
   check sl.lines[0].glyphs[1].cluster == 3u32
+
+test "kerning applies by default, -kern opts out":
+  let font = loadFontBytes(buildTestFont())
+  # B(14) + A(12) - kern(2) = 24; adjacent "AB" stays 26.
+  check layoutText(font, 20.0, "BA").lines[0].advance == 24.0
+  check layoutText(font, 20.0, "AB").lines[0].advance == 26.0
+  let plain = layoutText(font, 20.0, "BA", 0.0, 1.2,
+    [parseFeature("-kern")])
+  check plain.lines[0].advance == 26.0
+
+test "justified kern survives chunk boundaries":
+  let font = loadFontBytes(buildTestFont())
+  let j = justifyLine(font, 20.0, "BA", 0.0, 40.0, [])
+  check j.advance == 40.0 # natural 24, gap takes 16
+  check close(j.glyphs[1].x, 28.0) # kerned 12 + 16, not 26
+  let bl = layoutBox(font, 20.0, "BA", 0.0, 1.2, 0.0, 40.0, 0.0,
+    thaJustify, tvaTop, false, toVisible, tfNone, 1.0, [])
+  check bl.lay.lines[0].advance == 40.0
+  check close(bl.lay.lines[0].glyphs[1].x, 28.0)
+  let left = layoutBox(font, 20.0, "BA", 0.0, 1.2, 0.0, 40.0,
+    0.0, thaLeft, tvaTop, false, toVisible, tfNone, 1.0, [])
+  check left.lay.lines[0].advance == 24.0 # same natural
+
+test "kerned ink shifts pixels and bounds":
+  let c = testCanvas()
+  let b = c.textBounds(10, 30, "BA")
+  check close(b.w, 22.0) # B ink 10..18, A ink 22..32 (was 24..34)
+  discard c.fillText(10, 30, "BA")
+  check c.surface.getPixel(23, 29).r < 0.5 # in kerned A ink
+  check c.surface.getPixel(33, 29).r > 0.5 # past it

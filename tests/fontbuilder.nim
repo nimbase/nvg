@@ -9,6 +9,7 @@
 ##   gid 5 U+65E5: square 500x500 at origin, advance 600
 ##   gid 6 U+672C: square 400x500 at origin, advance 600
 ##   gid 7 U+0301: empty (zero advance, stands in for a mark)
+##   kern: one pair, B followed by A tightened by 100 units
 ## At size 20 advances are exact: 10 / 12 / 14 px (marks: 0).
 
 proc putU16*(s: var seq[uint8], v: uint16) =
@@ -236,9 +237,23 @@ proc buildTestFont*(): seq[uint8] =
   for o in offs:
     loca.putU16(uint16(o div 2))
   let cmap = buildCmap()
+  var kern = newSeq[uint8]()
+  kern.putU16(0u16) # version
+  kern.putU16(1u16) # one subtable
+  kern.putU16(0u16) # subtable version
+  kern.putU16(20u16) # subtable length
+  kern.add(0u8) # format 0
+  kern.add(1u8) # coverage: horizontal
+  kern.putU16(1u16) # one pair
+  kern.putU16(2u16) # searchRange
+  kern.putU16(0u16) # entrySelector
+  kern.putU16(0u16) # rangeShift
+  kern.putU16(2u16) # left: B
+  kern.putU16(1u16) # right: A
+  kern.putI16(-100i16) # tighten by 100 units (-2 px at size 20)
   var tables = @[
     ("head", head), ("hhea", hhea), ("maxp", maxp), ("hmtx", hmtx),
-    ("cmap", cmap), ("loca", loca), ("glyf", glyf),
+    ("cmap", cmap), ("loca", loca), ("glyf", glyf), ("kern", kern),
   ]
   result = @[]
   result.putU32(0x00010000u32)

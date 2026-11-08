@@ -321,8 +321,7 @@ proc isSpreadSlot*(text: string, prev, next: PlacedGlyph): bool =
   ## Whether a justification gap may open between two adjacent
   ## glyphs: the next glyph starts a new character (`cluster`
   ## advances) that is not glue (marks stay on their base). Mirrors
-  ## the plain path, where each rune shapes as its own chunk with
-  ## marks joined to their base.
+  ## the plain path's chunk boundaries (marks joined to their base).
   let pc = int(prev.cluster)
   let nc = int(next.cluster)
   if nc <= pc or nc >= text.len or pc >= text.len:
@@ -377,6 +376,17 @@ proc shapeCached*(font: TextFont, sizePx: float64, line: string,
   ## back to the input coordinates.
   if font == nil:
     return shapeLine(font, sizePx, line, letterSpacing, features)
+  # Legacy kerning runs only when requested: enable it unless the
+  # caller already said otherwise (an explicit `-kern` disables).
+  var feats: seq[Feature] = @features
+  let kernTag = tagFromStr("kern")
+  var hasKern = false
+  for f in features:
+    if f.tag.toU32() == kernTag.toU32():
+      hasKern = true
+      break
+  if not hasKern:
+    feats.add(globalFeature(kernTag))
   # Soft hyphens never shape: metrics run on the stripped string
   # while clusters map back to the input coordinates.
   var eff = line
@@ -387,7 +397,7 @@ proc shapeCached*(font: TextFont, sizePx: float64, line: string,
     shy = ss.points
   if fallbacks.len == 0:
     if cache == nil:
-      result = shapeLine(font, sizePx, eff, letterSpacing, features)
+      result = shapeLine(font, sizePx, eff, letterSpacing, feats)
     else:
       let key = $cast[int](font) & "\x1F" & $sizePx & "\x1F" &
         $letterSpacing & "\x1F" & eff
@@ -395,7 +405,7 @@ proc shapeCached*(font: TextFont, sizePx: float64, line: string,
         result = cache.tab[key]
       else:
         let shaped = shapeLine(font, sizePx, eff, letterSpacing,
-          features)
+          feats)
         cache.tab[key] = shaped
         result = shaped
   else:
@@ -428,7 +438,7 @@ proc shapeCached*(font: TextFont, sizePx: float64, line: string,
           else: eff.len
         let sub = eff[rn.start ..< stop]
         let rf = if rn.fi == 0: font else: fallbacks[rn.fi - 1]
-        let sh = shapeCached(rf, sizePx, sub, letterSpacing, features,
+        let sh = shapeCached(rf, sizePx, sub, letterSpacing, feats,
           cache)
         for g in sh.glyphs:
           var gg = g
@@ -823,13 +833,15 @@ proc justifyLine*(font: TextFont, sizePx: float64, line: string,
     features: openArray[Feature],
     cache: ShapeCache = nil,
     fallbacks: openArray[TextFont] = []): ShapedLine =
-  ## Spread the words of `line` so the advance equals `boxW`. Each
-  ## rune (plus trailing spaces) shapes as its own chunk, so
-  ## intra-word letter spacing and space runs survive; the leftover
-  ## spreads evenly over the chunk boundaries. Spaceless runs (CJK
-  ## included) spread between their runes; combining marks join
-  ## their base and never take a gap. Already-over-wide lines come
-  ## back plainly shaped but gap-preserving.
+  ## Spread the words of `line` so the advance equals `boxW`. Chunk
+  ## boundaries follow the runes (plus trailing spaces); the glyphs
+  ## come from one whole-line shaping, so kerning and ligatures
+  ## survive across chunks and toggling justification never reflows
+  ## them. The leftover spreads evenly over the chunk boundaries.
+  ## Spaceless runs (CJK included) spread between their runes;
+  ## combining marks join their base and never take a gap.
+  ## Already-over-wide lines come back plainly shaped but
+  ## gap-preserving.
   var words: seq[string] = @[]
   var gaps: seq[int] = @[]
   var cur = ""
@@ -858,53 +870,43 @@ proc justifyLine*(font: TextFont, sizePx: float64, line: string,
   elif sp > 0 and words.len > 0:
     gaps[^1] += sp
   if words.len == 0:
-    return shapeLine(font, sizePx, line, letterSpacing, features)
-  var chunks: seq[ShapedLine] = @[]
+    return shapeCached(font, sizePx, line, letterSpacing, features,
+      cache, fallbacks)
+  # Chunk boundaries (byte offsets) steer the spread; the glyphs
+  # come from one whole-line shaping so kerning and ligatures
+  # survive across chunks.
   var starts: seq[int] = @[]
   var pos = 0
   for i, w in words:
     starts.add(pos)
-    var chunk = w
+    pos += w.len
     for _ in 0 ..< gaps[i]:
-      chunk.add(' ')
-    pos += chunk.len
-    chunks.add(shapeCached(font, sizePx, chunk, letterSpacing, features,
-      cache, fallbacks))
-  var natural = 0.0
-  for ch in chunks:
-    natural += ch.advance
-  result = ShapedLine(glyphs: @[], advance: natural)
+      pos += 1
+  let whole = shapeCached(font, sizePx, line, letterSpacing,
+    features, cache, fallbacks)
+  let natural = whole.advance
   if natural >= boxW or words.len < 2:
-    # No room (or nothing to spread between): sequential chunks,
-    # gaps preserved. Spaceless runs spread between their runes
-    # through this same path (each rune is its own chunk).
-    var pen = 0.0
-    for i, ch in chunks:
-      for g in ch.glyphs:
-        var gg = g
-        gg.x += pen
-        if gg.hasInk:
-          gg.x0 += pen
-          gg.x1 += pen
-        gg.cluster += uint32(starts[i])
-        result.glyphs.add(gg)
-      pen += ch.advance
-    return
+    # No room (or nothing to spread between): plain shaping, gaps
+    # preserved. Spaceless runs spread between their runes through
+    # the path below (each rune is its own chunk).
+    return whole
   let extra = (boxW - natural) / float64(words.len - 1)
-  result.advance = boxW
-  var pen = 0.0
-  for i, ch in chunks:
-    for g in ch.glyphs:
-      var gg = g
-      gg.x += pen
-      if gg.hasInk:
-        gg.x0 += pen
-        gg.x1 += pen
-      gg.cluster += uint32(starts[i])
-      result.glyphs.add(gg)
-    pen += ch.advance
-    if i + 1 < words.len:
-      pen += extra
+  result = ShapedLine(glyphs: @[], advance: boxW)
+  for g in whole.glyphs:
+    # Each glyph rides its chunk's accumulated share (order-free).
+    var ci = 0
+    for i, s in starts:
+      if int(g.cluster) >= s:
+        ci = i
+      else:
+        break
+    var gg = g
+    let dx = extra * float64(ci)
+    gg.x += dx
+    if gg.hasInk:
+      gg.x0 += dx
+      gg.x1 += dx
+    result.glyphs.add(gg)
 
 proc ellipsizeLine*(font: TextFont, sizePx: float64, line: string,
     letterSpacing: float64, maxW: float64,
