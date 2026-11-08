@@ -692,14 +692,54 @@ proc expandPara(font: TextFont, px: float64, para: string,
     result.add(expandRun(font, px, result, run, letterSpacing,
       spaceAdv, tabW, features, cache, fallbacks))
 
+proc breakShyPieces(font: TextFont, px: float64, word: string,
+    letterSpacing: float64, budget: float64, hyphen: string,
+    features: openArray[Feature], cache: ShapeCache, fallbacks: openArray[TextFont]): seq[string] =
+  ## Fragment `word` at soft hyphens, longest fitting prefix first,
+  ## each but the last `hyphen`-suffixed. Empty when no soft break
+  ## fits `budget` (the caller then emergency-breaks or overflows).
+  ## The tail may still exceed `budget` (the caller handles it).
+  result = @[]
+  let ss = splitShy(word)
+  if ss.points.len == 0:
+    return @[]
+  var runes = ss.stripped.toRunes()
+  var points = ss.points
+  while runes.len > 0:
+    if shapeCached(font, px, $runes, letterSpacing,
+        features, cache, fallbacks).advance <= budget:
+      result.add($runes)
+      break
+    var qi = -1
+    for i, p in points:
+      if p.runeIdx > 0 and p.runeIdx < runes.len and shapeCached(
+          font, px, $runes[0 ..< p.runeIdx] & hyphen, letterSpacing,
+          features, cache, fallbacks).advance <= budget:
+        qi = i
+    if qi < 0:
+      result.add($runes)
+      break
+    let q = points[qi].runeIdx
+    let cut = ($runes[0 ..< q]).len
+    result.add($runes[0 ..< q] & hyphen)
+    runes = runes[q .. ^1]
+    var np: seq[tuple[bytePos, runeIdx: int]] = @[]
+    for j in qi + 1 ..< points.len:
+      let p = points[j]
+      np.add((p.bytePos - cut, p.runeIdx - q))
+    points = np
+  if result.len == 1:
+    return @[] # no split happened: whole fits or nothing fits
+
 proc breakPieces(font: TextFont, px: float64, word: string,
     letterSpacing: float64, budget: float64, hyphen: string,
     features: openArray[Feature], cache: ShapeCache, fallbacks: openArray[TextFont]): seq[string] =
   ## Emergency-break `word` into budget-fitting fragments, `hyphen`
-  ## suffixed but on the last. Never returns empty (a lone rune
-  ## always fits somewhere).
+  ## suffixed but on the last. Soft-hyphen breaks go first (see
+  ## `breakShyPieces`); the rest fragments at rune boundaries. Never
+  ## returns empty (a lone rune always fits somewhere).
   result = @[]
-  var runes = word.toRunes()
+  var runes = splitShy(word).stripped.toRunes()
   while runes.len > 0:
     if shapeCached(font, px, $runes, letterSpacing,
         features, cache, fallbacks).advance <= budget:
@@ -726,8 +766,9 @@ proc wrapAll(font: TextFont, px: float64, s: string,
   ## last-line alignment under justify). A paragraph's first line
   ## budgets `maxW - indent`; continuations budget `maxW`.
   ## `twNormal` collapses space runs, `twPre*` preserve them; tabs
-  ## expand to `tabWidth` stops first. Over-wide words
-  ## emergency-break when `breakWord`, else take their own line.
+  ## expand to `tabWidth` stops first. Over-wide words break at soft
+  ## hyphens first, then emergency-break when `breakWord`, else take
+  ## their own line.
   result = @[]
   let collapse = o.whiteSpace == twNormal
   let doWrap = o.wrap and o.whiteSpace != twPre
@@ -777,17 +818,23 @@ proc wrapAll(font: TextFont, px: float64, s: string,
             features, cache, fallbacks).advance <= budget or line == "":
           if line == "" and shapeCached(font, px, trial, letterSpacing,
               features, cache, fallbacks).advance > budget:
-            # Over-wide word alone on the line.
-            if o.breakWord:
-              let parts = breakPieces(font, px, words[wi],
+            # Over-wide word alone on the line: soft-hyphen breaks
+            # first (author-approved, always honored), then emergency
+            # rune breaks (`breakWord`), else overflow whole.
+            var parts = breakShyPieces(font, px, words[wi],
+              letterSpacing, budget, o.hyphenChar, features, cache,
+              fallbacks)
+            if parts.len == 0 and o.breakWord:
+              parts = breakPieces(font, px, words[wi],
                 letterSpacing, budget, o.hyphenChar, features, cache,
                 fallbacks)
+            if parts.len == 0:
+              line = trial
+            else:
               for k in 0 ..< parts.len - 1:
                 lines.add(if k == 0: joiner & parts[k]
                   else: parts[k])
               line = parts[^1]
-            else:
-              line = trial
           else:
             line = trial
           leadDone = true
@@ -1003,7 +1050,8 @@ proc breakSpanPiece(font: TextFont, px: float64,
     spans: openArray[TextSpan], pcs: openArray[SpanPiece], room: float64,
     hyphen: string, letterSpacing: float64,
     features: openArray[Feature], cache: ShapeCache,
-    fallbacks: openArray[TextFont]): tuple[kept, rest: seq[SpanPiece]]
+    fallbacks: openArray[TextFont],
+    emergency = true): tuple[kept, rest: seq[SpanPiece]]
 
 proc wrapSpansAll(font: TextFont, px: float64, s: string,
     spans: openArray[TextSpan], letterSpacing: float64, maxW: float64,
@@ -1075,38 +1123,39 @@ proc wrapSpansAll(font: TextFont, px: float64, s: string,
             features, cache, fallbacks)
         if trialAdv <= budget or line.len == 0:
           if line.len == 0 and trialAdv > budget:
-            # Over-wide word alone on the line.
-            if o.breakWord:
-              var rest = wpcs
-              var firstFrag = true
-              while rest.len > 0:
-                let room = budget - (if firstFrag: lineAdv +
-                    piecesAdvance(font, px, spans, join,
-                      letterSpacing, features, cache,
-                      fallbacks) else: 0.0)
-                let frag = breakSpanPiece(font, px, spans, rest,
-                  room, o.hyphenChar, letterSpacing, features,
-                  cache, fallbacks)
-                if firstFrag:
-                  line = line & join & frag.kept
-                  lineAdv += piecesAdvance(font, px, spans, join,
-                    letterSpacing, features, cache, fallbacks) +
-                    piecesAdvance(font, px, spans, frag.kept,
-                      letterSpacing, features, cache, fallbacks)
-                  firstFrag = false
-                else:
-                  lines.add(line)
-                  line = frag.kept
-                  lineAdv = piecesAdvance(font, px, spans, frag.kept,
+            # Over-wide word alone on the line: soft-hyphen breaks
+            # first (always honored via `emergency = false` giving
+            # empty `kept` when nothing fits), then emergency rune
+            # breaks (`breakWord`), else overflow whole.
+            var rest = wpcs
+            var firstFrag = true
+            while rest.len > 0:
+              let room = budget - (if firstFrag: lineAdv +
+                  piecesAdvance(font, px, spans, join,
+                    letterSpacing, features, cache,
+                    fallbacks) else: 0.0)
+              let frag = breakSpanPiece(font, px, spans, rest,
+                room, o.hyphenChar, letterSpacing, features,
+                cache, fallbacks, o.breakWord)
+              if firstFrag:
+                line = line & join & frag.kept
+                lineAdv += piecesAdvance(font, px, spans, join,
+                  letterSpacing, features, cache, fallbacks) +
+                  piecesAdvance(font, px, spans, frag.kept,
                     letterSpacing, features, cache, fallbacks)
-                rest = frag.rest
-                if frag.kept.len == 0 and rest.len > 0:
-                  # No progress guard (should not happen).
-                  line = line & rest
-                  break
-            else:
-              line = line & join & wpcs
-              lineAdv = trialAdv
+                firstFrag = false
+              else:
+                lines.add(line)
+                line = frag.kept
+                lineAdv = piecesAdvance(font, px, spans, frag.kept,
+                  letterSpacing, features, cache, fallbacks)
+              rest = frag.rest
+              if frag.kept.len == 0 and rest.len > 0:
+                # No progress: overflow the whole word.
+                line = line & rest
+                lineAdv = piecesAdvance(font, px, spans, line,
+                  letterSpacing, features, cache, fallbacks)
+                break
           else:
             line = line & join & wpcs
             lineAdv = trialAdv
@@ -1182,10 +1231,13 @@ proc breakSpanPiece(font: TextFont, px: float64,
     spans: openArray[TextSpan], pcs: openArray[SpanPiece], room: float64,
     hyphen: string, letterSpacing: float64,
     features: openArray[Feature], cache: ShapeCache,
-    fallbacks: openArray[TextFont]): tuple[kept, rest: seq[SpanPiece]] =
-  ## Take a prefix of the word pieces fitting `room`, hyphenating
-  ## inside the last taken piece. Progress is guaranteed (a bare
-  ## rune always fits somewhere).
+    fallbacks: openArray[TextFont],
+    emergency = true): tuple[kept, rest: seq[SpanPiece]] =
+  ## Take a prefix of the word pieces fitting `room`: whole pieces,
+  ## then a soft-hyphen cut at or past them (`hyphen`-suffixed),
+  ## then a rune break inside the next piece (`emergency` only).
+  ## Progress is guaranteed with `emergency` (a bare rune always fits
+  ## somewhere); otherwise empty `kept` reports an unbreakable word.
   var kept: seq[SpanPiece] = @[]
   var rest: seq[SpanPiece] = @[]
   var used = 0.0
@@ -1200,6 +1252,42 @@ proc breakSpanPiece(font: TextFont, px: float64,
     rest.add(pcs[j])
   if rest.len == 0:
     return (kept, rest)
+  # Soft-hyphen cuts, longest first, never behind the whole pieces
+  # (a cut at their boundary still counts: it adds the marker).
+  var st: seq[tuple[stripped: string,
+    points: seq[tuple[bytePos, runeIdx: int]]]] = @[]
+  var pre = @[0]
+  for pc in pcs:
+    let s = splitShy(pc.text)
+    pre.add(pre[^1] + s.stripped.toRunes().len)
+    st.add(s)
+  var pi = pcs.len - 1
+  while pi >= 0:
+    let rr = st[pi].stripped.toRunes()
+    var k = st[pi].points.len - 1
+    while k >= 0:
+      let q = st[pi].points[k].runeIdx
+      # A trailing break needs a following piece to continue on.
+      let hasTail = q < rr.len or pi + 1 < pcs.len
+      if q > 0 and hasTail and pre[pi] + q >= pre[i]:
+        var cand: seq[SpanPiece] = @[]
+        for j in 0 ..< pi:
+          cand.add(pcs[j])
+        cand.add((pcs[pi].span, $rr[0 ..< q] & hyphen,
+          pcs[pi].word))
+        if piecesAdvance(font, px, spans, cand, letterSpacing,
+            features, cache, fallbacks) <= room:
+          var tail: seq[SpanPiece] = @[]
+          let tailText = $rr[q .. ^1]
+          if tailText != "":
+            tail.add((pcs[pi].span, tailText, pcs[pi].word))
+          for j in pi + 1 ..< pcs.len:
+            tail.add(pcs[j])
+          return (cand, tail)
+      dec k
+    dec pi
+  if not emergency:
+    return (@[], @pcs)
   let (f, sz) = spanFontSize(spans, rest[0].span, font, px)
   let frags = breakPieces(f, sz, rest[0].text, letterSpacing, room,
     hyphen, features, cache, fallbacks)

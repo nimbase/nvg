@@ -529,3 +529,64 @@ test "justified CJK inks both box edges":
   discard c.fillTextBox(10, 30, 40, 60, "日日", thaJustify)
   check c.surface.getPixel(15, 35).r < 0.1 # first sun at 10..20
   check c.surface.getPixel(42, 35).r < 0.1 # second at 38..48
+
+test "soft hyphens break without breakWord":
+  let font = loadFontBytes(buildTestFont())
+  # Stripped "ABAB" is 52 wide; "AB" + "-" is 36, fits 40.
+  var o = TextBoxOpts(maxW: 40)
+  let bl = layoutBoxOpts(font, 20.0, "AB­AB", 0.0, 1.2, 0.0, o,
+    [], [])
+  check bl.lay.lines.len == 2
+  check bl.lay.lines[0].advance == 36.0
+  check bl.lay.lines[1].advance == 26.0
+  # No shy, no breakWord: the over-wide word overflows whole.
+  let whole = layoutBoxOpts(font, 20.0, "ABAB", 0.0, 1.2, 0.0, o,
+    [], [])
+  check whole.lay.lines.len == 1
+  check whole.lay.lines[0].advance == 52.0
+
+test "soft-hyphen break inks the next baseline":
+  let font = loadFontBytes(buildTestFont())
+  let c = testCanvas()
+  discard c.fillTextBox(font, 20.0, 10, 30, 40, 60, "AB­AB",
+    thaLeft, tvaBaseline)
+  # Line 2 "AB" sits at baseline 54; unbroken text ends at row 30.
+  check c.surface.getPixel(14, 50).r < 0.1
+  let flat = testCanvas()
+  discard flat.fillTextBox(10, 30, 40, 60, "ABAB", thaLeft,
+    tvaBaseline)
+  check flat.surface.getPixel(14, 50).r > 0.9
+
+test "emergency breaks fall back past soft hyphens":
+  let font = loadFontBytes(buildTestFont())
+  # "AB-" is 36 wide: no shy break fits 30, so rune fragments win.
+  var o = TextBoxOpts(maxW: 30, breakWord: true)
+  let bl = layoutBoxOpts(font, 20.0, "AB­AB", 0.0, 1.2, 0.0, o,
+    [], [])
+  check bl.lay.lines.len == 3
+  check bl.lay.lines[0].advance == 22.0 # "A-"
+  check bl.lay.lines[1].advance == 24.0 # "B-"
+  check bl.lay.lines[2].advance == 26.0 # "AB"
+
+test "span words break at soft hyphens":
+  let font = loadFontBytes(buildTestFont())
+  let spans = [TextSpan(first: 4, last: 6, hasColor: true,
+    color: rgbf(1, 0, 0))]
+  var o = TextBoxOpts(maxW: 40)
+  let bl = layoutBoxSpans(font, 20.0, "AB­AB", spans, 0.0, 1.2,
+    0.0, o, [], [])
+  check bl.lay.lines.len == 2
+  check bl.lay.lines[0].advance == 36.0
+  check not bl.lay.lines[0].glyphs[0].hasColor
+  check bl.lay.lines[1].advance == 26.0
+  check bl.lay.lines[1].glyphs[0].hasColor
+
+test "plain layouts strip soft hyphens":
+  let font = loadFontBytes(buildTestFont())
+  let lay = layoutText(font, 20.0, "A­B")
+  check lay.lines[0].advance == 26.0 # not 36 with tofu
+  check lay.lines[0].glyphs[1].cluster == 3u32
+  let spans = [TextSpan(first: 0, last: 1)]
+  let sl = layoutSpans(font, 20.0, "A­B", spans)
+  check sl.lines[0].advance == 26.0
+  check sl.lines[0].glyphs[1].cluster == 3u32

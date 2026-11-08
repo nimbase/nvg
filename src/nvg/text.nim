@@ -141,10 +141,12 @@ type
       ## line start at space granularity.
     breakWord*: bool = false
       ## Emergency-break an over-wide word at character boundaries
-      ## instead of letting it overflow its line.
+      ## instead of letting it overflow its line. Soft hyphens
+      ## (U+00AD) always break first, with or without this flag.
     hyphenChar*: string = "-"
-      ## Marker appended to each emergency-broken fragment but the
-      ## last (only when `breakWord`).
+      ## Marker appended to each broken fragment but the last, for
+      ## both soft-hyphen and emergency breaks (only when
+      ## `breakWord`; `""` breaks CJK-style with no marker).
     decor*: TextDecor = tdNone
       ## Underline/strikethrough rules from per-line ink metrics
       ## (painted with the text paint; bounds ignore them).
@@ -327,6 +329,37 @@ proc isSpreadSlot*(text: string, prev, next: PlacedGlyph): bool =
     return false
   not isGlue(uint32(text.runeAt(nc)))
 
+proc splitShy*(word: string): tuple[stripped: string,
+    points: seq[tuple[bytePos, runeIdx: int]]] =
+  ## Split U+00AD soft hyphens out of `word`: `stripped` drops them
+  ## (they never shape), `points` marks each break opportunity by
+  ## stripped byte offset (for cluster remap) and rune index (for
+  ## fragment slicing). A break before stripped rune #q renders the
+  ## prefix with the hyphen marker.
+  result.stripped = ""
+  result.points = @[]
+  var bi = 0
+  var ri = 0
+  for r in word.runes:
+    if uint32(r) == 0x00ADu32:
+      result.points.add((bi, ri))
+    else:
+      let t = $r
+      result.stripped.add(t)
+      bi += t.len
+      inc ri
+
+proc unshyCluster*(points: openArray[tuple[bytePos, runeIdx: int]],
+    c: uint32): uint32 =
+  ## Map a stripped-string cluster back to source coordinates (+2
+  ## bytes per earlier soft hyphen).
+  result = c
+  for p in points:
+    if p.bytePos <= int(c):
+      result += 2u32
+    else:
+      break
+
 proc shapeCached*(font: TextFont, sizePx: float64, line: string,
     letterSpacing: float64, features: openArray[Feature],
     cache: ShapeCache = nil,
@@ -339,61 +372,79 @@ proc shapeCached*(font: TextFont, sizePx: float64, line: string,
   ## indicators) always join the previous run so sequences never
   ## split across fonts. Run glyphs carry their font (nil = primary).
   ## Hits return copies, so mutating the result never corrupts the
-  ## memo (the memo key carries font identity).
+  ## memo (the memo key carries font identity). Soft hyphens never
+  ## shape: metrics run on the stripped string while clusters map
+  ## back to the input coordinates.
   if font == nil:
     return shapeLine(font, sizePx, line, letterSpacing, features)
+  # Soft hyphens never shape: metrics run on the stripped string
+  # while clusters map back to the input coordinates.
+  var eff = line
+  var shy: seq[tuple[bytePos, runeIdx: int]] = @[]
+  if "\u00AD" in line:
+    let ss = splitShy(line)
+    eff = ss.stripped
+    shy = ss.points
   if fallbacks.len == 0:
     if cache == nil:
-      return shapeLine(font, sizePx, line, letterSpacing, features)
-    let key = $cast[int](font) & "\x1F" & $sizePx & "\x1F" &
-      $letterSpacing & "\x1F" & line
-    if key in cache.tab:
-      return cache.tab[key]
-    let shaped = shapeLine(font, sizePx, line, letterSpacing, features)
-    cache.tab[key] = shaped
-    return shaped
-  # Split into (byteStart, fontIndex) runs; 0 = primary.
-  var runs: seq[tuple[start: int, fi: int]] = @[]
-  var pos = 0
-  var curFi = -1
-  for r in line.runes:
-    let cp = uint32(r)
-    let w = ($r).len
-    var fi: int
-    if curFi >= 0 and isGlue(cp):
-      fi = curFi
+      result = shapeLine(font, sizePx, eff, letterSpacing, features)
     else:
-      fi = 0
-      if not font.shaper.hasGlyph(cp):
-        for i, fb in fallbacks:
-          if fb != nil and fb.shaper.hasGlyph(cp):
-            fi = i + 1
-            break
-    if fi != curFi:
-      runs.add((pos, fi))
-      curFi = fi
-    pos += w
-  result = ShapedLine(glyphs: @[], advance: 0.0)
-  if runs.len == 0:
-    return
-  var pen = 0.0
-  for i, rn in runs:
-    let stop = if i + 1 < runs.len: runs[i + 1].start else: line.len
-    let sub = line[rn.start ..< stop]
-    let rf = if rn.fi == 0: font else: fallbacks[rn.fi - 1]
-    let sh = shapeCached(rf, sizePx, sub, letterSpacing, features,
-      cache)
-    for g in sh.glyphs:
-      var gg = g
-      gg.x += pen
-      if gg.hasInk:
-        gg.x0 += pen
-        gg.x1 += pen
-      gg.cluster += uint32(rn.start)
-      gg.font = if rn.fi == 0: nil else: rf
-      result.glyphs.add(gg)
-    pen += sh.advance
-  result.advance = pen
+      let key = $cast[int](font) & "\x1F" & $sizePx & "\x1F" &
+        $letterSpacing & "\x1F" & eff
+      if key in cache.tab:
+        result = cache.tab[key]
+      else:
+        let shaped = shapeLine(font, sizePx, eff, letterSpacing,
+          features)
+        cache.tab[key] = shaped
+        result = shaped
+  else:
+    # Split into (byteStart, fontIndex) runs; 0 = primary.
+    var runs: seq[tuple[start: int, fi: int]] = @[]
+    var pos = 0
+    var curFi = -1
+    for r in eff.runes:
+      let cp = uint32(r)
+      let w = ($r).len
+      var fi: int
+      if curFi >= 0 and isGlue(cp):
+        fi = curFi
+      else:
+        fi = 0
+        if not font.shaper.hasGlyph(cp):
+          for i, fb in fallbacks:
+            if fb != nil and fb.shaper.hasGlyph(cp):
+              fi = i + 1
+              break
+      if fi != curFi:
+        runs.add((pos, fi))
+        curFi = fi
+      pos += w
+    result = ShapedLine(glyphs: @[], advance: 0.0)
+    if runs.len > 0:
+      var pen = 0.0
+      for i, rn in runs:
+        let stop = if i + 1 < runs.len: runs[i + 1].start
+          else: eff.len
+        let sub = eff[rn.start ..< stop]
+        let rf = if rn.fi == 0: font else: fallbacks[rn.fi - 1]
+        let sh = shapeCached(rf, sizePx, sub, letterSpacing, features,
+          cache)
+        for g in sh.glyphs:
+          var gg = g
+          gg.x += pen
+          if gg.hasInk:
+            gg.x0 += pen
+            gg.x1 += pen
+          gg.cluster += uint32(rn.start)
+          gg.font = if rn.fi == 0: nil else: rf
+          result.glyphs.add(gg)
+        pen += sh.advance
+      result.advance = pen
+  if shy.len > 0:
+    for j in 0 ..< result.glyphs.len:
+      result.glyphs[j].cluster =
+        unshyCluster(shy, result.glyphs[j].cluster)
 
 proc lineY*(lay: TextLayout, i: int): float64 =
   ## Baseline y of line `i`, relative to the first baseline.
@@ -459,7 +510,8 @@ proc layoutText*(font: TextFont, sizePx: float64, s: string,
   ## (callers draw nothing and measure zero). `lineHeightAbs > 0`
   ## overrides the multiplier with an absolute baseline step in px.
   ## `fallbacks` covers characters missing from `font` (see
-  ## `shapeCached`); shaping memoizes within the call.
+  ## `shapeCached`); shaping memoizes within the call. Soft hyphens
+  ## never shape (no break opportunity outside boxes: invisible).
   let px = max(1.0, sizePx)
   let step = if lineHeightAbs > 0.0: lineHeightAbs
     else: px * max(0.0, lineHeightMul)
@@ -755,7 +807,7 @@ proc wrapParagraph*(font: TextFont, sizePx: float64, para: string,
     if w.len == 0:
       continue
     let trial = if line == "": w else: line & " " & w
-    if shapeLine(font, sizePx, trial, letterSpacing,
+    if shapeCached(font, sizePx, trial, letterSpacing,
         features).advance <= maxW or line == "":
       line = trial
     else:
