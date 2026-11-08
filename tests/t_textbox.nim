@@ -142,3 +142,72 @@ test "justify ink spans from first to last word":
   let b = c.textBoxBounds(0, 50, 46, 60, "A B", thaJustify, tvaTop,
     false)
   check close(b.x, 0.0) and close(b.w, 40.0) # A at 0, B ends 32+8
+
+test "line clamp keeps the head, ellipsis trims the tail":
+  let c = testCanvas()
+  var o = TextBoxOpts(maxW: 20, maxLines: 2)
+  let m = c.measureTextBox(0, 0, "A\nB\nC", o)
+  check m.lineCount == 2
+  o = TextBoxOpts(maxW: 20, maxLines: 1, overflow: toEllipsis)
+  let e = c.measureTextBox(0, 0, "AB\nCD", o)
+  check e.lineCount == 1
+  check e.advance == 10.0 # "AB" -> "A…" (22) -> "…" (10)
+  o = TextBoxOpts(maxW: 20, maxLines: 1)
+  let cut = c.measureTextBox(0, 0, "AB\nCD", o)
+  check cut.lineCount == 1
+  check cut.advance == 26.0 # silent cut: no trimming
+
+test "custom ellipsis marker":
+  let c = testCanvas()
+  var o = TextBoxOpts(maxW: 20, overflow: toEllipsis, ellipsis: ">")
+  let m = c.measureTextBox(0, 0, "AB", o)
+  check m.advance == 10.0 # "A>" is 22, ">" alone is 10
+
+test "fit honors min and max size bounds":
+  let c = testCanvas()
+  var o = TextBoxOpts(maxW: 20, fit: tfShrink, minSize: 18.0)
+  let mn = c.measureTextBox(0, 0, "AB", o)
+  check mn.sizePx == 18.0 # floor wins over fitting (19.5 needs 15)
+  o = TextBoxOpts(maxW: 20, fit: tfStretch, maxSize: 25.0)
+  let mx = c.measureTextBox(0, 0, "A", o)
+  check mx.sizePx == 25.0 # ceiling wins over filling (33)
+
+test "paragraph gap spreads baselines":
+  let c = testCanvas()
+  var o = TextBoxOpts(maxW: 200, va: tvaBaseline, paragraphGap: 10.0)
+  let b = c.textBoxBounds(0, 30, "A\nB", o)
+  check close(b.y, 16.0) # A ink top stays
+  check close(b.h, 48.0) # -14 .. (24 + 10 gap) + 10 B ink
+
+test "first-line indent shifts and narrows":
+  let c = testCanvas()
+  var o = TextBoxOpts(maxW: 200, firstLineIndent: 10.0)
+  let b = c.textBoxBounds(0, 30, "A", o)
+  check close(b.x, 10.0)
+  o = TextBoxOpts(maxW: 30, firstLineIndent: 10.0)
+  let m = c.measureTextBox(0, 0, "A B", o)
+  check m.lineCount == 2 # first line budgets 30 - 10 = 20
+  let bl = layoutBoxOpts(loadFontBytes(buildTestFont()), 20.0, "A B",
+    0.0, 1.2, 0.0, o, [])
+  check close(bl.lay.lines[0].glyphs[0].x, 10.0)
+  check close(bl.lay.lines[1].glyphs[0].x, 0.0)
+
+test "decorations paint rules, bounds ignore them":
+  let c = testCanvas()
+  var o = TextBoxOpts(maxW: 200, va: tvaBaseline, decor: tdUnderline)
+  discard c.fillTextBox(10, 30, "A", o)
+  check c.surface.getPixel(15, 31).r < 0.5 # rule row, in ink x
+  let plain = testCanvas()
+  let po = TextBoxOpts(maxW: 200, va: tvaBaseline)
+  discard plain.fillTextBox(10, 30, "A", po)
+  check plain.surface.getPixel(15, 31).r > 0.9
+  let b = c.textBoxBounds(10, 30, "A", o)
+  check close(b.y, 16.0) and close(b.h, 14.0) # rules ignored
+  var s = TextBoxOpts(maxW: 200, va: tvaBaseline, decor: tdStrike)
+  let st = testCanvas()
+  discard st.fillTextBox(10, 30, "A A", s)
+  check st.surface.getPixel(26, 24).r < 0.5 # inter-word gap, struck
+  let nost = testCanvas()
+  let no = TextBoxOpts(maxW: 200, va: tvaBaseline)
+  discard nost.fillTextBox(10, 30, "A A", no)
+  check nost.surface.getPixel(26, 24).r > 0.9

@@ -29,7 +29,7 @@ proc caption(c: Canvas, x, y: float64, s: string) =
 
 proc main(fontPath, outDir: string) =
   createDir(outDir)
-  let c = newCanvas(960, 1180)
+  let c = newCanvas(960, 1730)
   c.clear(rgb(255, 255, 255))
   let id = c.createFont("demo", fontPath)
   if id == 0:
@@ -84,6 +84,13 @@ proc main(fontPath, outDir: string) =
   discard c.fillTextBox(368, 652, 224, 100, "A Midsummer Night",
     thaCenter, tvaMiddle, false)
   caption(c, 360, 636, "(same call without fit)")
+  c.setFontSize(34.0)
+  c.boxFrame(680, 652, 240, 110)
+  var fo = TextBoxOpts(maxW: 224, boxH: 100, ha: thaCenter,
+    va: tvaMiddle, fit: tfShrink, minSize: 30.0)
+  discard c.fillTextBox(688, 652, "A Midsummer Night", fo)
+  caption(c, 680, 636, "(shrink floor min 30)")
+  c.setFontSize(19.0)
   c.setFontSize(19.0)
 
   caption(c, 40, 806, "scaleX 1.0 vs 0.75 vs 1.35 (geometric)")
@@ -109,6 +116,38 @@ proc main(fontPath, outDir: string) =
   let q = c.measureText("Ag")
   discard c.fillText(570, 1100, "measureText Ag: " & $q.advance &
     "px, " & $q.lineCount & " line")
+
+  # --- Clamp row: full vs 2-line ellipsis vs custom marker. ---
+  caption(c, 40, 1190, "line clamp (full, 2 lines, custom marker)")
+  const clampText = "Over hill, over dale\nthorough bush, thorough brier, " &
+    "over park, over pale, thorough flood, thorough fire, over " &
+    "hill, over dale, thorough bush, thorough brier"
+  c.boxFrame(40, 1206, 260, 170)
+  discard c.fillTextBox(48, 1212, 244, 160, clampText, thaLeft, tvaTop,
+    true)
+  c.boxFrame(340, 1206, 260, 170)
+  var co = TextBoxOpts(maxW: 244, boxH: 160, maxLines: 2,
+    overflow: toEllipsis, wrap: false)
+  discard c.fillTextBox(348, 1212, clampText, co)
+  c.boxFrame(640, 1206, 260, 170)
+  co.ellipsis = " [...]"
+  discard c.fillTextBox(648, 1212, clampText, co)
+
+  # --- Paragraph row: gap between stanzas, indented first lines. ---
+  caption(c, 40, 1408, "paragraph gap 12, first-line indent 24")
+  c.boxFrame(40, 1424, 880, 170)
+  var po = TextBoxOpts(maxW: 864, boxH: 160, paragraphGap: 12.0,
+    firstLineIndent: 24.0)
+  discard c.fillTextBox(48, 1430, Para & "\n" & Para, po)
+
+  # --- Decor row: underline, strike, both. ---
+  caption(c, 40, 1626, "decorations (underline, strike, both)")
+  let ds = [tdUnderline, tdStrike, tdUnderStrike]
+  for i, d in ds:
+    let x = 40.0 + float64(i) * 300.0
+    c.boxFrame(x, 1642, 260, 60)
+    var dob = TextBoxOpts(maxW: 244, boxH: 48, decor: d)
+    discard c.fillTextBox(x + 8, 1648, "Titania wakes", dob)
 
   c.savePng(outDir / "textbox.png")
   echo "wrote ", outDir / "textbox.png"

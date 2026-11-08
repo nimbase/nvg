@@ -80,7 +80,45 @@ type
     toClip
       ## Clip drawing to the box rect (box APIs only).
     toEllipsis
-      ## Trim over-wide lines and append "…" to fit the box width.
+      ## Trim over-wide lines and append the ellipsis marker to fit.
+
+  TextDecor* = enum
+    tdNone
+    tdUnderline
+    tdStrike
+    tdUnderStrike
+
+  TextBoxOpts* = object
+    ## Full box-layout option set. Positional `fillTextBox` and kin
+    ## cover the common cases; the `opts` overloads expose all of
+    ## this. `maxW`/`boxH` travel here too so one value threads
+    ## layout, alignment and clipping.
+    maxW*: float64 = 0.0
+    boxH*: float64 = 0.0
+    ha*: TextHAlign = thaLeft
+    va*: TextVAlign = tvaTop
+    wrap*: bool = true
+    overflow*: TextOverflow = toVisible
+    fit*: TextFit = tfNone
+    scaleX*: float64 = 1.0
+    maxLines*: int = 0
+      ## Line clamp: keep at most this many physical lines
+      ## (`0` = unlimited). With `toEllipsis` the last kept line is
+      ## trimmed with the marker; otherwise lines are cut silently.
+    ellipsis*: string = "…"
+      ## Marker appended by ellipsis trimming.
+    minSize*: float64 = 0.0
+      ## `tfShrink` floor in px (`0` = none: may shrink to 1px).
+    maxSize*: float64 = 0.0
+      ## `tfStretch` ceiling in px (`0` = none).
+    paragraphGap*: float64 = 0.0
+      ## Extra px between `\n` paragraphs (on top of line height).
+    firstLineIndent*: float64 = 0.0
+      ## Indent of each paragraph's first line in px; wrapped and
+      ## justified widths shrink accordingly.
+    decor*: TextDecor = tdNone
+      ## Underline/strikethrough rules from per-line ink metrics
+      ## (painted with the text paint; bounds ignore them).
 
   TextMetrics* = object
     advance*: float64
@@ -341,10 +379,10 @@ proc justifyLine*(font: TextFont, sizePx: float64, line: string,
 
 proc ellipsizeLine*(font: TextFont, sizePx: float64, line: string,
     letterSpacing: float64, maxW: float64,
-    features: openArray[Feature]): ShapedLine =
-  ## Trim trailing runes and append "…" until the line fits `maxW`.
-  ## Fits already: plain shaping. Nothing fits (even "…" alone):
-  ## an empty line.
+    features: openArray[Feature], marker = "…"): ShapedLine =
+  ## Trim trailing runes and append `marker` until the line fits
+  ## `maxW`. Fits already: plain shaping. Nothing fits (even the
+  ## marker alone): an empty line.
   if maxW <= 0.0:
     return ShapedLine(glyphs: @[], advance: 0.0)
   var shaped = shapeLine(font, sizePx, line, letterSpacing, features)
@@ -353,11 +391,11 @@ proc ellipsizeLine*(font: TextFont, sizePx: float64, line: string,
   var runes = line.toRunes()
   while runes.len > 0:
     runes.setLen(runes.len - 1)
-    shaped = shapeLine(font, sizePx, $runes & "…", letterSpacing,
+    shaped = shapeLine(font, sizePx, $runes & marker, letterSpacing,
       features)
     if shaped.advance <= maxW:
       return shaped
-  shaped = shapeLine(font, sizePx, "…", letterSpacing, features)
+  shaped = shapeLine(font, sizePx, marker, letterSpacing, features)
   if shaped.advance <= maxW:
     return shaped
   ShapedLine(glyphs: @[], advance: 0.0)
