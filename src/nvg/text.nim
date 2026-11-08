@@ -29,6 +29,12 @@
 ##   box it anchors like left.
 ## - Line height is either a font-size multiplier or an absolute px
 ##   value (`lineHeightAbs`); the two are kept distinct, absolute wins.
+##   Span lines with mixed sizes stack variable per-line boxes: each
+##   line's height is its largest glyph size times the multiplier
+##   (absolute wins globally and stays uniform); each boundary sits
+##   0.2 of the previous height past the previous baseline plus 0.8
+##   of the next height above the next one (the 0.8/0.2 split the
+##   selection band uses). Uniform text reduces to the base step.
 
 import std/options
 import std/algorithm
@@ -211,6 +217,17 @@ type
     lines*: seq[ShapedLine]
     sizePx*: float64
     lineHeightPx*: float64
+      ## Base baseline step (multiplier x layout size, or the
+      ## absolute override). Span layouts with mixed sizes stack
+      ## taller per-line boxes (see `lineYs`); this stays the
+      ## uniform base for compatibility.
+    lineYs*: seq[float64]
+      ## Baseline y per line, relative to the first baseline
+      ## (`lineYs[0] == 0` when non-empty). Plain layouts hold the
+      ## uniform `i * lineHeightPx`; span layouts hold variable
+      ## per-line boxes (0.2/0.8 stacking of adjacent heights, plus
+      ## paragraph gaps in boxes). Always prefer this over
+      ## `i * lineHeightPx`.
 
 proc loadFontBytes*(data: openArray[uint8], faceIndex = 0): TextFont =
   ## Parse font bytes (TTF/OTF/TTC). Raises `FontError` on bad data.
@@ -365,6 +382,61 @@ proc shapeCached*(font: TextFont, sizePx: float64, line: string,
     pen += sh.advance
   result.advance = pen
 
+proc lineY*(lay: TextLayout, i: int): float64 =
+  ## Baseline y of line `i`, relative to the first baseline.
+  ## Prefers `lineYs`; falls back to `i * lineHeightPx`.
+  if lay.lineYs.len == lay.lines.len and i >= 0 and
+      i < lay.lineYs.len:
+    lay.lineYs[i]
+  else:
+    float64(i) * lay.lineHeightPx
+
+proc lineMaxSize*(lay: TextLayout, i: int): float64 =
+  ## Largest glyph size on line `i` (per-glyph span sizes, else the
+  ## layout size). Empty lines report the layout size.
+  result = lay.sizePx
+  if i < 0 or i >= lay.lines.len:
+    return
+  for g in lay.lines[i].glyphs:
+    result = max(result, if g.size > 0.0: g.size else: lay.sizePx)
+
+proc uniformBaselines*(n: int, step: float64): seq[float64] =
+  ## `n` baselines at multiples of `step`.
+  result = newSeq[float64](n)
+  for i in 0 ..< n:
+    result[i] = float64(i) * step
+
+proc spanBaselines*(lines: openArray[ShapedLine], sizePx,
+    lineHeightMul, lineHeightAbs: float64,
+    newPara: openArray[bool] = [],
+    paragraphGap = 0.0): seq[float64] =
+  ## Variable baselines for span-shaped lines: each line's height is
+  ## its largest glyph size times the multiplier (`lineHeightAbs > 0`
+  ## forces that uniform step instead). Each boundary sits 0.2 of the
+  ## previous height past the previous baseline plus 0.8 of the next
+  ## height above the next one; `newPara[i]` adds `paragraphGap`
+  ## before line `i`. Uniform sizes reduce to the base step.
+  result = newSeq[float64](lines.len)
+  if lines.len == 0:
+    return
+  if lineHeightAbs > 0.0:
+    for i in 1 ..< lines.len:
+      result[i] = result[i - 1] + lineHeightAbs +
+        (if newPara.len == lines.len and newPara[i]: paragraphGap
+          else: 0.0)
+    return
+  let mul = max(0.0, lineHeightMul)
+  var hs = newSeq[float64](lines.len)
+  for i, ln in lines:
+    var m = sizePx
+    for g in ln.glyphs:
+      m = max(m, if g.size > 0.0: g.size else: sizePx)
+    hs[i] = m * mul
+  for i in 1 ..< lines.len:
+    result[i] = result[i - 1] + 0.2 * hs[i - 1] + 0.8 * hs[i] +
+      (if newPara.len == lines.len and newPara[i]: paragraphGap
+        else: 0.0)
+
 proc layoutText*(font: TextFont, sizePx: float64, s: string,
     letterSpacing = 0.0, lineHeightMul = 1.2,
     features: openArray[Feature] = [],
@@ -384,6 +456,7 @@ proc layoutText*(font: TextFont, sizePx: float64, s: string,
   for line in splitTextLines(s):
     result.lines.add(shapeCached(font, px, line, letterSpacing,
       features, cache, fallbacks))
+  result.lineYs = uniformBaselines(result.lines.len, step)
 
 proc spanAt*(spans: openArray[TextSpan], bytePos: int): int =
   ## Index of the span containing `bytePos`, else -1. Linear scan;
@@ -401,7 +474,9 @@ proc layoutSpans*(font: TextFont, sizePx: float64, s: string,
   ## Shape explicit-`\n` lines with per-range fonts, sizes, colors
   ## and decorations. Unspanned bytes use the layout font/size/paint.
   ## Ranges index `s` after `\r\n`/`\r` normalization to `\n`.
-  ## Clusters stay line-local; glyphs carry their span style.
+  ## Clusters stay line-local; glyphs carry their span style. Lines
+  ## with larger spans stand taller (see `spanBaselines`); an
+  ## absolute line height stays uniform.
   let src = s.replace("\r\n", "\n").replace("\r", "\n")
   let px = max(1.0, sizePx)
   let step = if lineHeightAbs > 0.0: lineHeightAbs
@@ -456,6 +531,8 @@ proc layoutSpans*(font: TextFont, sizePx: float64, s: string,
       shaped.advance = pen
     result.lines.add(shaped)
     lineStart += para.len + 1
+  result.lineYs = spanBaselines(result.lines, px, lineHeightMul,
+    lineHeightAbs)
 
 proc linePenX*(advance: float64, ha: TextHAlign): float64 =
   ## Per-line pen start relative to the anchor x.
@@ -472,7 +549,7 @@ proc layoutInk*(lay: TextLayout, ha: TextHAlign):
   var x0, y0, x1, y1 = 0.0
   for i, line in lay.lines:
     let ox = linePenX(line.advance, ha)
-    let oy = float64(i) * lay.lineHeightPx
+    let oy = lay.lineY(i)
     for g in line.glyphs:
       if not g.hasInk:
         continue
@@ -518,17 +595,21 @@ proc valignShift*(lay: TextLayout, ha: TextHAlign,
 proc hitTest*(lay: TextLayout, x, y: float64,
     ha = thaLeft): TextHit =
   ## Map a layout-local point to a glyph (`x` relative to the anchor,
-  ## `y` relative to the first baseline; lines step by
-  ## `lineHeightPx`). Each glyph owns the span up to the next glyph's
+  ## `y` relative to the first baseline; lines follow `lineYs`). Each
+  ## point maps to its nearest baseline (ties go to the earlier
+  ## line). Each glyph owns the span up to the next glyph's
   ## origin (last: to the line advance); the nearer half reports
   ## `before`. Empty layouts hit line -1; empty lines hit index 0.
   ## Box-positioned layouts (see `layoutBoxOpts`) pass `thaLeft`.
   if lay.lines.len == 0:
     return TextHit(line: -1, index: 0, before: true, byteIndex: -1)
   var li = 0
-  if lay.lineHeightPx > 0.0:
-    li = int(floor(y / lay.lineHeightPx))
-  li = clamp(li, 0, lay.lines.len - 1)
+  var best = abs(y - lay.lineY(0))
+  for i in 1 ..< lay.lines.len:
+    let d = abs(y - lay.lineY(i))
+    if d < best:
+      best = d
+      li = i
   let line = lay.lines[li]
   let pen = linePenX(line.advance, ha)
   if line.glyphs.len == 0:
@@ -581,8 +662,8 @@ proc selectionRects*(lay: TextLayout, fromLine, fromByte, toLine,
   ## `[fromLine:fromByte, toLine:toByte)` (line-local byte offsets,
   ## reversed ranges normalized, empty ranges yield nothing). One
   ## rect per covered line: caret to caret horizontally, line ink
-  ## vertically (an 0.8/0.2 size band for inkless lines).
-  ## Anchor-relative like `hitTest`.
+  ## vertically (a 0.8/0.2 band of the line's largest size for
+  ## inkless lines). Anchor-relative like `hitTest`.
   result = @[]
   if lay.lines.len == 0:
     return
@@ -605,9 +686,9 @@ proc selectionRects*(lay: TextLayout, fromLine, fromByte, toLine,
       else: line.advance)
     if x1 <= x0:
       continue
-    let base = float64(li) * lay.lineHeightPx
-    var y0 = base - lay.sizePx * 0.8
-    var y1 = base + lay.sizePx * 0.2
+    let base = lay.lineY(li)
+    var y0 = base - lay.lineMaxSize(li) * 0.8
+    var y1 = base + lay.lineMaxSize(li) * 0.2
     var found = false
     for g in line.glyphs:
       if g.hasInk:
@@ -637,7 +718,7 @@ proc withScaleX*(lay: TextLayout, sx: float64): TextLayout =
   ## Vertical metrics are untouched.
   let k = max(0.0, sx)
   result = TextLayout(font: lay.font, lines: @[], sizePx: lay.sizePx,
-    lineHeightPx: lay.lineHeightPx)
+    lineHeightPx: lay.lineHeightPx, lineYs: lay.lineYs)
   for line in lay.lines:
     var nl = ShapedLine(glyphs: @[], advance: line.advance * k)
     for g in line.glyphs:
@@ -790,7 +871,7 @@ proc appendLayoutSpan*(p: var Path, xf: Xform, lay: TextLayout, x, y: float64,
   let dy = valignShift(lay, ha, va)
   for i, line in lay.lines:
     let ox = x + linePenX(line.advance, ha)
-    let oy = y + dy + float64(i) * lay.lineHeightPx
+    let oy = y + dy + lay.lineY(i)
     for g in line.glyphs:
       if g.hasColor != wantColor:
         continue
@@ -838,7 +919,7 @@ proc appendLayout*(p: var Path, xf: Xform, lay: TextLayout, x, y: float64,
   let dy = valignShift(lay, ha, va)
   for i, line in lay.lines:
     let ox = x + linePenX(line.advance, ha)
-    let oy = y + dy + float64(i) * lay.lineHeightPx
+    let oy = y + dy + lay.lineY(i)
     for g in line.glyphs:
       let gf = if g.font != nil: g.font else: lay.font
       if gf == nil:

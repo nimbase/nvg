@@ -417,3 +417,60 @@ test "decorations paint rules, bounds ignore them":
   let no = TextBoxOpts(maxW: 200, va: tvaBaseline)
   discard nost.fillTextBox(10, 30, "A A", no)
   check nost.surface.getPixel(26, 24).r > 0.9
+
+test "span lines stand taller with bigger spans":
+  let font = loadFontBytes(buildTestFont())
+  let spans = [TextSpan(first: 2, last: 3, size: 30.0)]
+  let lay = layoutSpans(font, 20.0, "A\nB", spans)
+  check lay.lineYs.len == 2
+  check close(lay.lineYs[0], 0.0)
+  # h0 = 20 * 1.2 = 24, h1 = 30 * 1.2 = 36:
+  # 0.2 * 24 + 0.8 * 36 = 33.6 (uniform would be 24).
+  check close(lay.lineYs[1], 33.6)
+  # A ink -14..0, B@30 ink -15..0: -14 .. 33.6 = 47.6 high.
+  check close(layoutBounds(lay, thaLeft).h, 47.6)
+
+test "absolute line height stays uniform for spans":
+  let font = loadFontBytes(buildTestFont())
+  let spans = [TextSpan(first: 2, last: 3, size: 30.0)]
+  let lay = layoutSpans(font, 20.0, "A\nB", spans, 0.0, 1.2, [],
+    40.0)
+  check lay.lineYs.len == 2
+  check close(lay.lineYs[1], 40.0)
+
+test "variable boxes move ink and hit lines":
+  let font = loadFontBytes(buildTestFont())
+  let spans = [TextSpan(first: 2, last: 3, size: 30.0)]
+  let lay = layoutSpans(font, 20.0, "A\nB", spans)
+  # Midpoint between baselines 0 and 33.6 is 16.8.
+  check hitTest(lay, 2, 10).line == 0
+  check hitTest(lay, 2, 20).line == 1 # uniform step would say 0
+  let c = testCanvas()
+  discard c.fillSpans(10, 30, "A\nB", spans)
+  # Second baseline lands at 63.6, B@30 ink spans ~48.6..63.6.
+  var dark = false
+  for x in 10 .. 30:
+    if c.surface.getPixel(x, 58).r < 0.5:
+      dark = true
+  check dark # uniform layout leaves this row blank (ink ends at 54)
+  for x in 10 .. 30:
+    check c.surface.getPixel(x, 46).r > 0.9 # gap row
+
+test "selection fallback uses the line's own size":
+  let font = loadFontBytes(buildTestFont())
+  let spans = [TextSpan(first: 2, last: 3, size: 30.0)]
+  let lay = layoutSpans(font, 20.0, "A\n ", spans)
+  let r = selectionRects(lay, 1, 0, 1, 1)
+  check r.len == 1
+  # Inkless space line at 33.6 with size 30: 33.6 - 24 .. + 6.
+  check close(r[0].y, 9.6) and close(r[0].h, 30.0)
+  check close(r[0].w, 15.0) # space at 30 advances 15
+
+test "span box folds paragraph gap into baselines":
+  let font = loadFontBytes(buildTestFont())
+  let spans = [TextSpan(first: 2, last: 3, size: 30.0)]
+  var o = TextBoxOpts(maxW: 200, va: tvaBaseline, paragraphGap: 10.0)
+  let bl = layoutBoxSpans(font, 20.0, "A\nB", spans, 0.0, 1.2, 0.0,
+    o, [], [])
+  check close(bl.lay.lineYs[1], 43.6) # 33.6 + 10 gap
+  check close(layoutBounds(bl.lay, thaLeft).h, 57.6) # -14 .. 43.6

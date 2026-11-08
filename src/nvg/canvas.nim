@@ -1282,7 +1282,9 @@ proc layoutBoxSpans*(font: TextFont, sizePx: float64, s: string,
   ## Box layout over span-tagged text: mirrors `layoutBoxOpts`
   ## (wrap, clamp, fit, justify, ellipsis, scale, align, gap,
   ## indent) with per-range fonts, sizes, colors and decorations.
-  ## Ranges index `s` after `\r\n`/`\r` normalization. Pure layout.
+  ## Lines with larger spans stand taller (see `spanBaselines`;
+  ## paragraph gaps widen the same boundaries). Ranges index `s`
+  ## after `\r\n`/`\r` normalization. Pure layout.
   let src = s.replace("\r\n", "\n").replace("\r", "\n")
   let maxW = o.maxW
   let k = max(0.0, o.scaleX)
@@ -1386,19 +1388,11 @@ proc layoutBoxSpans*(font: TextFont, sizePx: float64, s: string,
           if lay.lines[i].glyphs[j].hasInk:
             lay.lines[i].glyphs[j].x0 += xoff
             lay.lines[i].glyphs[j].x1 += xoff
-  if o.paragraphGap != 0.0 and lay.lines.len > 0:
-    var acc = 0.0
-    var prevPara = lines[0].para
-    for i in 0 ..< lay.lines.len:
-      if lines[i].para != prevPara:
-        acc += o.paragraphGap
-        prevPara = lines[i].para
-      if acc != 0.0:
-        for j in 0 ..< lay.lines[i].glyphs.len:
-          lay.lines[i].glyphs[j].y += acc
-          if lay.lines[i].glyphs[j].hasInk:
-            lay.lines[i].glyphs[j].y0 += acc
-            lay.lines[i].glyphs[j].y1 += acc
+  var newPara = newSeq[bool](lines.len)
+  for i in 1 ..< lines.len:
+    newPara[i] = lines[i].para != lines[i - 1].para
+  lay.lineYs = spanBaselines(lay.lines, px, lineHeightMul,
+    lineHeightAbs, newPara, o.paragraphGap)
   var shift = 0.0
   if o.va != tvaBaseline:
     let ink = layoutInk(lay, thaLeft)
@@ -1544,6 +1538,7 @@ proc layoutBoxOpts*(font: TextFont, sizePx: float64, s: string,
           shaped.glyphs[j].x0 += indent
           shaped.glyphs[j].x1 += indent
     lay.lines.add(shaped)
+  lay.lineYs = uniformBaselines(lay.lines.len, step)
   lay = lay.withScaleX(o.scaleX)
   if maxW > 0.0 and (o.ha == thaCenter or o.ha == thaRight):
     # Box-relative alignment: x is always the box left edge, `ha`
@@ -1602,7 +1597,7 @@ proc paintDeco(c: Canvas, lay: TextLayout, x, y: float64,
     return
   var p = Path()
   for i, line in lay.lines:
-    let base = y + float64(i) * lay.lineHeightPx
+    let base = y + lay.lineY(i)
     var gi = 0
     while gi < line.glyphs.len:
       let eff = if line.glyphs[gi].decor != tdNone:
