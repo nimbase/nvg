@@ -7,7 +7,9 @@
 ## shaping into ordinary path fills/strokes (see `nvg/text`).
 
 import std/tables
+import std/math
 import std/strutils
+import std/unicode
 import harfnim/feature
 import ./types
 import ./transform
@@ -569,38 +571,199 @@ type
 
   WrapLine = tuple[para: int, idx: int, last: bool, text: string]
 
+proc stopPad(spaceAdv, tabW, cur: float64): string =
+  ## Spaces advancing from `cur` to the next multiple of `tabW`.
+  if tabW <= 0.0 or spaceAdv <= 0.0:
+    return " "
+  let rem = cur - floor(cur / tabW) * tabW
+  let need = if rem == 0.0: tabW else: tabW - rem
+  let n = max(1, int(ceil(need / spaceAdv)))
+  for _ in 0 ..< n:
+    result.add(' ')
+
+proc expandRun(font: TextFont, px: float64, lineSoFar: string,
+    run: string, letterSpacing: float64, spaceAdv: float64,
+    tabW: float64, features: openArray[Feature]): string =
+  ## Preserve-semantics expansion of one whitespace run: spaces
+  ## verbatim, tabs to stops with a running advance.
+  var cur = shapeLine(font, px, lineSoFar, letterSpacing,
+    features).advance
+  for ch in run:
+    if ch == ' ':
+      result.add(' ')
+      cur += spaceAdv
+    else:
+      let pad = stopPad(spaceAdv, tabW, cur)
+      result.add(pad)
+      cur += float64(pad.len) * spaceAdv
+
+proc renderGap(font: TextFont, px: float64, lineSoFar: string, run: string,
+    letterSpacing: float64, collapse: bool, spaceAdv: float64,
+    tabW: float64, features: openArray[Feature]): string =
+  ## Render a raw whitespace run for layout. Collapsed: a single
+  ## space, or a single tab stop when the run holds a tab (leading
+  ## runs vanish). Preserved: spaces verbatim, tabs to stops with a
+  ## running advance.
+  if run.len == 0:
+    return ""
+  if collapse:
+    if lineSoFar == "":
+      return ""
+    if '\t' in run:
+      let adv0 = shapeLine(font, px, lineSoFar, letterSpacing,
+        features).advance
+      return stopPad(spaceAdv, tabW, adv0)
+    return " "
+  expandRun(font, px, lineSoFar, run, letterSpacing, spaceAdv, tabW,
+    features)
+
+proc expandPara(font: TextFont, px: float64, para: string,
+    letterSpacing: float64, spaceAdv: float64, tabW: float64,
+    features: openArray[Feature]): string =
+  ## Preserve-semantics expansion of a whole paragraph (for `twPre`):
+  ## word chars verbatim, whitespace runs via `expandRun`.
+  var run = ""
+  for ch in para:
+    if ch == ' ' or ch == '\t':
+      run.add(ch)
+    else:
+      if run != "":
+        result.add(expandRun(font, px, result, run, letterSpacing,
+          spaceAdv, tabW, features))
+        run = ""
+      result.add(ch)
+  if run != "":
+    result.add(expandRun(font, px, result, run, letterSpacing,
+      spaceAdv, tabW, features))
+
+proc breakPieces(font: TextFont, px: float64, word: string,
+    letterSpacing: float64, budget: float64, hyphen: string,
+    features: openArray[Feature]): seq[string] =
+  ## Emergency-break `word` into budget-fitting fragments, `hyphen`
+  ## suffixed but on the last. Never returns empty (a lone rune
+  ## always fits somewhere).
+  result = @[]
+  var runes = word.toRunes()
+  while runes.len > 0:
+    if shapeLine(font, px, $runes, letterSpacing,
+        features).advance <= budget:
+      result.add($runes)
+      break
+    var n = runes.len - 1
+    while n > 1 and shapeLine(font, px, $runes[0 ..< n] & hyphen,
+        letterSpacing, features).advance > budget:
+      dec n
+    if n == 1 and shapeLine(font, px, $runes[0 ..< 1] & hyphen,
+        letterSpacing, features).advance > budget:
+      # Even one rune plus hyphen overflows: bare rune, retry rest.
+      result.add($runes[0 ..< 1])
+      runes = runes[1 .. ^1]
+      continue
+    result.add($runes[0 ..< n] & hyphen)
+    runes = runes[n .. ^1]
+
 proc wrapAll(font: TextFont, px: float64, s: string,
-    letterSpacing: float64, maxW: float64, indent: float64, wrap: bool,
-    features: openArray[Feature]): seq[WrapLine] =
+    letterSpacing: float64, maxW: float64, indent: float64,
+    o: TextBoxOpts, features: openArray[Feature]): seq[WrapLine] =
   ## Greedy word wrap per paragraph, tagged with paragraph index,
   ## index within the paragraph, and end-of-paragraph flag (for
   ## last-line alignment under justify). A paragraph's first line
   ## budgets `maxW - indent`; continuations budget `maxW`.
+  ## `twNormal` collapses space runs, `twPre*` preserve them; tabs
+  ## expand to `tabWidth` stops first. Over-wide words
+  ## emergency-break when `breakWord`, else take their own line.
   result = @[]
+  let collapse = o.whiteSpace == twNormal
+  let doWrap = o.wrap and o.whiteSpace != twPre
+  let spaceAdv = shapeLine(font, px, " ", letterSpacing,
+    features).advance
+  let tabW = if o.tabWidth > 0.0: o.tabWidth else: 8.0 * spaceAdv
   var pi = 0
   for para in splitTextLines(s):
+    # Words separated by raw whitespace runs (spaces/tabs kept).
+    var words: seq[string] = @[]
+    var runs: seq[string] = @[] # runs[i] follows words[i]
+    var cur = ""
+    var run = ""
+    var lead = ""
+    for ch in para:
+      if ch == ' ' or ch == '\t':
+        if cur != "":
+          words.add(cur)
+          runs.add("")
+          cur = ""
+        if words.len > 0:
+          runs[^1].add(ch)
+        else:
+          lead.add(ch)
+      else:
+        cur.add(ch)
+    if cur != "":
+      words.add(cur)
+      runs.add("")
     var lines: seq[string] = @[]
-    if wrap and maxW > 0.0:
+    if doWrap and maxW > 0.0:
       var line = ""
       var first = true
-      for w in para.split(' '):
-        if w.len == 0:
-          continue
-        let trial = if line == "": w else: line & " " & w
+      var leadDone = collapse
+      var wi = 0
+      while wi < words.len:
         let budget = maxW - (if first: indent else: 0.0)
+        var joiner = ""
+        if line != "":
+          joiner = renderGap(font, px, line, runs[wi - 1], letterSpacing,
+            collapse, spaceAdv, tabW, features)
+        elif not leadDone:
+          joiner = renderGap(font, px, "", lead, letterSpacing,
+            collapse, spaceAdv, tabW, features)
+        let trial = line & joiner & words[wi]
         if shapeLine(font, px, trial, letterSpacing,
             features).advance <= budget or line == "":
-          line = trial
+          if line == "" and shapeLine(font, px, trial, letterSpacing,
+              features).advance > budget:
+            # Over-wide word alone on the line.
+            if o.breakWord:
+              let parts = breakPieces(font, px, words[wi],
+                letterSpacing, budget, o.hyphenChar, features)
+              for k in 0 ..< parts.len - 1:
+                lines.add(if k == 0: joiner & parts[k]
+                  else: parts[k])
+              line = parts[^1]
+            else:
+              line = trial
+          else:
+            line = trial
+          leadDone = true
+          inc wi
         else:
           lines.add(line)
-          line = w
+          line = ""
           first = false
-      if line != "":
-        lines.add(line)
+      if words.len == 0:
+        lines.add(renderGap(font, px, "", lead, letterSpacing,
+          collapse, spaceAdv, tabW, features))
+      else:
+        if not collapse and runs[^1].len > 0 and line != "":
+          # Trailing whitespace belongs to the line in preserve modes.
+          line.add(renderGap(font, px, line, runs[^1], letterSpacing,
+            collapse, spaceAdv, tabW, features))
+        if line != "":
+          lines.add(line)
       if lines.len == 0:
         lines.add("")
     else:
-      lines.add(para)
+      if collapse:
+        # No wrap, collapsed: single spaces, tabs included.
+        var flat = ""
+        for w in words:
+          if flat != "":
+            flat.add(' ')
+          flat.add(w)
+        lines.add(flat)
+      else:
+        # No wrap, preserved: expand tabs with a running advance.
+        lines.add(expandPara(font, px, para, letterSpacing, spaceAdv,
+          tabW, features))
     for i, ln in lines:
       result.add((pi, i, i == lines.len - 1, ln))
     inc pi
@@ -668,7 +831,7 @@ proc layoutBoxOpts*(font: TextFont, sizePx: float64, s: string,
   let k = max(0.0, o.scaleX)
   template widestAt(px: int32): float64 =
     var lines = wrapAll(font, float64(px), s, letterSpacing, maxW,
-      o.firstLineIndent, o.wrap, features)
+      o.firstLineIndent, o, features)
     clampCount(lines, o.maxLines)
     widestStrings(font, float64(px), lines, letterSpacing,
       features) * k
@@ -723,7 +886,7 @@ proc layoutBoxOpts*(font: TextFont, sizePx: float64, s: string,
   var lay = TextLayout(font: font, lines: @[], sizePx: px,
     lineHeightPx: step)
   var lines = wrapAll(font, px, s, letterSpacing, maxW,
-    o.firstLineIndent, o.wrap, features)
+    o.firstLineIndent, o, features)
   clampCount(lines, o.maxLines)
   for wl in lines:
     let indent = if wl.idx == 0: o.firstLineIndent else: 0.0
@@ -1039,6 +1202,26 @@ proc measureTextBox*(c: Canvas, font: TextFont, size: float64, x, y: float64,
   let bl = layoutBoxOpts(font, size, s, letterSpacing, lineHeightMul,
     lineHeightPx, o, features)
   measureLayout(bl.lay, thaLeft)
+
+proc textHitBox*(c: Canvas, px, py: float64, s: string, o: TextBoxOpts,
+    features: openArray[Feature] = []): TextHit =
+  ## Map a user-space point to a laid-out glyph: line index, glyph
+  ## index, before/after side, and the glyph's byte offset in its
+  ## line string. Layout runs with the state font/style; coordinates
+  ## are box-relative (the box top-left is the origin).
+  let st = c.states[^1]
+  let bl = layoutBoxOpts(c.lookupFont(st.fontFace), st.fontSize, s,
+    st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, o, features)
+  hitTest(bl.lay, px, py - bl.shift, thaLeft)
+
+proc textHitBox*(c: Canvas, font: TextFont, size: float64, px, py: float64,
+    s: string, o: TextBoxOpts, letterSpacing = 0.0,
+    lineHeightMul = 1.2, lineHeightPx = 0.0,
+    features: openArray[Feature] = []): TextHit =
+  ## Stateless overload of `textHitBox`.
+  let bl = layoutBoxOpts(font, size, s, letterSpacing, lineHeightMul,
+    lineHeightPx, o, features)
+  hitTest(bl.lay, px, py - bl.shift, thaLeft)
 
 proc flattened(c: Canvas): seq[SubPoly] =
   path.flatten(c.path, c.tessTol, DefaultDistTol)

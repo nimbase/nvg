@@ -29,7 +29,7 @@ proc caption(c: Canvas, x, y: float64, s: string) =
 
 proc main(fontPath, outDir: string) =
   createDir(outDir)
-  let c = newCanvas(960, 1730)
+  let c = newCanvas(960, 2100)
   c.clear(rgb(255, 255, 255))
   let id = c.createFont("demo", fontPath)
   if id == 0:
@@ -148,6 +148,40 @@ proc main(fontPath, outDir: string) =
     c.boxFrame(x, 1642, 260, 60)
     var dob = TextBoxOpts(maxW: 244, boxH: 48, decor: d)
     discard c.fillTextBox(x + 8, 1648, "Titania wakes", dob)
+
+  # --- Whitespace row: pre with tabs, pre-wrap with breaks. ---
+  caption(c, 40, 1740, "whitespace (pre tabs, pre-wrap double spaces)")
+  var pre = TextBoxOpts(maxW: 300, boxH: 130, whiteSpace: twPre,
+    tabWidth: 60.0)
+  c.boxFrame(40, 1756, 320, 144)
+  discard c.fillTextBox(48, 1762, "fn\tmain() {\n\tlet x\t= 1;\n}",
+    pre)
+  var prew = TextBoxOpts(maxW: 300, boxH: 130, whiteSpace: twPreWrap,
+    breakWord: true)
+  c.boxFrame(400, 1756, 320, 144)
+  discard c.fillTextBox(408, 1762, "A  double  spaced  line plus " &
+    "AVeryLongWordThatAbsolutelyMustBreakSomewhere ok", prew)
+
+  # --- Hit-test row: red carets at probed byte offsets. ---
+  caption(c, 40, 1932, "hit test (carets + byte offsets)")
+  var ho = TextBoxOpts(maxW: 500, boxH: 60)
+  c.boxFrame(40, 1948, 520, 90)
+  discard c.fillTextBox(48, 1954, "Pack my box with five dozen", ho)
+  let hfont = loadFontFile(fontPath)
+  let hbl = layoutBoxOpts(hfont, 19.0, "Pack my box with five dozen",
+    0.0, 1.35, 0.0, ho, [])
+  c.setStrokeColor(rgbf(0.85, 0.2, 0.2))
+  c.setStrokeWidth(1.5)
+  c.setFontSize(13.0)
+  c.setFillColor(rgbf(0.85, 0.2, 0.2))
+  for qx in [5.0, 60.0, 130.0, 210.0, 330.0]:
+    let h = hitTest(hbl.lay, qx, 12.0, thaLeft)
+    let cx = caretX(hbl.lay, h, thaLeft)
+    c.beginPath()
+    c.moveTo(48 + cx, 1954)
+    c.lineTo(48 + cx, 1980)
+    c.stroke()
+    discard c.fillText(48 + cx + 3, 1986, $h.byteIndex)
 
   c.savePng(outDir / "textbox.png")
   echo "wrote ", outDir / "textbox.png"

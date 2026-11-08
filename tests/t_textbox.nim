@@ -32,8 +32,9 @@ test "justify spreads sole and non-last lines to the box":
     thaJustify, tvaTop, false, toVisible, tfNone, 1.0, [])
   check bl.lay.lines.len == 1
   check bl.lay.lines[0].advance == 46.0
-  check bl.lay.lines[0].glyphs.len == 2 # words only; spaces are gaps
-  check close(bl.lay.lines[0].glyphs[1].x, 32.0) # B after 12 + gap 20
+  check bl.lay.lines[0].glyphs.len == 3 # chunks keep the space glyph
+  check close(bl.lay.lines[0].glyphs[2].x, 32.0) # B after 12 + gap 20
+  check bl.lay.lines[0].glyphs[2].cluster == 2u32
   let ml = layoutBox(font, 20.0, "A B C\nA", 0.0, 1.2, 0.0, 46.0,
     0.0, thaJustify, tvaTop, true, toVisible, tfNone, 1.0, [])
   check ml.lay.lines.len == 3
@@ -191,6 +192,73 @@ test "first-line indent shifts and narrows":
     0.0, 1.2, 0.0, o, [])
   check close(bl.lay.lines[0].glyphs[0].x, 10.0)
   check close(bl.lay.lines[1].glyphs[0].x, 0.0)
+
+test "pre-wrap preserves space runs":
+  let c = testCanvas()
+  var o = TextBoxOpts(maxW: 50, whiteSpace: twPreWrap)
+  let m = c.measureTextBox(0, 0, "A  B", o)
+  check m.lineCount == 1
+  check m.advance == 46.0 # 12 + two spaces + 14
+  let n = TextBoxOpts(maxW: 50)
+  check c.measureTextBox(0, 0, "A  B", n).advance == 36.0
+  o = TextBoxOpts(maxW: 40, whiteSpace: twPreWrap)
+  let w = c.measureTextBox(0, 0, "A  B", o)
+  check w.lineCount == 2 # "A" then "B"
+
+test "tabs stop at multiples":
+  let c = testCanvas()
+  var o = TextBoxOpts(maxW: 300, tabWidth: 40.0)
+  let bl = layoutBoxOpts(loadFontBytes(buildTestFont()), 20.0, "A\tB",
+    0.0, 1.2, 0.0, o, [])
+  check bl.lay.lines.len == 1
+  check bl.lay.lines[0].glyphs.len == 5 # A + 3 spaces + B
+  # A ends at 12, next stop is 40: 3 spaces (30) put B at 42.
+  check close(bl.lay.lines[0].glyphs[4].x, 42.0)
+
+test "break-word hyphenates over-wide words":
+  let c = testCanvas()
+  var o = TextBoxOpts(maxW: 25, breakWord: true)
+  let m = c.measureTextBox(0, 0, "AB", o)
+  check m.lineCount == 2
+  let bl = layoutBoxOpts(loadFontBytes(buildTestFont()), 20.0, "AB",
+    0.0, 1.2, 0.0, o, [])
+  check bl.lay.lines[0].advance == 22.0 # "A-"
+  check bl.lay.lines[1].advance == 14.0 # "B"
+  o = TextBoxOpts(maxW: 25, breakWord: true, hyphenChar: "")
+  let b = c.measureTextBox(0, 0, "AB", o)
+  check b.lineCount == 2
+  o = TextBoxOpts(maxW: 25)
+  check c.measureTextBox(0, 0, "AB", o).lineCount == 1 # overflow
+
+test "hit test maps points to glyphs":
+  let font = loadFontBytes(buildTestFont())
+  let lay = layoutText(font, 20.0, "AB")
+  let h0 = hitTest(lay, 5, -7)
+  check h0.line == 0 and h0.index == 0 and h0.before
+  check h0.byteIndex == 0
+  check caretX(lay, h0) == 0.0
+  let h1 = hitTest(lay, 20, -7)
+  check h1.line == 0 and h1.index == 1 and not h1.before
+  check h1.byteIndex == 1
+  check caretX(lay, h1) == 26.0
+  let h2 = hitTest(lay, 200, 500) # clamped to the last line/glyph
+  check h2.line == 0 and h2.index == 1 and not h2.before
+
+test "hit test covers wrapped lines and empties":
+  let font = loadFontBytes(buildTestFont())
+  let lay = layoutText(font, 20.0, "A\n\nB")
+  check lay.lines.len == 3
+  let h = hitTest(lay, 2, 30) # second line slot, empty
+  check h.line == 1 and h.byteIndex == -1
+  check caretX(lay, h) == 0.0
+  let hb = hitTest(lay, 2, 60) # third line at 2.4 * 20 = 48..
+  check hb.line == 2 and hb.byteIndex == 0
+
+test "textHitBox works in box coordinates":
+  let hc = testCanvas()
+  var ho = TextBoxOpts(maxW: 200, boxH: 28, va: tvaMiddle)
+  let hh = hc.textHitBox(5, 14, "AB", ho)
+  check hh.line == 0 and hh.index == 0 and hh.byteIndex == 0
 
 test "decorations paint rules, bounds ignore them":
   let c = testCanvas()

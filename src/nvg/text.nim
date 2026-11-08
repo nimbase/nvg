@@ -31,6 +31,7 @@
 ##   value (`lineHeightAbs`); the two are kept distinct, absolute wins.
 
 import std/options
+import std/math
 import std/strutils
 import std/unicode
 import ./types
@@ -82,6 +83,14 @@ type
     toEllipsis
       ## Trim over-wide lines and append the ellipsis marker to fit.
 
+  TextWhiteSpace* = enum
+    twNormal
+      ## Collapse space runs and tabs; wrap to the width.
+    twPre
+      ## Preserve spaces/tabs; never wrap (long lines overflow).
+    twPreWrap
+      ## Preserve spaces/tabs; wrap to the width.
+
   TextDecor* = enum
     tdNone
     tdUnderline
@@ -116,9 +125,30 @@ type
     firstLineIndent*: float64 = 0.0
       ## Indent of each paragraph's first line in px; wrapped and
       ## justified widths shrink accordingly.
+    whiteSpace*: TextWhiteSpace = twNormal
+    tabWidth*: float64 = 0.0
+      ## Tab stop interval in px (`0` = 8 space advances at layout
+      ## size). Tabs advance to the next multiple, measured from the
+      ## line start at space granularity.
+    breakWord*: bool = false
+      ## Emergency-break an over-wide word at character boundaries
+      ## instead of letting it overflow its line.
+    hyphenChar*: string = "-"
+      ## Marker appended to each emergency-broken fragment but the
+      ## last (only when `breakWord`).
     decor*: TextDecor = tdNone
       ## Underline/strikethrough rules from per-line ink metrics
       ## (painted with the text paint; bounds ignore them).
+
+  TextHit* = object
+    ## A laid-out text position: physical `line`, glyph `index`
+    ## within it, and whether the point sits `before` that glyph.
+    ## `byteIndex` is the glyph's cluster (byte offset in the line
+    ## string, line-local; -1 when the line has no glyphs).
+    line*: int
+    index*: int
+    before*: bool
+    byteIndex*: int
 
   TextMetrics* = object
     advance*: float64
@@ -137,6 +167,9 @@ type
     x0*, y0*, x1*, y1*: float64
       ## Line-local ink box in px (valid only when `hasInk`).
     hasInk*: bool
+    cluster*: uint32
+      ## Byte offset of the source character in the shaped string
+      ## (from harfnim buffer clusters; line-local).
 
   ShapedLine* = object
     glyphs*: seq[PlacedGlyph]
@@ -199,7 +232,7 @@ proc shapeLine*(font: TextFont, sizePx: float64, line: string,
     let gx = pen + float64(pos.xOffset) * toPx
     let gy = -float64(pos.yOffset) * toPx
     var g = PlacedGlyph(gid: buf.info[i].glyphId, x: gx, y: gy,
-      hasInk: false)
+      hasInk: false, cluster: buf.info[i].cluster)
     let ext = sf.glyphExtents(newGlyphId(g.gid))
     if ext.isSome:
       let e = ext.get
@@ -290,6 +323,58 @@ proc valignShift*(lay: TextLayout, ha: TextHAlign,
   of tvaMiddle: -(ink.y0 + ink.y1) * 0.5
   of tvaBottom: -ink.y1
 
+proc hitTest*(lay: TextLayout, x, y: float64,
+    ha = thaLeft): TextHit =
+  ## Map a layout-local point to a glyph (`x` relative to the anchor,
+  ## `y` relative to the first baseline; lines step by
+  ## `lineHeightPx`). Each glyph owns the span up to the next glyph's
+  ## origin (last: to the line advance); the nearer half reports
+  ## `before`. Empty layouts hit line -1; empty lines hit index 0.
+  ## Box-positioned layouts (see `layoutBoxOpts`) pass `thaLeft`.
+  if lay.lines.len == 0:
+    return TextHit(line: -1, index: 0, before: true, byteIndex: -1)
+  var li = 0
+  if lay.lineHeightPx > 0.0:
+    li = int(floor(y / lay.lineHeightPx))
+  li = clamp(li, 0, lay.lines.len - 1)
+  let line = lay.lines[li]
+  let pen = linePenX(line.advance, ha)
+  if line.glyphs.len == 0:
+    return TextHit(line: li, index: 0, before: true, byteIndex: -1)
+  var idx = line.glyphs.len - 1
+  var before = false
+  for i, g in line.glyphs:
+    let gx = pen + g.x
+    let nx = if i + 1 < line.glyphs.len:
+        pen + line.glyphs[i + 1].x
+      else:
+        pen + line.advance
+    if x < nx:
+      idx = i
+      before = x < (gx + nx) * 0.5
+      break
+  TextHit(line: li, index: idx, before: before,
+    byteIndex: int(line.glyphs[idx].cluster))
+
+proc caretX*(lay: TextLayout, hit: TextHit,
+    ha = thaLeft): float64 =
+  ## Drawing x for a hit: the glyph origin (`before`) or the next
+  ## boundary (line advance past the last glyph). Anchor-relative
+  ## like `hitTest`.
+  if hit.line < 0 or hit.line >= lay.lines.len:
+    return 0.0
+  let line = lay.lines[hit.line]
+  let pen = linePenX(line.advance, ha)
+  if hit.before or line.glyphs.len == 0:
+    let i = clamp(hit.index, 0, max(0, line.glyphs.len - 1))
+    if line.glyphs.len == 0:
+      return pen
+    return pen + line.glyphs[i].x
+  let i = clamp(hit.index + 1, 0, line.glyphs.len)
+  if i < line.glyphs.len:
+    return pen + line.glyphs[i].x
+  pen + line.advance
+
 proc measureLayout*(lay: TextLayout, ha: TextHAlign): TextMetrics =
   ## Widest advance, ink size and line count for an already shaped
   ## layout. Anchor-free: alignment never changes these fields.
@@ -344,38 +429,80 @@ proc wrapParagraph*(font: TextFont, sizePx: float64, para: string,
 proc justifyLine*(font: TextFont, sizePx: float64, line: string,
     letterSpacing: float64, boxW: float64,
     features: openArray[Feature]): ShapedLine =
-  ## Spread the words of `line` so the advance equals `boxW`, keeping
-  ## intra-word shaping (kerning, letter spacing) intact. Single words
-  ## and already-over-wide lines come back plainly shaped.
+  ## Spread the words of `line` so the advance equals `boxW`. Each
+  ## word (plus its trailing spaces) shapes as one chunk, so
+  ## intra-word letter spacing and space runs survive; the leftover
+  ## spreads evenly over the word boundaries. Single words and
+  ## already-over-wide lines come back plainly shaped but
+  ## gap-preserving.
   var words: seq[string] = @[]
-  for w in line.split(' '):
-    if w.len > 0:
-      words.add(w)
-  if words.len < 2:
+  var gaps: seq[int] = @[]
+  var cur = ""
+  var sp = 0
+  for ch in line:
+    if ch == ' ':
+      inc sp
+    else:
+      if cur != "" or sp > 0:
+        if cur != "":
+          words.add(cur)
+          gaps.add(sp)
+        elif words.len > 0:
+          gaps[^1] += sp
+        cur = ""
+        sp = 0
+      cur.add(ch)
+  if cur != "":
+    words.add(cur)
+    gaps.add(sp)
+  elif sp > 0 and words.len > 0:
+    gaps[^1] += sp
+  if words.len == 0:
     return shapeLine(font, sizePx, line, letterSpacing, features)
-  let spaceAdv = shapeLine(font, sizePx, " ", letterSpacing,
-    features).advance
-  var shaped: seq[ShapedLine] = @[]
+  var chunks: seq[ShapedLine] = @[]
+  var starts: seq[int] = @[]
+  var pos = 0
+  for i, w in words:
+    starts.add(pos)
+    var chunk = w
+    for _ in 0 ..< gaps[i]:
+      chunk.add(' ')
+    pos += chunk.len
+    chunks.add(shapeLine(font, sizePx, chunk, letterSpacing, features))
   var natural = 0.0
-  for w in words:
-    let s = shapeLine(font, sizePx, w, letterSpacing, features)
-    shaped.add(s)
-    natural += s.advance
-  natural += spaceAdv * float64(words.len - 1)
-  if natural >= boxW:
-    return shapeLine(font, sizePx, line, letterSpacing, features)
-  let gap = spaceAdv + (boxW - natural) / float64(words.len - 1)
-  result = ShapedLine(glyphs: @[], advance: boxW)
+  for ch in chunks:
+    natural += ch.advance
+  result = ShapedLine(glyphs: @[], advance: natural)
+  if natural >= boxW or words.len < 2:
+    # No room (or nothing to spread between): sequential chunks,
+    # gaps preserved.
+    var pen = 0.0
+    for i, ch in chunks:
+      for g in ch.glyphs:
+        var gg = g
+        gg.x += pen
+        if gg.hasInk:
+          gg.x0 += pen
+          gg.x1 += pen
+        gg.cluster += uint32(starts[i])
+        result.glyphs.add(gg)
+      pen += ch.advance
+    return
+  let extra = (boxW - natural) / float64(words.len - 1)
+  result.advance = boxW
   var pen = 0.0
-  for s in shaped:
-    for g in s.glyphs:
+  for i, ch in chunks:
+    for g in ch.glyphs:
       var gg = g
       gg.x += pen
       if gg.hasInk:
         gg.x0 += pen
         gg.x1 += pen
+      gg.cluster += uint32(starts[i])
       result.glyphs.add(gg)
-    pen += s.advance + gap
+    pen += ch.advance
+    if i + 1 < words.len:
+      pen += extra
 
 proc ellipsizeLine*(font: TextFont, sizePx: float64, line: string,
     letterSpacing: float64, maxW: float64,
