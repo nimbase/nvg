@@ -25,9 +25,12 @@
 ##   metrics accessor yet).
 ## - `thaJustify` spreads space-separated words to a box width;
 ##   spaceless runs (CJK included) spread between their runes, and
-##   combining marks stay glued to their base (mixed-direction lines
-##   still lay words out in logical order: full bidi is out of
-##   scope). Outside a box it anchors like left.
+##   combining marks stay glued to their base. Plain lines lay out in
+##   visual order via harfnim's `visualRuns` (bdAuto): each run shapes
+##   with its explicit direction and clusters map back to logical
+##   source offsets, so hit-testing reports logical positions.
+##   Rich-span lines still shape in logical order (span x bidi is
+##   deferred). Outside a box justify anchors like left.
 ## - Line height is either a font-size multiplier or an absolute px
 ##   value (`lineHeightAbs`); the two are kept distinct, absolute wins.
 ##   Span lines with mixed sizes stack variable per-line boxes: each
@@ -264,10 +267,13 @@ proc newShapeCache*(): ShapeCache =
 
 proc shapeLine*(font: TextFont, sizePx: float64, line: string,
     letterSpacing: float64,
-    features: openArray[Feature]): ShapedLine =
+    features: openArray[Feature],
+    dir = dirInvalid): ShapedLine =
   ## Shape one line (no newlines) and walk the pen in px. Marks ride on
   ## the pen via their offsets; letter spacing applies between glyphs
   ## with nonzero advance only, so marks stay glued to their base.
+  ## `dir` fixes the paragraph direction (`dirInvalid` guesses from
+  ## content, as before); visual-run shaping passes each run's own.
   result = ShapedLine(glyphs: @[], advance: 0.0)
   if font == nil or line.len == 0:
     return
@@ -276,6 +282,8 @@ proc shapeLine*(font: TextFont, sizePx: float64, line: string,
   sf.setScale(px * textPosScale)
   var buf = newBuffer()
   buf.pushStr(line)
+  if dir != dirInvalid:
+    buf.setDirection(dir)
   sf.shape(buf, features)
   let n = min(buf.len, min(buf.info.len, buf.pos.len))
   const toPx = 1.0 / float64(textPosScale)
@@ -362,7 +370,8 @@ proc unshyCluster*(points: openArray[tuple[bytePos, runeIdx: int]],
 proc shapeCached*(font: TextFont, sizePx: float64, line: string,
     letterSpacing: float64, features: openArray[Feature],
     cache: ShapeCache = nil,
-    fallbacks: openArray[TextFont] = []): ShapedLine =
+    fallbacks: openArray[TextFont] = [],
+    dir = dirInvalid): ShapedLine =
   ## `shapeLine` through `cache` (direct shaping when nil), splitting
   ## into per-font runs when `fallbacks` is non-empty: each rune goes
   ## to the first font covering it (primary first, uncovered runes
@@ -371,11 +380,12 @@ proc shapeCached*(font: TextFont, sizePx: float64, line: string,
   ## indicators) always join the previous run so sequences never
   ## split across fonts. Run glyphs carry their font (nil = primary).
   ## Hits return copies, so mutating the result never corrupts the
-  ## memo (the memo key carries font identity). Soft hyphens never
-  ## shape: metrics run on the stripped string while clusters map
-  ## back to the input coordinates.
+  ## memo (the memo key carries font identity and direction). Soft
+  ## hyphens never shape: metrics run on the stripped string while
+  ## clusters map back to the input coordinates. `dir` threads to
+  ## `shapeLine` (explicit per-run direction for visual shaping).
   if font == nil:
-    return shapeLine(font, sizePx, line, letterSpacing, features)
+    return shapeLine(font, sizePx, line, letterSpacing, features, dir)
   # Legacy kerning runs only when requested: enable it unless the
   # caller already said otherwise (an explicit `-kern` disables).
   var feats: seq[Feature] = @features
@@ -397,15 +407,15 @@ proc shapeCached*(font: TextFont, sizePx: float64, line: string,
     shy = ss.points
   if fallbacks.len == 0:
     if cache == nil:
-      result = shapeLine(font, sizePx, eff, letterSpacing, feats)
+      result = shapeLine(font, sizePx, eff, letterSpacing, feats, dir)
     else:
       let key = $cast[int](font) & "\x1F" & $sizePx & "\x1F" &
-        $letterSpacing & "\x1F" & eff
+        $letterSpacing & "\x1F" & $ord(dir) & "\x1F" & eff
       if key in cache.tab:
         result = cache.tab[key]
       else:
         let shaped = shapeLine(font, sizePx, eff, letterSpacing,
-          feats)
+          feats, dir)
         cache.tab[key] = shaped
         result = shaped
   else:
@@ -439,7 +449,7 @@ proc shapeCached*(font: TextFont, sizePx: float64, line: string,
         let sub = eff[rn.start ..< stop]
         let rf = if rn.fi == 0: font else: fallbacks[rn.fi - 1]
         let sh = shapeCached(rf, sizePx, sub, letterSpacing, feats,
-          cache)
+          cache, dir = dir)
         for g in sh.glyphs:
           var gg = g
           gg.x += pen
@@ -455,6 +465,130 @@ proc shapeCached*(font: TextFont, sizePx: float64, line: string,
     for j in 0 ..< result.glyphs.len:
       result.glyphs[j].cluster =
         unshyCluster(shy, result.glyphs[j].cluster)
+
+proc shapeVisual*(font: TextFont, sizePx: float64, line: string,
+    letterSpacing: float64, features: openArray[Feature],
+    cache: ShapeCache = nil,
+    fallbacks: openArray[TextFont] = []): ShapedLine =
+  ## `shapeCached` in visual order: `visualRuns` (bdAuto) splits the
+  ## line, each run's logical substring shapes with that run's
+  ## explicit direction (the shaper itself orders RTL runs visually),
+  ## and clusters map back to logical source offsets, so hit-test
+  ## `byteIndex` values stay logical while glyphs sit left to right.
+  ## Single-run lines take the plain path (identical output, shared
+  ## cache). Soft-hyphen lines keep the plain path too: U+00AD is BN
+  ## and X9 would strip it before nvg's shy handling sees it
+  ## (shy x bidi is deferred). Kern holds within runs; cross-run
+  ## kern never applies (runs are directional segments). Runs shape
+  ## from logical source bytes (X9-removed codes excluded via the
+  ## map's coverage), never from the normalized visual text: shaping
+  ## visual-order text would double-reverse RTL runs and strand
+  ## combining marks ahead of their bases (dotted circles). L4
+  ## mirrors apply to odd-level runs via `mirroringFor` before
+  ## shaping, since the normalized text is bypassed.
+  if "\u00AD" in line:
+    return shapeCached(font, sizePx, line, letterSpacing, features,
+      cache, fallbacks)
+  let vt = visualRuns(line, bdAuto)
+  if vt.runs.len <= 1 and vt.text == line:
+    return shapeCached(font, sizePx, line, letterSpacing, features,
+      cache, fallbacks)
+  var covered = newSeq[bool](line.len)
+  for m in vt.map:
+    if m >= 0 and m < line.len:
+      covered[m] = true
+  result = ShapedLine(glyphs: @[], advance: 0.0)
+  var pen = 0.0
+  var prevAdv = false
+  for rn in vt.runs:
+    # Logical span of this visual run (contiguous barring removed
+    # codes, which the coverage set skips).
+    var lo = line.len
+    var hi = -1
+    for b in rn.first ..< rn.last:
+      if b >= 0 and b < vt.map.len:
+        lo = min(lo, vt.map[b])
+        hi = max(hi, vt.map[b])
+    if hi < lo:
+      continue
+    # Trailing joiners belong to this run. Forward-only expansion
+    # gives single ownership: a joiner between runs shapes with its
+    # preceding logical run, never twice. (Paragraph-initial
+    # joiners have no preceding run and stay dropped, as in harfnim.)
+    while hi + 3 < line.len:
+      let j = hi + 1
+      if uint8(line[j]) == 0xE2u8 and
+          uint8(line[j + 1]) == 0x80u8 and
+          (uint8(line[j + 2]) == 0x8Cu8 or
+            uint8(line[j + 2]) == 0x8Du8):
+        hi += 3
+      else:
+        break
+    # Logical substring plus its own source map; odd levels take
+    # L4 mirrors so cmap picks mirrored glyphs.
+    var sub = ""
+    var submap: seq[int] = @[]
+    var i = lo
+    let odd = rn.level mod 2 == 1
+    while i <= hi:
+      if i < 0 or i >= line.len:
+        inc i
+        continue
+      if not covered[i]:
+        # X9-removed bytes stay removed, except the joiners
+        # U+200C/U+200D: BN by class, but they steer joining and
+        # emoji sequences downstream, so they rejoin the logical
+        # substring at their source position (ICU keeps them for
+        # display for the same reason; harfnim drops all BN).
+        if i + 2 <= hi and uint8(line[i]) == 0xE2u8 and
+            uint8(line[i + 1]) == 0x80u8 and
+            (uint8(line[i + 2]) == 0x8Cu8 or
+              uint8(line[i + 2]) == 0x8Du8):
+          sub.add(line[i ..< i + 3])
+          for b in 0 ..< 3:
+            submap.add(i + b)
+          i += 3
+        else:
+          inc i
+        continue
+      let b0 = uint8(line[i])
+      var w = 1
+      if b0 >= 0xF0u8: w = 4
+      elif b0 >= 0xE0u8: w = 3
+      elif b0 >= 0xC2u8: w = 2
+      elif b0 >= 0x80u8 and b0 < 0xC0u8:
+        inc i # stray continuation: covered only via clamping
+        continue
+      var rep = line[i ..< min(i + w, hi + 1)]
+      if odd:
+        let r = line.runeAt(i)
+        let m = mirroringFor(uint32(r))
+        if m.isSome:
+          rep = $Rune(m.get)
+      sub.add(rep)
+      for b in 0 ..< rep.len:
+        submap.add(i + min(b, w - 1))
+      i += w
+    if sub.len == 0:
+      continue
+    let sh = shapeCached(font, sizePx, sub, letterSpacing, features,
+      cache, fallbacks, rn.dir)
+    if letterSpacing != 0.0 and prevAdv and sh.advance > 0.0 and
+        sh.glyphs.len > 0:
+      pen += letterSpacing
+    for g in sh.glyphs:
+      var gg = g
+      gg.x += pen
+      if gg.hasInk:
+        gg.x0 += pen
+        gg.x1 += pen
+      let vc = int(g.cluster)
+      if vc >= 0 and vc < submap.len:
+        gg.cluster = uint32(submap[vc])
+      result.glyphs.add(gg)
+    pen += sh.advance
+    prevAdv = sh.advance > 0.0
+  result.advance = pen
 
 proc lineY*(lay: TextLayout, i: int): float64 =
   ## Baseline y of line `i`, relative to the first baseline.
@@ -522,6 +656,7 @@ proc layoutText*(font: TextFont, sizePx: float64, s: string,
   ## `fallbacks` covers characters missing from `font` (see
   ## `shapeCached`); shaping memoizes within the call. Soft hyphens
   ## never shape (no break opportunity outside boxes: invisible).
+  ## Lines lay out in visual order (see `shapeVisual`).
   let px = max(1.0, sizePx)
   let step = if lineHeightAbs > 0.0: lineHeightAbs
     else: px * max(0.0, lineHeightMul)
@@ -529,7 +664,7 @@ proc layoutText*(font: TextFont, sizePx: float64, s: string,
     lineHeightPx: step)
   let cache = newShapeCache()
   for line in splitTextLines(s):
-    result.lines.add(shapeCached(font, px, line, letterSpacing,
+    result.lines.add(shapeVisual(font, px, line, letterSpacing,
       features, cache, fallbacks))
   result.lineYs = uniformBaselines(result.lines.len, step)
 
@@ -549,7 +684,9 @@ proc layoutSpans*(font: TextFont, sizePx: float64, s: string,
   ## Shape explicit-`\n` lines with per-range fonts, sizes, colors
   ## and decorations. Unspanned bytes use the layout font/size/paint.
   ## Ranges index `s` after `\r\n`/`\r` normalization to `\n`.
-  ## Clusters stay line-local; glyphs carry their span style. Lines
+  ## Clusters stay line-local; glyphs carry their span style. Span
+  ## lines shape in logical order (span x bidi is deferred; see
+  ## `shapeVisual` for the plain path). Lines
   ## with larger spans stand taller (see `spanBaselines`); an
   ## absolute line height stays uniform.
   let src = s.replace("\r\n", "\n").replace("\r", "\n")
@@ -724,10 +861,17 @@ proc caretX*(lay: TextLayout, hit: TextHit,
   pen + line.advance
 
 proc caretAtByte*(line: ShapedLine, byteIdx: int): float64 =
-  ## Caret x for a line-local byte offset: origin of the first glyph
-  ## at or past it, else the line advance.
+  ## Caret x for a line-local logical byte offset: the leading edge
+  ## of the first glyph with that exact cluster, else the first
+  ## glyph past it, else the line advance. Exact-match-first keeps
+  ## visual lines correct (clusters are logical but glyphs sit in
+  ## visual order); pure LTR lines reduce to the old scan. No
+  ## affinity model: a boundary between runs reports one side.
   for g in line.glyphs:
-    if int(g.cluster) >= byteIdx:
+    if int(g.cluster) == byteIdx:
+      return g.x
+  for g in line.glyphs:
+    if int(g.cluster) > byteIdx:
       return g.x
   line.advance
 
@@ -738,7 +882,10 @@ proc selectionRects*(lay: TextLayout, fromLine, fromByte, toLine,
   ## reversed ranges normalized, empty ranges yield nothing). One
   ## rect per covered line: caret to caret horizontally, line ink
   ## vertically (a 0.8/0.2 band of the line's largest size for
-  ## inkless lines). Anchor-relative like `hitTest`.
+  ## inkless lines). Anchor-relative like `hitTest`. Logical ranges
+  ## spanning runs of opposite direction highlight the visual span
+  ## between the two carets (proper bidi selection wants disjoint
+  ## rects; deferred).
   result = @[]
   if lay.lines.len == 0:
     return
@@ -835,9 +982,12 @@ proc justifyLine*(font: TextFont, sizePx: float64, line: string,
     fallbacks: openArray[TextFont] = []): ShapedLine =
   ## Spread the words of `line` so the advance equals `boxW`. Chunk
   ## boundaries follow the runes (plus trailing spaces); the glyphs
-  ## come from one whole-line shaping, so kerning and ligatures
-  ## survive across chunks and toggling justification never reflows
-  ## them. The leftover spreads evenly over the chunk boundaries.
+  ## come from one whole-line visual shaping (`shapeVisual`), so
+  ## kerning and ligatures survive across chunks, toggling
+  ## justification never reflows them, and mixed-direction lines
+  ## spread in visual order. Chunk lookup is by logical cluster
+  ## (order-free), so each glyph rides its own chunk's share. The
+  ## leftover spreads evenly over the chunk boundaries.
   ## Spaceless runs (CJK included) spread between their runes;
   ## combining marks join their base and never take a gap.
   ## Already-over-wide lines come back plainly shaped but
@@ -882,7 +1032,7 @@ proc justifyLine*(font: TextFont, sizePx: float64, line: string,
     pos += w.len
     for _ in 0 ..< gaps[i]:
       pos += 1
-  let whole = shapeCached(font, sizePx, line, letterSpacing,
+  let whole = shapeVisual(font, sizePx, line, letterSpacing,
     features, cache, fallbacks)
   let natural = whole.advance
   if natural >= boxW or words.len < 2:

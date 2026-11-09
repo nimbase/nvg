@@ -621,3 +621,101 @@ test "kerned ink shifts pixels and bounds":
   discard c.fillText(10, 30, "BA")
   check c.surface.getPixel(23, 29).r < 0.5 # in kerned A ink
   check c.surface.getPixel(33, 29).r > 0.5 # past it
+
+test "bidi lays mixed lines in visual order":
+  let font = loadFontBytes(buildTestFont())
+  # "AB" + U+05D0 U+05D1: 12 + 14 + 10 + 14 = 50. L2 reverses
+  # level runs in place: the Hebrew pair flips internally but
+  # stays after the Latin pair.
+  let lay = layoutText(font, 20.0, "AB\xD7\x90\xD7\x91")
+  let ln = lay.lines[0]
+  check ln.advance == 50.0
+  check ln.glyphs.len == 4
+  check ln.glyphs[0].gid == 1u32
+  check ln.glyphs[0].cluster == 0u32
+  check close(ln.glyphs[0].x, 0.0)
+  check ln.glyphs[1].gid == 2u32
+  check ln.glyphs[1].cluster == 1u32
+  check close(ln.glyphs[1].x, 12.0)
+  check ln.glyphs[2].gid == 4u32
+  check ln.glyphs[2].cluster == 4u32
+  check close(ln.glyphs[2].x, 26.0)
+  check ln.glyphs[3].gid == 3u32
+  check ln.glyphs[3].cluster == 2u32
+  check close(ln.glyphs[3].x, 40.0)
+
+test "bidi auto-detects an RTL paragraph":
+  let font = loadFontBytes(buildTestFont())
+  let lay = layoutText(font, 20.0, "\xD7\x90\xD7\x91")
+  let ln = lay.lines[0]
+  check ln.advance == 24.0
+  check ln.glyphs.len == 2
+  check ln.glyphs[0].gid == 4u32 # bet first visually
+  check ln.glyphs[0].cluster == 2u32
+  check ln.glyphs[1].gid == 3u32
+  check ln.glyphs[1].cluster == 0u32
+  # Leading Hebrew in an RTL paragraph pushes trailing Latin left:
+  # "aleph A" renders A first (12 + 10).
+  let mixed = layoutText(font, 20.0, "\xD7\x90A")
+  check mixed.lines[0].advance == 22.0
+  check mixed.lines[0].glyphs[0].gid == 1u32
+  check mixed.lines[0].glyphs[0].cluster == 2u32
+  check mixed.lines[0].glyphs[1].gid == 3u32
+  check mixed.lines[0].glyphs[1].cluster == 0u32
+
+test "bidi passes joiners to the shaper":
+  let font = loadFontBytes(buildTestFont())
+  # ZWJ is BN and X9 removes it, but it steers joining downstream,
+  # so it rejoins its preceding run's substring instead of being
+  # lost. This font hides it (no space glyph: deleted, zero
+  # advance), so the joiner line must match the bare line exactly:
+  # A(12) + aleph(10) = 22 with logical clusters.
+  let bare = layoutText(font, 20.0, "A\xD7\x90")
+  let joined = layoutText(font, 20.0, "A\xE2\x80\x8D\xD7\x90")
+  check joined.lines[0].advance == bare.lines[0].advance
+  check joined.lines[0].advance == 22.0
+  check joined.lines[0].glyphs.len == bare.lines[0].glyphs.len
+  check joined.lines[0].glyphs.len == 2
+  check joined.lines[0].glyphs[1].cluster == 4u32
+
+test "bidi drops X9 codes from output and map":
+  let font = loadFontBytes(buildTestFont())
+  # RLE + PDF wrap B: removed, so the advance matches "AB" and B
+  # keeps its logical cluster past the removed byte.
+  let lay = layoutText(font, 20.0, "A\xE2\x80\xAB" & "B\xE2\x80\xAC")
+  let ln = lay.lines[0]
+  check ln.advance == 26.0
+  check ln.glyphs.len == 2
+  check ln.glyphs[1].cluster == 4u32
+
+test "bidi justification spreads in visual order":
+  let font = loadFontBytes(buildTestFont())
+  # "A" + space(.notdef 10) + aleph(10) = 32 natural; the gap
+  # takes 10 and the Hebrew chunk rides it.
+  let j = justifyLine(font, 20.0, "A \xD7\x90", 0.0, 42.0, [])
+  check j.advance == 42.0
+  check j.glyphs.len == 3
+  check close(j.glyphs[2].x, 32.0)
+  check j.glyphs[2].cluster == 2u32
+  let bl = layoutBox(font, 20.0, "A \xD7\x90", 0.0, 1.2, 0.0,
+    42.0, 0.0, thaJustify, tvaTop, false, toVisible, tfNone, 1.0,
+    [])
+  check bl.lay.lines[0].advance == 42.0
+  check close(bl.lay.lines[0].glyphs[2].x, 32.0)
+
+test "bidi ink and hit-testing follow the visual line":
+  let c = testCanvas()
+  discard c.fillText(10, 30, "AB\xD7\x90\xD7\x91")
+  check c.surface.getPixel(11, 29).r < 0.5 # A ink 10..20
+  check c.surface.getPixel(23, 29).r < 0.5 # B ink 22..30
+  check c.surface.getPixel(33, 29).r > 0.5 # gap before bet at 36
+  check c.surface.getPixel(37, 29).r < 0.5 # bet ink 36..48
+  check c.surface.getPixel(51, 29).r < 0.5 # aleph ink 50..54
+  let font = loadFontBytes(buildTestFont())
+  let lay = layoutText(font, 20.0, "AB\xD7\x90\xD7\x91")
+  let h = hitTest(lay, 37.0, 0.0)
+  check h.byteIndex == 4 # logical bet, drawn third
+  check close(caretAtByte(lay.lines[0], 4), 26.0) # bet's leading edge
+  check close(caretAtByte(lay.lines[0], 2), 40.0) # aleph follows it
+  check close(caretAtByte(lay.lines[0], 0), 0.0) # A sits first
+  check close(caretAtByte(lay.lines[0], 6), 50.0) # past the end
