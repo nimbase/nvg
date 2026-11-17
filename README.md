@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <code>nimble install nvg</code>
+  <code>nimble install nvg</code> / <code>clue install nvg</code>
 </p>
 
 <p align="center">
@@ -91,6 +91,7 @@ do nim c -r "$f"; done` — three need extra setup (see notes):
 | `filters.nim` | the same filters on a synthetic scene | no photo needed; two motion-blur angles (25°, 115°) |
 
 ## Roadmap
+Full scope and acceptance criteria live in [ROADMAP.md](ROADMAP.md).
 - [x] CPU rasterizer with antialiased edges
 - [x] Paths, transforms, scissor clips
 - [x] Solid, gradient (multi-stop) and pattern paints
