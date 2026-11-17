@@ -1,5 +1,5 @@
 <p align="center">
-  Pure-Nim antialiased 2D vector drawing (NanoVG-inspired)<br>
+  Pure-Nim antialiased 2D Vector Graphics (NanoVG-inspired)<br>
 </p>
 
 <p align="center">
@@ -7,8 +7,8 @@
 </p>
 
 <p align="center">
-  <a href="https://nimbase.github.io/nvg-nim/">API reference</a><br>
-  <img src="https://github.com/nimbase/nvg-nim/workflows/test/badge.svg" alt="Github Actions">  <img src="https://github.com/nimbase/nvg-nim/workflows/docs/badge.svg" alt="Github Actions">
+  <a href="https://nimbase.github.io/nvg/">API reference</a><br>
+  <img src="https://github.com/nimbase/nvg/workflows/test/badge.svg" alt="Github Actions">  <img src="https://github.com/nimbase/nvg/workflows/docs/badge.svg" alt="Github Actions">
 </p>
 
 
