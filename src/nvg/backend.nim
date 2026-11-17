@@ -159,7 +159,12 @@ when defined(nvgMetal):
           mg2 = [g.radius, g.feather]
           mstops = paint.box.stops
       of pkPattern:
-        let pt = paint.pattern
+        # Minified patterns upload the mipmap level matching the draw
+        # footprint (see `withMip`); the kernels sample it unchanged.
+        # Local Metal execution is unavailable on this box (no device),
+        # so this branch needs host verification (CI) like the rest of
+        # the Metal path.
+        let pt = withMip(paint).pattern
         if pt.img != nil and abs(pt.ex) >= 1e-12 and
             abs(pt.ey) >= 1e-12:
           b.ctx.setPattern(pt.img)
@@ -313,18 +318,19 @@ when defined(nvgJit):
               b.covJit, aa, rule, op)
             return
       of pkPattern:
-        if patternRunnable(paint):
-          if paint.pattern.img != nil and
-              ifNearest in paint.pattern.img.flags:
+        let pp = withMip(paint)
+        if patternRunnable(pp):
+          if pp.pattern.img != nil and
+              ifNearest in pp.pattern.img.flags:
             let fn = b.kern.getPattern(op)
             if fn != nil:
-              fillPatternJit(surf, polys, paint, alpha, clip, fn,
+              fillPatternJit(surf, polys, pp, alpha, clip, fn,
                 b.covJit, aa, rule, op)
               return
           else:
             let fn = b.kern.getPatternBilinear(op)
             if fn != nil:
-              fillPatternBilinearJit(surf, polys, paint, alpha, clip,
+              fillPatternBilinearJit(surf, polys, pp, alpha, clip,
                 fn, b.covJit, aa, rule, op)
               return
     fillPolys(surf, polys, paint, alpha, clip, aa, op, rule)
@@ -388,20 +394,21 @@ when defined(nvgJit):
               b.covJit, aa, frEvenOdd, op)
             return
       of pkPattern:
-        if patternRunnable(paint):
-          if paint.pattern.img != nil and
-              ifNearest in paint.pattern.img.flags:
+        let pp = withMip(paint)
+        if patternRunnable(pp):
+          if pp.pattern.img != nil and
+              ifNearest in pp.pattern.img.flags:
             let fn = b.kern.getPattern(op)
             if fn != nil:
               let expanded = expandStroke(polys, width, cap, join, miterLimit)
-              fillPatternJit(surf, expanded, paint, alpha, clip, fn,
+              fillPatternJit(surf, expanded, pp, alpha, clip, fn,
                 b.covJit, aa, frEvenOdd, op)
               return
           else:
             let fn = b.kern.getPatternBilinear(op)
             if fn != nil:
               let expanded = expandStroke(polys, width, cap, join, miterLimit)
-              fillPatternBilinearJit(surf, expanded, paint, alpha, clip,
+              fillPatternBilinearJit(surf, expanded, pp, alpha, clip,
                 fn, b.covJit, aa, frEvenOdd, op)
               return
     strokePolys(surf, polys, paint, width, cap, join, miterLimit, alpha,

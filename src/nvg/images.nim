@@ -24,11 +24,78 @@ type
     w*, h*: int
     pixels*: seq[uint8]
     flags*: set[ImageFlag]
+    mips*: seq[Image]
+      ## Box-filtered halves (level 1 = half size, ..., 1x1 last),
+      ## built at upload in premultiplied space. `withMip` (see
+      ## `paint`) samples these under minification; single-tap
+      ## bilinear on the base level aliases when a pixel covers many
+      ## texels (thin strokes break up), while a 2x-oversampled level
+      ## keeps coverage even. Levels share the base flags.
+
+proc halvePixels(cur: openArray[uint8], cw, ch: int):
+    tuple[w, h: int, pixels: seq[uint8]] =
+  ## One area-weighted box halve in premultiplied space (straight
+  ## alpha out). Even dims average exact 2x2 boxes; odd dims weight
+  ## partial edge texels proportionally so no source texel is dropped.
+  let nw = max(1, cw div 2)
+  let nh = max(1, ch div 2)
+  var nxt = newSeq[uint8](nw * nh * 4)
+  let sx = float64(cw) / float64(nw)
+  let sy = float64(ch) / float64(nh)
+  for y in 0 ..< nh:
+    let y0 = float64(y) * sy
+    let y1 = y0 + sy
+    for x in 0 ..< nw:
+      let x0 = float64(x) * sx
+      let x1 = x0 + sx
+      var acc = [0.0, 0.0, 0.0, 0.0]
+      var area = 0.0
+      for j in max(0, int(y0)) .. min(ch - 1, int(y1 - 1e-9)):
+        let wy = min(float64(j + 1), y1) - max(float64(j), y0)
+        for i in max(0, int(x0)) .. min(cw - 1, int(x1 - 1e-9)):
+          let wx = min(float64(i + 1), x1) - max(float64(i), x0)
+          let w = wx * wy
+          let s = (j * cw + i) * 4
+          let a = float64(cur[s + 3]) / 255.0
+          acc[0] += float64(cur[s]) / 255.0 * a * w
+          acc[1] += float64(cur[s + 1]) / 255.0 * a * w
+          acc[2] += float64(cur[s + 2]) / 255.0 * a * w
+          acc[3] += a * w
+          area += w
+      let d = (y * nw + x) * 4
+      if area > 1e-9 and acc[3] > 1e-9 * area:
+        let a = acc[3] / area
+        nxt[d] = uint8(min(255.0, acc[0] / area / a * 255.0 + 0.5))
+        nxt[d + 1] = uint8(min(255.0, acc[1] / area / a * 255.0 + 0.5))
+        nxt[d + 2] = uint8(min(255.0, acc[2] / area / a * 255.0 + 0.5))
+        nxt[d + 3] = uint8(min(255.0, a * 255.0 + 0.5))
+      else:
+        nxt[d] = 0
+        nxt[d + 1] = 0
+        nxt[d + 2] = 0
+        nxt[d + 3] = 0
+  (nw, nh, nxt)
+
+proc buildMips(w, h: int, pixels: seq[uint8],
+    flags: set[ImageFlag]): seq[Image] =
+  ## Halve until 1x1. Each level owns its pixels (built once per
+  ## upload; sampling only reads).
+  result = @[]
+  var cw = w
+  var ch = h
+  var cur = pixels
+  while cw > 1 or ch > 1:
+    let (nw, nh, nxt) = halvePixels(cur, cw, ch)
+    result.add(Image(w: nw, h: nh, pixels: nxt, flags: flags))
+    cur = nxt
+    cw = nw
+    ch = nh
 
 proc newImage*(w, h: int, flags: set[ImageFlag],
     data: openArray[uint8]): Image =
   ## Build an image, zero-padding short uploads and truncating long ones.
-  ## Requires positive dimensions; callers validate first.
+  ## Requires positive dimensions; callers validate first. The mipmap
+  ## pyramid builds here (about 1/3 extra memory, one-time box filter).
   result = Image(w: w, h: h, pixels: newSeq[uint8](w * h * 4),
     flags: flags)
   let n = min(data.len, result.pixels.len)
@@ -51,9 +118,11 @@ proc newImage*(w, h: int, flags: set[ImageFlag],
         result.pixels[i+1] = 0
         result.pixels[i+2] = 0
       i += 4
+  result.mips = buildMips(result.w, result.h, result.pixels, flags)
 
 proc update*(img: Image, data: openArray[uint8]): bool =
-  ## Replace image contents; the size must match exactly.
+  ## Replace image contents; the size must match exactly. The pyramid
+  ## rebuilds from the new pixels.
   if data.len != img.pixels.len: return false
   for i in 0 ..< data.len:
     img.pixels[i] = data[i]
@@ -72,7 +141,23 @@ proc update*(img: Image, data: openArray[uint8]): bool =
         img.pixels[i+1] = 0
         img.pixels[i+2] = 0
       i += 4
+  img.mips = buildMips(img.w, img.h, img.pixels, img.flags)
   true
+
+proc mipFor*(img: Image, lod: int): Image =
+  ## The pyramid level for `lod` (0 = base), clamped to the finest
+  ## level built. Nil images pass through.
+  if img == nil or lod <= 0 or img.mips.len == 0:
+    return img
+  img.mips[min(lod, img.mips.len) - 1]
+
+proc lodFor*(img: Image, tpp: float64): int =
+  ## Level whose texels best match `tpp` source texels per device
+  ## pixel (`floor(log2)`, so a level texel covers at most ~2 px).
+  ## Nil or level-less images report 0.
+  if img == nil or img.mips.len == 0:
+    return 0
+  clamp(int(floor(log2(max(1.0, tpp)))), 0, img.mips.len)
 
 proc texel(img: Image, x, y: int): tuple[r, g, b, a: float64] =
   let i = (y * img.w + x) * 4

@@ -230,6 +230,45 @@ proc sdRoundBox*(px, py, ex, ey, r: float64): float64 =
   let qy = abs(py) - (ey - r)
   min(max(qx, qy), 0.0) + sqrt(max(qx, 0.0)^2 + max(qy, 0.0)^2) - r
 
+proc patternTexelsPerPx*(p: Paint): float64 =
+  ## Max source texels covered by one device pixel for a pattern
+  ## paint: the `map` (device to user) Jacobian composed with the
+  ## pattern tile (`angle`, `ex`/`ey`) and image size. Minification
+  ## (`> 1`) selects a mipmap level via `withMip`; magnification and
+  ## non-pattern paints report `<= 1`.
+  if p.kind != pkPattern or p.pattern.img == nil:
+    return 1.0
+  let pt = p.pattern
+  if abs(pt.ex) < 1e-12 or abs(pt.ey) < 1e-12:
+    return 1.0
+  let ca = cos(pt.angle)
+  let sa = sin(pt.angle)
+  let iw = float64(pt.img.w)
+  let ih = float64(pt.img.h)
+  let m = p.map
+  result = 1.0
+  result = max(result, abs(iw * (ca * m[0] + sa * m[2]) / pt.ex))
+  result = max(result, abs(iw * (ca * m[1] + sa * m[3]) / pt.ex))
+  result = max(result, abs(ih * (-sa * m[0] + ca * m[2]) / pt.ey))
+  result = max(result, abs(ih * (-sa * m[1] + ca * m[3]) / pt.ey))
+
+proc withMip*(p: Paint): Paint =
+  ## The same paint sampling the mipmap level that best matches the
+  ## draw footprint (`patternTexelsPerPx`), so heavy minification
+  ## filters instead of aliasing. Level 0 (at or above native size)
+  ## returns `p` unchanged: magnification output is bit-identical,
+  ## and every backend (scalar, JIT, Metal) needs no kernel changes
+  ## since the level is just a smaller image. Anisotropic footprints
+  ## take the worst axis (documented over-blur, still better than
+  ## dropout). The level shares the base flags.
+  if p.kind != pkPattern or p.pattern.img == nil:
+    return p
+  let lod = p.pattern.img.lodFor(p.patternTexelsPerPx())
+  if lod <= 0:
+    return p
+  result = p
+  result.pattern.img = p.pattern.img.mipFor(lod)
+
 proc sample*(p: Paint, x, y: float64): Color =
   case p.kind
   of pkSolid:

@@ -220,3 +220,82 @@ test "image loading golden":
   createDir(outDir)
   c.savePng(outDir / "images.png")
   check fileExists(outDir / "images.png")
+
+test "mipmap pyramid halves with averaged texels":
+  let c = newCanvas(4, 4)
+  # Flat red 4x4: every level stays red.
+  var flat = newSeq[uint8](4 * 4 * 4)
+  for i in 0 ..< 16:
+    flat[i * 4] = 255u8
+    flat[i * 4 + 3] = 255u8
+  let fr = c.createImageRGBA(4, 4, {}, flat)
+  check fr != 0
+  let fimg = c.images[fr]
+  check fimg.mips.len == 2
+  check fimg.mips[0].w == 2 and fimg.mips[0].h == 2
+  check fimg.mips[1].w == 1 and fimg.mips[1].h == 1
+  for m in fimg.mips:
+    for i in 0 ..< m.w * m.h:
+      check m.pixels[i * 4 ..< i * 4 + 4] == @[255u8, 0u8, 0u8, 255u8]
+  # 2x2 red/green/blue/white averages to even gray.
+  let id = c.createImageMem(bmp2x2(), {})
+  check id != 0
+  let img = c.images[id]
+  check img.mips.len == 1
+  check img.mips[0].w == 1 and img.mips[0].h == 1
+  check img.mips[0].pixels == @[128u8, 128u8, 128u8, 255u8]
+  # Odd sizes halve proportionally: 5x3 -> 2x1 -> 1x1.
+  var odd = newSeq[uint8](5 * 3 * 4)
+  for i in 0 ..< 15:
+    odd[i * 4 + 1] = 255u8
+    odd[i * 4 + 3] = 255u8
+  let od = c.createImageRGBA(5, 3, {}, odd)
+  let oimg = c.images[od]
+  check oimg.mips.len == 2
+  check oimg.mips[0].w == 2 and oimg.mips[0].h == 1
+  check oimg.mips[1].w == 1 and oimg.mips[1].h == 1
+  for m in oimg.mips:
+    for i in 0 ..< m.w * m.h:
+      check m.pixels[i * 4 ..< i * 4 + 4] == @[0u8, 255u8, 0u8, 255u8]
+  # 1x1 images build no levels; selection clamps to what exists.
+  let one = c.createImageRGBA(1, 1, {},
+    @[9u8, 8u8, 7u8, 255u8])
+  let o1 = c.images[one]
+  check o1.mips.len == 0
+  check o1.lodFor(1000.0) == 0
+  check o1.mipFor(3) == o1
+  check img.lodFor(1.0) == 0
+  check img.lodFor(0.25) == 0 # magnification stays on the base
+  check img.lodFor(2.0) == 1
+  check img.mipFor(0) == img
+  check img.mipFor(99) == img.mips[^1]
+  check mipFor(nil, 2) == nil
+
+test "minified patterns filter instead of aliasing":
+  let c = newCanvas(4, 4)
+  c.clear(rgb(0, 0, 0))
+  # 8x8 one-px checker drawn into a 2x2 tile: each output pixel
+  # covers 2x2 texels (2 black, 2 white), so the mip level resolves
+  # it to even gray instead of a dropout pattern.
+  var px = newSeq[uint8](8 * 8 * 4)
+  for y in 0 ..< 8:
+    for x in 0 ..< 8:
+      let v = if (x + y) mod 2 == 0: 255u8 else: 0u8
+      let o = (y * 8 + x) * 4
+      px[o] = v
+      px[o + 1] = v
+      px[o + 2] = v
+      px[o + 3] = 255u8
+  let id = c.createImageRGBA(8, 8, {}, px)
+  check id != 0
+  check c.images[id].mips.len == 3
+  c.beginPath()
+  c.rect(0, 0, 4, 4)
+  c.setFillPaint(c.imagePattern(0, 0, 2, 2, 0, id, 1.0))
+  c.fill()
+  for y in 0 ..< 4:
+    for x in 0 ..< 4:
+      let p = c.surface.getPixel(x, y)
+      check abs(p.r - 0.5) < 0.03
+      check abs(p.g - 0.5) < 0.03
+      check abs(p.b - 0.5) < 0.03

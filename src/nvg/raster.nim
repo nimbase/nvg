@@ -180,6 +180,9 @@ proc fillPolys*(surf: Surface, polys: seq[SubPoly], paint: Paint,
   if polys.len == 0: return
   let a = clamp01(alpha)
   if a <= 0.0: return
+  # Minified patterns sample their mipmap level (see `withMip`); all
+  # other paints pass through unchanged.
+  let pp = withMip(paint)
   let edges = buildEdges(polys)
   if edges.len == 0: return
   let (x0, y0, x1, y1, ok) = fillBounds(polys, surf, clip)
@@ -209,7 +212,7 @@ proc fillPolys*(surf: Surface, polys: seq[SubPoly], paint: Paint,
         else:
           0.0
       if cov <= 0.0: continue
-      let col = paint.sample(float64(x) + 0.5, float64(y) + 0.5)
+      let col = pp.sample(float64(x) + 0.5, float64(y) + 0.5)
       surf.blendPixel(x, y,
         color(col.r, col.g, col.b, col.a * a), cov, op)
 
