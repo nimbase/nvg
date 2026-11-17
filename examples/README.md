@@ -27,6 +27,9 @@
 # | `images.nim`    | image file loading into pattern paints           |
 # | `gpu.nim`       | all features through the Metal backend + blur      |
 # | `kaleidoscope.nim` | mirrored photo wedges (CPU, or Metal with nvgMetal) |
-# | `effects.nim`   | mosaic/blur/gauss/sharpen CLI with backend flag     |
+# | `effects.nim`   | photo effects CLI: mosaic/blur/gauss/sharpen, grain |
+# |                 | (mono/color, uniform/soft), ripple, swirl, motion  |
+# |                 | blur, turbulence, domain warp; --backend cpu|metal  |
+# | `filters.nim`   | same filters on a synthetic scene (no photo needed) |
 # | `midsummer.nim` | A4 book pages of Midsummer II.1 with line guides    |
 # | `textbox.nim`   | text boxes: align, justify, valign, overflow, fit    |

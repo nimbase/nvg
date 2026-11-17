@@ -66,6 +66,30 @@ let c = newCanvas(800, 600, newJitBackend())
 destroyJitBackend(c.backend.JitBackend)
 ```
 
+Every file in `examples/` is a standalone program that renders PNGs
+into `examples/out/` (gitignored; pass another directory as the first
+argument to override). Run them all with `for f in examples/*.nim;
+do nim c -r "$f"; done` — three need extra setup (see notes):
+
+| file | renders | run notes |
+| ---- | ------- | --------- |
+| `basic.nim` | shapes, solid fills/strokes, translucent overlap | — |
+| `gradients.nim` | linear, radial, box, multi-stop (+ hard stop) | — |
+| `strokes.nim` | caps, joins, dashes | — |
+| `patterns.nim` | image patterns: clamp/repeat/flip/tint, bilinear | — |
+| `blends.nim` | composite ops over a shared backdrop | — |
+| `masks.nim` | offscreen layers + alpha masks | — |
+| `paths.nim` | stars, polygons, fill rules, path measurement | — |
+| `images.nim` | image file loading into pattern paints (renders its own source image, no assets needed) | — |
+| `text.nim` | sizes, 3x4 alignment grid, spacing, line height, paints | needs a font: `nim c -r examples/text.nim -- /path/to/font.ttf` |
+| `textbox.nim` | wrap, align, justify, box valign, overflow, fit | needs a font (same `--` form as `text.nim`) |
+| `midsummer.nim` | A4 book pages of Midsummer II.1 with line guides | needs a font (same `--` form) |
+| `jit.nim` | CPU vs JIT backend, pixel-identity check | `nim c -r -d:nvgJit examples/jit.nim` |
+| `gpu.nim` | every backend feature in one scene, plus blur | Metal backend, needs a font (same `--` form) |
+| `kaleidoscope.nim` | mirrored photo wedges | CPU by default, Metal with `-d:nvgMetal` |
+| `effects.nim` | photo effects CLI: mosaic, blur, gauss, sharpen, mono/color grain (uniform + soft), ripple, swirl, motion blur, turbulence, domain warp | defaults to `tests/data/pexels-tubusan-5773749.jpg`; `--backend metal` needs `-d:nvgMetal` |
+| `filters.nim` | the same filters on a synthetic scene | no photo needed; two motion-blur angles (25°, 115°) |
+
 ## Roadmap
 - [x] CPU rasterizer with antialiased edges
 - [x] Paths, transforms, scissor clips
