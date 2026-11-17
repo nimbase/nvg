@@ -34,6 +34,7 @@ nim c -r examples/gpu.nim -- /path/to/font.ttf
 | `jit.nim`       | CPU vs JIT backend, pixel-identity check           |
 | `text.nim`      | sizes, 3x4 alignment grid, spacing, line height, paints |
 | `images.nim`    | image file loading into pattern paints           |
+| `svg.nim`       | SVG subset: direct render + registry patterns      |
 | `gpu.nim`       | all features through the Metal backend + blur      |
 | `kaleidoscope.nim` | mirrored photo wedges (CPU, or Metal with nvgMetal) |
 | `effects.nim`   | photo effects CLI: mosaic/blur/gauss/sharpen, grain |

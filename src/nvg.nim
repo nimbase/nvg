@@ -21,6 +21,7 @@ when defined(nvgJit):
   import ./nvg/jit
 import ./nvg/backend
 import ./nvg/canvas
+import ./nvg/svg
 
 export types
 export transform
@@ -33,6 +34,7 @@ export dash
 export pathmeasure
 export layer
 export text
+export svg
 export jitctx
 when defined(nvgJit):
   export jit

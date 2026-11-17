@@ -83,6 +83,7 @@ do nim c -r "$f"; done` — three need extra setup (see notes):
 | `masks.nim` | offscreen layers + alpha masks | — |
 | `paths.nim` | stars, polygons, fill rules, path measurement | — |
 | `images.nim` | image file loading into pattern paints (renders its own source image, no assets needed) | — |
+| `svg.nim` | SVG subset rendering: direct PNG plus registry pattern fill/stroke | — |
 | `text.nim` | sizes, 3x4 alignment grid, spacing, line height, paints | needs a font: `nim c -r examples/text.nim -- /path/to/font.ttf` |
 | `textbox.nim` | wrap, align, justify, box valign, overflow, fit | needs a font (same `--` form as `text.nim`) |
 | `midsummer.nim` | A4 book pages of Midsummer II.1 with line guides | needs a font (same `--` form) |
@@ -116,7 +117,7 @@ Full scope and acceptance criteria live in [ROADMAP.md](ROADMAP.md).
 - [x] Photo filters (mono/color grain, ripple, swirl, motion blur,
   turbulence, domain warp) on CPU + Metal compute
 - [x] Dominant-color extraction (`dominantColors`, `--palette N`)
-- [ ] SVG image loading
+- [x] SVG image loading (v1 subset: shapes, paths, gradients, transforms)
 
 ### ❤ Contributions & Support
 - 🐛 Found a bug? [Create a new Issue](https://github.com/nimbase/nvg-nim/issues)

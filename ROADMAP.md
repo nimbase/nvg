@@ -58,11 +58,11 @@ One `cpuTime()` loop over the lemons photo per filter, same pattern as
 Run the serial suite on Apple Silicon; confirm JIT + Metal parity.
 Acceptance: recorded device + OS + pass log.
 
-### 7. SVG image loading
-No decoder in the workspace today, so the first decision is a
-dependency one (vendored micro-parser vs external lib).
-- Acceptance: `images.nim`-style example plus decode tests; document
-  the supported subset (paths/shapes first, no script/animation).
+### 7. SVG image loading — shipped (v1 subset in `src/nvg/svg.nim`)
+No new dependency: stdlib `std/xmlparser` plus a vendored path-`d`
+micro-parser, driving the existing canvas pipeline.
+- V1 subset: shapes, paths, gradients, transforms (see module docs).
+- Acceptance: `tests/t_svg.nim` hand-written fixtures, `examples/svg.nim`.
 
 ### 8. Flex completeness (`order`, `flex-shrink`, wrapping)
 The v1-excluded flex features, one slice each, parent-driven like rows.
