@@ -33,6 +33,14 @@
 ##   `assembleSpans`): each run x span intersection shapes with its
 ##   run direction and span style. Outside a box justify anchors like
 ##   left.
+## - Span lines are flex rows: the line is the container, runs and
+##   inline boxes the items (`TextRowFlex` justification, gap and
+##   item alignment; per-span `alignSelf`/`flexGrow`). Spans may
+##   carry inline replaced boxes (image/path over one U+FFFC), laid
+##   out as atomic units that grow the row and align per the line's
+##   text ink (parent-driven, CSS-like). Non-box `TextBoxOpts`
+##   inherit the box align as justification unless `flex.justify`
+##   is set explicitly (which then distributes every line).
 ## - Line height is either a font-size multiplier or an absolute px
 ##   value (`lineHeightAbs`); the two are kept distinct, absolute wins.
 ##   Span lines with mixed sizes stack variable per-line boxes: each
@@ -155,6 +163,11 @@ type
     decor*: TextDecor = tdNone
       ## Underline/strikethrough rules from per-line ink metrics
       ## (painted with the text paint; bounds ignore them).
+    flex*: TextRowFlex
+      ## Flex row options for span lines (the zero value follows
+      ## `ha` for justification with baseline items and no gap, i.e.
+      ## legacy behavior). `justify` set explicitly distributes every
+      ## line to the width; `gap` and item alignment need no width.
 
   TextHit* = object
     ## A laid-out text position: physical `line`, glyph `index`
@@ -179,13 +192,16 @@ type
     gid*: uint32
     x*, y*: float64
       ## Line-local origin in px (y-down, line baseline at y = 0):
-      ## pen plus the shaped offset.
+      ## pen plus the shaped offset. Box entries store their top edge
+      ## in `y`.
     x0*, y0*, x1*, y1*: float64
-      ## Line-local ink box in px (valid only when `hasInk`).
+      ## Line-local ink box in px (valid only when `hasInk`). Box
+      ## entries report their placed rect here.
     hasInk*: bool
     cluster*: uint32
       ## Byte offset of the source character in the shaped string
-      ## (from harfnim buffer clusters; line-local).
+      ## (from harfnim buffer clusters; line-local). Box entries
+      ## report their segment start.
     font*: TextFont
       ## Fallback font that shaped this glyph (`nil` = layout font).
     size*: float64
@@ -195,19 +211,96 @@ type
       ## Per-glyph ink color (spans); otherwise the layout paint.
     decor*: TextDecor
       ## Per-glyph decoration override (`tdNone` = layout decor).
+    boxKind*: SpanBoxKind
+      ## `sbkNone` for ordinary shaped glyphs, else an inline box
+      ## (image/path) drawn by the canvas paint path.
+    imageId*: int
+      ## Canvas image handle for `sbkImage` entries.
+    boxW*, boxH*: float64
+      ## Placed box size in px for box entries.
+    boxPath*: Path
+      ## Box-local path for `sbkPath` entries, replayed at the placed
+      ## offset with the span color (or layout paint).
+
+  FlexJustify* = enum
+    fjInherit
+      ## Follow the box horizontal align (span boxes only): left maps
+      ## to start, center to center, right to end, justify to
+      ## space-between. Non-box layouts read this as start.
+    fjStart
+    fjCenter
+    fjEnd
+    fjSpaceBetween
+    fjSpaceAround
+    fjSpaceEvenly
+
+  FlexAlign* = enum
+    faAuto
+      ## Inherit the container's `alignItems` (items only; a container
+      ## set to auto reads as baseline).
+    faBaseline
+    faStart
+    faCenter
+    faEnd
+    faStretch
+
+  TextRowFlex* = object
+    ## Flex row options for one laid-out line (the line is the flex
+    ## container, its runs and boxes the items). The zero value is
+    ## legacy behavior: follow the box align, baseline items, no gap.
+    justify*: FlexJustify
+    alignItems*: FlexAlign
+    gap*: float64
+      ## Fixed px added at each word boundary crossed (single-word
+      ## lines have none). Independent of any distribution width.
+
+  SpanBoxKind* = enum
+    sbkNone
+    sbkImage
+      ## Decoded canvas image, drawn with an image-pattern rect.
+    sbkPath
+      ## Stored path, replayed at the placed offset and filled with
+      ## the span color (or the layout paint): covers rectangles and
+      ## arbitrary paths alike.
+
+  SpanBox* = object
+    ## Inline replaced box carried by a span over a single U+FFFC
+    ## placeholder char. Layout reserves the fitted width, grows the
+    ## row through the height channel, and aligns it per `alignSelf`;
+    ## longer covered ranges still lay out as one box.
+    case kind*: SpanBoxKind
+    of sbkNone:
+      discard
+    of sbkImage:
+      imageId*: int
+        ## Canvas image handle, resolved at draw time.
+      imageW*, imageH*: float64
+        ## Intrinsic size in px (aspect kept when fitting).
+    of sbkPath:
+      path*: Path
+        ## Box-local path (origin at the box top-left).
+      boxW*, boxH*: float64
+        ## Intrinsic size in px.
 
   TextSpan* = object
     ## A byte range `[first, last)` in shared text with its own font
     ## (`nil` = layout font), size (`<= 0` = layout size), color
     ## (`hasColor` off = layout paint) and decor (`tdNone` = layout
     ## decor). Ranges must be sorted, non-overlapping, and inside
-    ## the text; gaps use the layout style.
+    ## the text; gaps use the layout style. A span may instead carry
+    ## an inline box (`box.kind != sbkNone`, over one U+FFFC): the
+    ## range lays out as a replaced box with `alignSelf`/`flexGrow`
+    ## flex item options (`flexGrow > 0` absorbs leftover distribution
+    ## width as trailing space after the box; only boxes grow).
     first*, last*: int
     font*: TextFont
     size*: float64
     color*: Color
     hasColor*: bool
     decor*: TextDecor
+    box*: SpanBox
+    alignSelf*: FlexAlign
+    flexGrow*: float64
 
   ShapedLine* = object
     glyphs*: seq[PlacedGlyph]
@@ -592,18 +685,43 @@ proc shapeVisual*(font: TextFont, sizePx: float64, line: string,
     prevAdv = sh.advance > 0.0
   result.advance = pen
 
+proc fittedBox*(span: TextSpan, px: float64): tuple[w, h: float64] =
+  ## Fitted inline-box size: span size (or layout size) tall, aspect
+  ## kept from the intrinsic size. Zero intrinsic height keeps the
+  ## intrinsic width with the fitted height.
+  let fitH = if span.size > 0.0: span.size else: px
+  case span.box.kind
+  of sbkImage:
+    if span.box.imageH > 0.0:
+      let k = fitH / span.box.imageH
+      (span.box.imageW * k, fitH)
+    else:
+      (span.box.imageW, fitH)
+  of sbkPath:
+    if span.box.boxH > 0.0:
+      let k = fitH / span.box.boxH
+      (span.box.boxW * k, fitH)
+    else:
+      (span.box.boxW, fitH)
+  of sbkNone:
+    (0.0, 0.0)
+
 proc assembleSpans*(font: TextFont, px: float64,
-    segs: openArray[tuple[span: int, text: string, word: int]],
+    segs: openArray[tuple[span: int, text: string, word: int,
+      alignSelf: FlexAlign, flexGrow: float64]],
     spans: openArray[TextSpan],
     letterSpacing: float64, features: openArray[Feature],
     cache: ShapeCache, fallbacks: openArray[TextFont],
-    justifyExtra = 0.0, glyphExtra = 0.0): ShapedLine =
+    glyphExtra = 0.0, flex = TextRowFlex(), targetW = 0.0): ShapedLine =
   ## Concatenate span-tagged pieces (`segs` in logical order; `span`
   ## -1 = layout style, `word` -1 = gap) into one shaped line with
-  ## line-local clusters. Single LTR lines take the logical path
-  ## (identical output). Otherwise each `visualRuns` (bdAuto) run
-  ## shapes its logical substring with the run direction (the shaper
-  ## orders RTL runs visually), split further at span boundaries, so
+  ## line-local clusters. The line is a flex row container: `flex`
+  ## sets justification, item alignment and the word-gap; each seg
+  ## may override alignment and absorb leftover width (`flexGrow`,
+  ## boxes only). Single LTR lines take the logical path (identical
+  ## output). Otherwise each `visualRuns` (bdAuto) run shapes its
+  ## logical substring with the run direction (the shaper orders RTL
+  ## runs visually), split further at span boundaries, so
   ## mixed-direction lines come out in visual order while clusters
   ## stay logical and glyphs keep their span style. LTR runs emit
   ## segments forward, RTL runs reverse them; shaping never sees
@@ -611,13 +729,18 @@ proc assembleSpans*(font: TextFont, px: float64,
   ## strand marks). Odd runs take L4 mirrors via `mirroringFor`,
   ## X9-removed codes stay excluded (except re-injected U+200C/U+200D
   ## with single-owner forward expansion), and soft-hyphen lines keep
-  ## the logical path (shy x bidi is deferred). `justifyExtra` adds
-  ## pen at each word boundary crossed in emission order (every visual
-  ## word gap takes one share when words sit wholly in runs);
-  ## `glyphExtra` opens each spread slot the same way, testing both
-  ## orders so reversed RTL pairs still count while marks stay glued.
-  ## No letter spacing opens between segments (existing span
-  ## semantics, unlike `shapeVisual`'s inter-run spacing).
+  ## the logical path (shy x bidi is deferred). Box segments (spans
+  ## with a `SpanBox` payload) emit one replaced-box entry each
+  ## (fitted width, full row height channel) instead of shaping;
+  ## `glyphExtra` opens each spread slot in emission order, testing
+  ## both orders so reversed RTL pairs still count while marks stay
+  ## glued (never combined with width distribution). No letter
+  ## spacing opens between segments (existing span semantics, unlike
+  ## `shapeVisual`'s inter-run spacing). Width distribution
+  ## (`targetW > 0`, leftover only): grow shares widen the pen after
+  ## grow boxes, then justification shifts ride every visual gap per
+  ## mode (with gap already walked into the pen at each word boundary
+  ## crossed in emission order).
   var starts = newSeq[int](segs.len + 1)
   var concat = ""
   for i, sg in segs:
@@ -628,19 +751,61 @@ proc assembleSpans*(font: TextFont, px: float64,
   let vt = visualRuns(concat, bdAuto)
   let singleLtr = vt.runs.len == 1 and vt.runs[0].level mod 2 == 0 and
     vt.text == concat
-  if "\u00AD" in concat or singleLtr:
-    result = ShapedLine(glyphs: @[], advance: 0.0)
-    var pen = 0.0
-    var curWord = -2
+  let logical = "\u00AD" in concat or singleLtr
+  result = ShapedLine(glyphs: @[], advance: 0.0)
+  var pen = 0.0
+  var curWord = -2
+  # Emission records for the post passes: word-boundary glyph splits
+  # (justification shares), box entries (glyph index, seg index).
+  var bounds: seq[int] = @[]
+  var boxes: seq[tuple[gi, si: int]] = @[]
+  var boxDone = newSeq[bool](segs.len)
+  template crossWord(sgWord: int) =
+    ## Fixed gap at each new word (single-word lines have none).
+    if sgWord >= 0 and sgWord != curWord:
+      if curWord != -2:
+        if flex.gap != 0.0:
+          pen += flex.gap
+        bounds.add(result.glyphs.len)
+      curWord = sgWord
+  template dressSpan(gg: var PlacedGlyph, gsi: int, pf: TextFont) =
+    if gsi >= 0 and gsi < spans.len:
+      if pf != font and gg.font == nil:
+        gg.font = pf
+      if spans[gsi].size > 0.0:
+        gg.size = spans[gsi].size
+      gg.hasColor = spans[gsi].hasColor
+      gg.color = spans[gsi].color
+      gg.decor = spans[gsi].decor
+  template emitBox(si: int, atCluster: uint32) =
+    let gsi = segs[si].span
+    let (bw, bh) = fittedBox(spans[gsi], px)
+    var gg = PlacedGlyph(x: pen, y: -bh, x0: pen, x1: pen + bw,
+      y0: -bh, y1: 0.0, hasInk: bw > 0.0 and bh > 0.0,
+      cluster: atCluster, size: bh, boxKind: spans[gsi].box.kind,
+      boxW: bw, boxH: bh)
+    if spans[gsi].box.kind == sbkImage:
+      gg.imageId = spans[gsi].box.imageId
+    elif spans[gsi].box.kind == sbkPath:
+      gg.boxPath = spans[gsi].box.path
+    gg.hasColor = spans[gsi].hasColor
+    gg.color = spans[gsi].color
+    gg.decor = spans[gsi].decor
+    boxes.add((result.glyphs.len, si))
+    result.glyphs.add(gg)
+    pen += bw
+  if logical:
     for i, sg in segs:
-      if sg.word >= 0 and sg.word != curWord:
-        if curWord != -2:
-          pen += justifyExtra
-        curWord = sg.word
-      let pf = if sg.span >= 0 and sg.span < spans.len and
-          spans[sg.span].font != nil: spans[sg.span].font else: font
-      let psz = if sg.span >= 0 and sg.span < spans.len and
-          spans[sg.span].size > 0.0: spans[sg.span].size else: px
+      crossWord(sg.word)
+      let gsi = sg.span
+      if gsi >= 0 and gsi < spans.len and
+          spans[gsi].box.kind != sbkNone:
+        emitBox(i, uint32(starts[i]))
+        continue
+      let pf = if gsi >= 0 and gsi < spans.len and
+          spans[gsi].font != nil: spans[gsi].font else: font
+      let psz = if gsi >= 0 and gsi < spans.len and
+          spans[gsi].size > 0.0: spans[gsi].size else: px
       let sh = shapeCached(pf, psz, sg.text, letterSpacing, features,
         cache, fallbacks)
       for g in sh.glyphs:
@@ -653,128 +818,244 @@ proc assembleSpans*(font: TextFont, px: float64,
         if gg.hasInk:
           gg.x0 += pen
           gg.x1 += pen
-        if sg.span >= 0 and sg.span < spans.len:
-          if pf != font and gg.font == nil:
-            gg.font = pf
-          if spans[sg.span].size > 0.0:
-            gg.size = spans[sg.span].size
-          gg.hasColor = spans[sg.span].hasColor
-          gg.color = spans[sg.span].color
-          gg.decor = spans[sg.span].decor
+        dressSpan(gg, gsi, pf)
         result.glyphs.add(gg)
       pen += sh.advance
-    result.advance = pen
-    return
-  var covered = newSeq[bool](concat.len)
-  for m in vt.map:
-    if m >= 0 and m < concat.len:
-      covered[m] = true
-  result = ShapedLine(glyphs: @[], advance: 0.0)
-  var pen = 0.0
-  var curWord = -2
-  for rn in vt.runs:
-    var lo = concat.len
-    var hi = -1
-    for b in rn.first ..< rn.last:
-      if b >= 0 and b < vt.map.len:
-        lo = min(lo, vt.map[b])
-        hi = max(hi, vt.map[b])
-    if hi < lo:
-      continue
-    while hi + 3 < concat.len:
-      let j = hi + 1
-      if uint8(concat[j]) == 0xE2u8 and
-          uint8(concat[j + 1]) == 0x80u8 and
-          (uint8(concat[j + 2]) == 0x8Cu8 or
-            uint8(concat[j + 2]) == 0x8Du8):
-        hi += 3
-      else:
-        break
-    let odd = rn.level mod 2 == 1
-    var order: seq[int] = @[]
-    for i in 0 ..< segs.len:
-      let a = max(lo, starts[i])
-      let b = min(hi + 1, starts[i + 1])
-      if a < b:
-        order.add(i)
-    if odd:
-      order.reverse()
-    for si in order:
-      let a = max(lo, starts[si])
-      let b = min(hi + 1, starts[si + 1])
-      if segs[si].word >= 0 and segs[si].word != curWord:
-        if curWord != -2:
-          pen += justifyExtra
-        curWord = segs[si].word
-      var sub = ""
-      var submap: seq[int] = @[]
-      var i = a
-      while i < b:
-        if i < 0 or i >= concat.len:
-          inc i
-          continue
-        if not covered[i]:
-          if i + 2 < b and uint8(concat[i]) == 0xE2u8 and
-              uint8(concat[i + 1]) == 0x80u8 and
-              (uint8(concat[i + 2]) == 0x8Cu8 or
-                uint8(concat[i + 2]) == 0x8Du8):
-            sub.add(concat[i ..< i + 3])
-            for k in 0 ..< 3:
-              submap.add(i + k)
-            i += 3
-          else:
-            inc i
-          continue
-        let b0 = uint8(concat[i])
-        var w = 1
-        if b0 >= 0xF0u8: w = 4
-        elif b0 >= 0xE0u8: w = 3
-        elif b0 >= 0xC2u8: w = 2
-        elif b0 >= 0x80u8 and b0 < 0xC0u8:
-          inc i
-          continue
-        var rep = concat[i ..< min(i + w, b)]
-        if odd:
-          let r = concat.runeAt(i)
-          let m = mirroringFor(uint32(r))
-          if m.isSome:
-            rep = $Rune(m.get)
-        sub.add(rep)
-        for k in 0 ..< rep.len:
-          submap.add(i + min(k, w - 1))
-        i += w
-      if sub.len == 0:
+  else:
+    var covered = newSeq[bool](concat.len)
+    for m in vt.map:
+      if m >= 0 and m < concat.len:
+        covered[m] = true
+    for rn in vt.runs:
+      var lo = concat.len
+      var hi = -1
+      for b in rn.first ..< rn.last:
+        if b >= 0 and b < vt.map.len:
+          lo = min(lo, vt.map[b])
+          hi = max(hi, vt.map[b])
+      if hi < lo:
         continue
-      let gsi = segs[si].span
-      let pf = if gsi >= 0 and gsi < spans.len and
-          spans[gsi].font != nil: spans[gsi].font else: font
-      let psz = if gsi >= 0 and gsi < spans.len and
-          spans[gsi].size > 0.0: spans[gsi].size else: px
-      let sh = shapeCached(pf, psz, sub, letterSpacing, features,
-        cache, fallbacks, rn.dir)
-      for g in sh.glyphs:
-        var gg = g
-        let vc = int(g.cluster)
-        if vc >= 0 and vc < submap.len:
-          gg.cluster = uint32(submap[vc])
-        if glyphExtra != 0.0 and result.glyphs.len > 0 and
-            (isSpreadSlot(concat, result.glyphs[^1], gg) or
-              isSpreadSlot(concat, gg, result.glyphs[^1])):
-          pen += glyphExtra
-        gg.x += pen
-        if gg.hasInk:
-          gg.x0 += pen
-          gg.x1 += pen
-        if gsi >= 0 and gsi < spans.len:
-          if pf != font and gg.font == nil:
-            gg.font = pf
-          if spans[gsi].size > 0.0:
-            gg.size = spans[gsi].size
-          gg.hasColor = spans[gsi].hasColor
-          gg.color = spans[gsi].color
-          gg.decor = spans[gsi].decor
-        result.glyphs.add(gg)
-      pen += sh.advance
+      while hi + 3 < concat.len:
+        let j = hi + 1
+        if uint8(concat[j]) == 0xE2u8 and
+            uint8(concat[j + 1]) == 0x80u8 and
+            (uint8(concat[j + 2]) == 0x8Cu8 or
+              uint8(concat[j + 2]) == 0x8Du8):
+          hi += 3
+        else:
+          break
+      let odd = rn.level mod 2 == 1
+      var order: seq[int] = @[]
+      for i in 0 ..< segs.len:
+        let a = max(lo, starts[i])
+        let b = min(hi + 1, starts[i + 1])
+        if a < b:
+          order.add(i)
+      if odd:
+        order.reverse()
+      for si in order:
+        let a = max(lo, starts[si])
+        let b = min(hi + 1, starts[si + 1])
+        crossWord(segs[si].word)
+        let gsi = segs[si].span
+        if gsi >= 0 and gsi < spans.len and
+            spans[gsi].box.kind != sbkNone:
+          if not boxDone[si]:
+            boxDone[si] = true
+            emitBox(si, uint32(starts[si]))
+          continue
+        var sub = ""
+        var submap: seq[int] = @[]
+        var i = a
+        while i < b:
+          if i < 0 or i >= concat.len:
+            inc i
+            continue
+          if not covered[i]:
+            if i + 2 < b and uint8(concat[i]) == 0xE2u8 and
+                uint8(concat[i + 1]) == 0x80u8 and
+                (uint8(concat[i + 2]) == 0x8Cu8 or
+                  uint8(concat[i + 2]) == 0x8Du8):
+              sub.add(concat[i ..< i + 3])
+              for k in 0 ..< 3:
+                submap.add(i + k)
+              i += 3
+            else:
+              inc i
+            continue
+          let b0 = uint8(concat[i])
+          var w = 1
+          if b0 >= 0xF0u8: w = 4
+          elif b0 >= 0xE0u8: w = 3
+          elif b0 >= 0xC2u8: w = 2
+          elif b0 >= 0x80u8 and b0 < 0xC0u8:
+            inc i
+            continue
+          var rep = concat[i ..< min(i + w, b)]
+          if odd:
+            let r = concat.runeAt(i)
+            let m = mirroringFor(uint32(r))
+            if m.isSome:
+              rep = $Rune(m.get)
+          sub.add(rep)
+          for k in 0 ..< rep.len:
+            submap.add(i + min(k, w - 1))
+          i += w
+        if sub.len == 0:
+          continue
+        let pf = if gsi >= 0 and gsi < spans.len and
+            spans[gsi].font != nil: spans[gsi].font else: font
+        let psz = if gsi >= 0 and gsi < spans.len and
+            spans[gsi].size > 0.0: spans[gsi].size else: px
+        let sh = shapeCached(pf, psz, sub, letterSpacing, features,
+          cache, fallbacks, rn.dir)
+        for g in sh.glyphs:
+          var gg = g
+          let vc = int(g.cluster)
+          if vc >= 0 and vc < submap.len:
+            gg.cluster = uint32(submap[vc])
+          if glyphExtra != 0.0 and result.glyphs.len > 0 and
+              (isSpreadSlot(concat, result.glyphs[^1], gg) or
+                isSpreadSlot(concat, gg, result.glyphs[^1])):
+            pen += glyphExtra
+          gg.x += pen
+          if gg.hasInk:
+            gg.x0 += pen
+            gg.x1 += pen
+          dressSpan(gg, gsi, pf)
+          result.glyphs.add(gg)
+        pen += sh.advance
+  # Parent alignment pass: the line owns the baseline and content
+  # box; each box declares how it sits in it. Text ink (excluding
+  # boxes) anchors the reference; box-only lines fall back to the
+  # box union.
+  var refFound = false
+  var refY0, refY1 = 0.0
+  for g in result.glyphs:
+    if g.boxKind != sbkNone or not g.hasInk:
+      continue
+    if not refFound:
+      refY0 = g.y0
+      refY1 = g.y1
+      refFound = true
+    else:
+      refY0 = min(refY0, g.y0)
+      refY1 = max(refY1, g.y1)
+  if not refFound:
+    for g in result.glyphs:
+      if g.boxKind == sbkNone or not g.hasInk:
+        continue
+      if not refFound:
+        refY0 = g.y0
+        refY1 = g.y1
+        refFound = true
+      else:
+        refY0 = min(refY0, g.y0)
+        refY1 = max(refY1, g.y1)
+  if refFound:
+    let refCy = (refY0 + refY1) * 0.5
+    for b in boxes:
+      var al = segs[b.si].alignSelf
+      if al == faAuto:
+        al = flex.alignItems
+      if al == faAuto:
+        al = faBaseline
+      case al
+      of faBaseline, faAuto:
+        discard
+      of faStart:
+        result.glyphs[b.gi].y = refY0
+        result.glyphs[b.gi].y0 = refY0
+        result.glyphs[b.gi].y1 = refY0 + result.glyphs[b.gi].boxH
+      of faCenter:
+        let t = refCy - result.glyphs[b.gi].boxH * 0.5
+        result.glyphs[b.gi].y = t
+        result.glyphs[b.gi].y0 = t
+        result.glyphs[b.gi].y1 = t + result.glyphs[b.gi].boxH
+      of faEnd:
+        let t = refY1 - result.glyphs[b.gi].boxH
+        result.glyphs[b.gi].y = t
+        result.glyphs[b.gi].y0 = t
+        result.glyphs[b.gi].y1 = t + result.glyphs[b.gi].boxH
+      of faStretch:
+        if result.glyphs[b.gi].boxH != refY1 - refY0:
+          result.glyphs[b.gi].boxH = refY1 - refY0
+        result.glyphs[b.gi].y = refY0
+        result.glyphs[b.gi].y0 = refY0
+        result.glyphs[b.gi].y1 = refY1
+        result.glyphs[b.gi].hasInk =
+          result.glyphs[b.gi].boxW > 0.0 and refY1 > refY0
+  # Width distribution over the target width (leftover only, never
+  # combined with `glyphExtra` spreading): grow shares widen the pen
+  # after grow boxes first, then justification shifts ride the word
+  # boundaries in emission order. Only distributing modes (and
+  # growth) reach the target advance; center/end keep the natural
+  # advance and shift the content instead.
+  if targetW > 0.0 and glyphExtra == 0.0:
+    var free = targetW - pen
+    var reached = false
+    if free > 0.0:
+      var totalGrow = 0.0
+      for b in boxes:
+        totalGrow += max(0.0, segs[b.si].flexGrow)
+      if totalGrow > 0.0:
+        let base = free
+        for b in boxes:
+          let share = base * max(0.0, segs[b.si].flexGrow) /
+            totalGrow
+          if share != 0.0:
+            for j in b.gi + 1 ..< result.glyphs.len:
+              result.glyphs[j].x += share
+              if result.glyphs[j].hasInk:
+                result.glyphs[j].x0 += share
+                result.glyphs[j].x1 += share
+            pen += share
+        free = targetW - pen
+        reached = true
+    if free > 0.0:
+      var fj = flex.justify
+      if fj == fjInherit:
+        fj = fjStart
+      template shiftAll(dx: float64) =
+        if dx != 0.0:
+          for j in 0 ..< result.glyphs.len:
+            result.glyphs[j].x += dx
+            if result.glyphs[j].hasInk:
+              result.glyphs[j].x0 += dx
+              result.glyphs[j].x1 += dx
+      template shiftFrom(gi: int, dx: float64) =
+        if dx != 0.0:
+          for j in gi ..< result.glyphs.len:
+            result.glyphs[j].x += dx
+            if result.glyphs[j].hasInk:
+              result.glyphs[j].x0 += dx
+              result.glyphs[j].x1 += dx
+      case fj
+      of fjInherit, fjStart:
+        discard
+      of fjCenter:
+        shiftAll(free * 0.5)
+      of fjEnd:
+        shiftAll(free)
+      of fjSpaceBetween:
+        if bounds.len > 0:
+          for b in bounds:
+            shiftFrom(b, free / float64(bounds.len))
+          reached = true
+      of fjSpaceAround:
+        if bounds.len > 0:
+          shiftAll(free / float64(2 * bounds.len))
+          for b in bounds:
+            shiftFrom(b, free / float64(bounds.len))
+          reached = true
+      of fjSpaceEvenly:
+        let n = float64(bounds.len + 1)
+        shiftAll(free / n)
+        for b in bounds:
+          shiftFrom(b, free / n)
+        reached = true
+    if reached:
+      pen = targetW
   result.advance = pen
 
 proc lineY*(lay: TextLayout, i: int): float64 =
@@ -867,14 +1148,17 @@ proc layoutSpans*(font: TextFont, sizePx: float64, s: string,
     spans: openArray[TextSpan], letterSpacing = 0.0,
     lineHeightMul = 1.2, features: openArray[Feature] = [],
     lineHeightAbs = 0.0,
-    fallbacks: openArray[TextFont] = []): TextLayout =
+    fallbacks: openArray[TextFont] = [],
+    flex = TextRowFlex()): TextLayout =
   ## Shape explicit-`\n` lines with per-range fonts, sizes, colors
   ## and decorations. Unspanned bytes use the layout font/size/paint.
   ## Ranges index `s` after `\r\n`/`\r` normalization to `\n`.
   ## Clusters stay line-local; glyphs carry their span style. Span
   ## lines lay out in visual order (see `assembleSpans`): each run x
   ## span intersection shapes with its run direction and span style,
-  ## clusters stay logical. Lines
+  ## clusters stay logical. `flex` opts into row flex (gap and item
+  ## alignment work without a width; justification needs `targetW`,
+  ## so only boxes distribute). Lines
   ## with larger spans stand taller (see `spanBaselines`); an
   ## absolute line height stays uniform.
   let src = s.replace("\r\n", "\n").replace("\r", "\n")
@@ -897,17 +1181,20 @@ proc layoutSpans*(font: TextFont, sizePx: float64, s: string,
           edges.add(a)
           edges.add(b)
       edges.sort(system.cmp)
-      var segs: seq[tuple[span: int, text: string, word: int]] = @[]
+      var segs: seq[tuple[span: int, text: string, word: int,
+        alignSelf: FlexAlign, flexGrow: float64]] = @[]
       var prev = -1
       for e in edges:
         if e == prev:
           continue
         if prev >= 0:
-          segs.add((spanAt(spans, lineStart + prev),
-            para[prev ..< e], -1))
+          let si = spanAt(spans, lineStart + prev)
+          segs.add((si, para[prev ..< e], -1,
+            if si >= 0: spans[si].alignSelf else: faAuto,
+            if si >= 0: spans[si].flexGrow else: 0.0))
         prev = e
       result.lines.add(assembleSpans(font, px, segs, spans,
-        letterSpacing, features, cache, fallbacks))
+        letterSpacing, features, cache, fallbacks, 0.0, flex, 0.0))
     lineStart += para.len + 1
   result.lineYs = spanBaselines(result.lines, px, lineHeightMul,
     lineHeightAbs)
@@ -1258,11 +1545,15 @@ proc appendLayoutSpan*(p: var Path, xf: Xform, lay: TextLayout, x, y: float64,
     ha: TextHAlign, va: TextVAlign, wantColor: bool, color: Color) =
   ## Like `appendLayout` but only emits one color group: uncolored
   ## glyphs (`wantColor` false) or glyphs exactly matching `color`.
+  ## Inline boxes never emit outline verbs here; the canvas paint
+  ## path draws them separately (see `paintBoxes`).
   let dy = valignShift(lay, ha, va)
   for i, line in lay.lines:
     let ox = x + linePenX(line.advance, ha)
     let oy = y + dy + lay.lineY(i)
     for g in line.glyphs:
+      if g.boxKind != sbkNone:
+        continue
       if g.hasColor != wantColor:
         continue
       if wantColor and not sameColor(g.color, color):
@@ -1303,7 +1594,8 @@ proc appendLayout*(p: var Path, xf: Xform, lay: TextLayout, x, y: float64,
   ## Emit the laid-out glyph outlines as path verbs (transform captured
   ## per verb, like all `Path` input). Glyphs without outlines advance
   ## the pen but emit nothing. Fallback glyphs draw with their own
-  ## shaper at the layout size over their own upem.
+  ## shaper at the layout size over their own upem. Inline boxes are
+  ## skipped (drawn separately by the canvas paint path).
   if lay.lines.len == 0:
     return
   let dy = valignShift(lay, ha, va)
@@ -1311,6 +1603,8 @@ proc appendLayout*(p: var Path, xf: Xform, lay: TextLayout, x, y: float64,
     let ox = x + linePenX(line.advance, ha)
     let oy = y + dy + lay.lineY(i)
     for g in line.glyphs:
+      if g.boxKind != sbkNone:
+        continue
       let gf = if g.font != nil: g.font else: lay.font
       if gf == nil:
         continue

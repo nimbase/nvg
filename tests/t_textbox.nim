@@ -842,3 +842,175 @@ test "span justify spreads a bidi line to the box":
   check bl.lay.lines[0].glyphs[2].size == 30.0
   check bl.lay.lines[0].glyphs[2].cluster == 2u32
   check close(bl.lay.lines[0].glyphs[2].x, 27.0)
+
+test "inline image boxes ride the baseline":
+  let font = loadFontBytes(buildTestFont())
+  # "A" + U+FFFC placeholder carrying a 10x10 image: fitted to the
+  # 20px size, so 12 + 20 = 32 with the box bottom on the baseline.
+  let spans = [TextSpan(first: 1, last: 4,
+    box: SpanBox(kind: sbkImage, imageId: 7, imageW: 10.0,
+      imageH: 10.0))]
+  let lay = layoutSpans(font, 20.0, "A\xE2\xBF\xBC", spans)
+  let ln = lay.lines[0]
+  check ln.advance == 32.0
+  check ln.glyphs.len == 2
+  check ln.glyphs[1].boxKind == sbkImage
+  check ln.glyphs[1].cluster == 1u32
+  check ln.glyphs[1].imageId == 7
+  check close(ln.glyphs[1].x, 12.0)
+  check close(ln.glyphs[1].y, -20.0)
+  check close(ln.glyphs[1].boxW, 20.0)
+  check close(ln.glyphs[1].boxH, 20.0)
+  check ln.glyphs[1].size == 20.0 # row height channel follows
+  check close(caretAtByte(ln, 1), 12.0)
+  check hitTest(lay, 20.0, 0.0).byteIndex == 1
+
+test "path boxes fit width and align to text ink":
+  let font = loadFontBytes(buildTestFont())
+  # Intrinsic 6x10 at 20px: 12 wide, 20 tall; bottom on baseline.
+  var bp = Path()
+  bp.moveTo(0, 0, identity())
+  bp.lineTo(6, 0, identity())
+  bp.lineTo(6, 10, identity())
+  bp.closePath()
+  let spans = [TextSpan(first: 1, last: 4,
+    box: SpanBox(kind: sbkPath, path: bp, boxW: 6.0, boxH: 10.0))]
+  let lay = layoutSpans(font, 20.0, "A\xE2\xBF\xBC", spans)
+  check lay.lines[0].advance == 24.0
+  check close(lay.lines[0].glyphs[1].x, 12.0)
+  check close(lay.lines[0].glyphs[1].y, -20.0)
+  # Centered on the A ink (-14..0, center -7): top lands at -17.
+  let cs = [TextSpan(first: 1, last: 4,
+    box: SpanBox(kind: sbkImage, imageId: 7, imageW: 10.0,
+      imageH: 10.0), alignSelf: faCenter)]
+  let cl = layoutSpans(font, 20.0, "A\xE2\xBF\xBC", cs)
+  check cl.lines[0].advance == 32.0 # alignment never moves the pen
+  check close(cl.lines[0].glyphs[1].y, -17.0)
+  check close(cl.lines[0].glyphs[1].y1, 3.0)
+  # Start/end flush to the ink box; stretch fills it.
+  let ss = [TextSpan(first: 1, last: 4,
+    box: SpanBox(kind: sbkImage, imageId: 7, imageW: 10.0,
+      imageH: 10.0), alignSelf: faStart)]
+  check close(layoutSpans(font, 20.0, "A\xE2\xBF\xBC", ss)
+    .lines[0].glyphs[1].y, -14.0)
+  let es = [TextSpan(first: 1, last: 4,
+    box: SpanBox(kind: sbkImage, imageId: 7, imageW: 10.0,
+      imageH: 10.0), alignSelf: faEnd)]
+  check close(layoutSpans(font, 20.0, "A\xE2\xBF\xBC", es)
+    .lines[0].glyphs[1].y, -20.0)
+  let ts = [TextSpan(first: 1, last: 4,
+    box: SpanBox(kind: sbkImage, imageId: 7, imageW: 10.0,
+      imageH: 10.0), alignSelf: faStretch)]
+  let tl = layoutSpans(font, 20.0, "A\xE2\xBF\xBC", ts)
+  check close(tl.lines[0].glyphs[1].y, -14.0)
+  check close(tl.lines[0].glyphs[1].boxH, 14.0)
+
+test "flex center and end keep the natural advance":
+  let font = loadFontBytes(buildTestFont())
+  # "A B" natural 36 in a 56 box: center leads 10, end leads 20.
+  var oc = TextBoxOpts(maxW: 56,
+    flex: TextRowFlex(justify: fjCenter))
+  let cl = layoutBoxSpans(font, 20.0, "A B", [], 0.0, 1.2, 0.0,
+    oc, [], [])
+  check cl.lay.lines[0].advance == 36.0
+  check close(cl.lay.lines[0].glyphs[0].x, 10.0)
+  check close(cl.lay.lines[0].glyphs[2].x, 32.0)
+  var oe = TextBoxOpts(maxW: 56,
+    flex: TextRowFlex(justify: fjEnd))
+  let el = layoutBoxSpans(font, 20.0, "A B", [], 0.0, 1.2, 0.0,
+    oe, [], [])
+  check el.lay.lines[0].advance == 36.0
+  check close(el.lay.lines[0].glyphs[0].x, 20.0)
+
+test "space around and evenly share visual gaps":
+  let font = loadFontBytes(buildTestFont())
+  # Natural 36, free 20, one word boundary: around leads 10 and
+  # shares 20; evenly leads 10 and shares 10.
+  var oa = TextBoxOpts(maxW: 56,
+    flex: TextRowFlex(justify: fjSpaceAround))
+  let al = layoutBoxSpans(font, 20.0, "A B", [], 0.0, 1.2, 0.0,
+    oa, [], [])
+  check al.lay.lines[0].advance == 56.0
+  check close(al.lay.lines[0].glyphs[0].x, 10.0)
+  check close(al.lay.lines[0].glyphs[2].x, 52.0)
+  var oe = TextBoxOpts(maxW: 56,
+    flex: TextRowFlex(justify: fjSpaceEvenly))
+  let el = layoutBoxSpans(font, 20.0, "A B", [], 0.0, 1.2, 0.0,
+    oe, [], [])
+  check el.lay.lines[0].advance == 56.0
+  check close(el.lay.lines[0].glyphs[0].x, 10.0)
+  check close(el.lay.lines[0].glyphs[2].x, 42.0)
+
+test "gap opens fixed space at word boundaries":
+  let font = loadFontBytes(buildTestFont())
+  var o = TextBoxOpts(maxW: 200, flex: TextRowFlex(gap: 5.0))
+  let bl = layoutBoxSpans(font, 20.0, "A B", [], 0.0, 1.2, 0.0,
+    o, [], [])
+  check bl.lay.lines[0].advance == 41.0 # 36 + one gap
+  check close(bl.lay.lines[0].glyphs[2].x, 27.0)
+
+test "grow absorbs leftover after its box":
+  let font = loadFontBytes(buildTestFont())
+  # Placeholder box (20 wide) + space + A: natural 42 in a 62 box;
+  # the free 20 rides after the grow box.
+  let spans = [TextSpan(first: 0, last: 3,
+    box: SpanBox(kind: sbkImage, imageId: 7, imageW: 10.0,
+      imageH: 10.0), flexGrow: 1.0)]
+  var o = TextBoxOpts(maxW: 62,
+    flex: TextRowFlex(justify: fjStart))
+  let bl = layoutBoxSpans(font, 20.0, "\xE2\xBF\xBC A", spans, 0.0,
+    1.2, 0.0, o, [], [])
+  check bl.lay.lines[0].advance == 62.0
+  check close(bl.lay.lines[0].glyphs[0].x, 0.0) # box stays put
+  check close(bl.lay.lines[0].glyphs[2].x, 50.0) # A rides +20
+
+test "bidi flex centers in visual order":
+  let font = loadFontBytes(buildTestFont())
+  # "A " + aleph natural 32 in a 42 box: everything shifts 5,
+  # clusters stay logical.
+  var o = TextBoxOpts(maxW: 42,
+    flex: TextRowFlex(justify: fjCenter))
+  let bl = layoutBoxSpans(font, 20.0, "A \xD7\x90", [], 0.0, 1.2,
+    0.0, o, [], [])
+  check bl.lay.lines[0].advance == 32.0
+  check close(bl.lay.lines[0].glyphs[0].x, 5.0)
+  check bl.lay.lines[0].glyphs[2].cluster == 2u32
+  check close(bl.lay.lines[0].glyphs[2].x, 27.0)
+
+test "inline image boxes draw pixels":
+  let c = testCanvas()
+  var green = newSeq[uint8](4 * 4 * 4)
+  for i in 0 ..< 16:
+    green[i * 4 + 1] = 255u8
+    green[i * 4 + 3] = 255u8
+  let id = c.createImageRGBA(4, 4, {}, green)
+  check id != 0
+  let spans = [TextSpan(first: 1, last: 4,
+    box: SpanBox(kind: sbkImage, imageId: id, imageW: 4.0,
+      imageH: 4.0))]
+  discard c.fillSpans(10, 30, "A\xE2\xBF\xBC", spans)
+  # Box rect spans canvas 22..42 x 10..30.
+  let p = c.surface.getPixel(23, 29)
+  check p.g > 0.9 and p.r < 0.1 and p.b < 0.1
+  check c.surface.getPixel(41, 11).g > 0.9
+  let past = c.surface.getPixel(43, 29)
+  check past.g > 0.9 and past.r > 0.9 # white past the box
+
+test "path boxes fill with the span color":
+  let c = testCanvas()
+  var bp = Path()
+  bp.moveTo(0, 0, identity())
+  bp.lineTo(10, 0, identity())
+  bp.lineTo(10, 10, identity())
+  bp.lineTo(0, 10, identity())
+  bp.closePath()
+  let spans = [TextSpan(first: 1, last: 4, hasColor: true,
+    color: rgbf(1, 0, 0),
+    box: SpanBox(kind: sbkPath, path: bp, boxW: 10.0, boxH: 10.0),
+    size: 10.0)]
+  discard c.fillSpans(10, 30, "A\xE2\xBF\xBC", spans)
+  # Box rect spans canvas 22..32 x 20..30.
+  let p = c.surface.getPixel(23, 29)
+  check p.r > 0.9 and p.g < 0.1 and p.b < 0.1
+  let between = c.surface.getPixel(21, 29)
+  check between.r > 0.9 # white: A ink ends at 20, box starts at 22

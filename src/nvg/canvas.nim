@@ -495,6 +495,63 @@ proc paintGroup(c: Canvas, lay: TextLayout, x, y: float64,
     ha: TextHAlign, va: TextVAlign, strokeMode: bool, wantColor: bool,
     color: Color)
 
+proc paintBoxes(c: Canvas, lay: TextLayout, x, y: float64,
+    ha: TextHAlign, va: TextVAlign, wantColor: bool, color: Color) =
+  ## Draw inline replaced boxes (image/path spans): image boxes fill
+  ## their placed rect with an image pattern; path boxes replay the
+  ## stored path translated to the placed offset, filled with the
+  ## span color (or the layout paint). Same anchor math as
+  ## `appendLayout`, so boxes track their line. Boxes always fill
+  ## (never stroke), honoring the state alpha/clip/comp-op.
+  let st = c.states[^1]
+  let dy = valignShift(lay, ha, va)
+  for i, line in lay.lines:
+    let ox = x + linePenX(line.advance, ha)
+    let oy = y + dy + lay.lineY(i)
+    for g in line.glyphs:
+      if g.boxKind == sbkNone:
+        continue
+      if g.hasColor != wantColor:
+        continue
+      if wantColor and not sameColor(g.color, color):
+        continue
+      let gx = ox + g.x
+      let gy = oy + g.y
+      if g.boxKind == sbkImage:
+        if g.imageId notin c.images:
+          continue
+        var rp = Path()
+        rp.rect(gx, gy, g.boxW, g.boxH, st.xform)
+        let ipolys = rp.flatten(c.tessTol, DefaultDistTol)
+        if ipolys.len == 0:
+          continue
+        let ipaint = imagePattern(c.images[g.imageId], gx, gy,
+          g.boxW, g.boxH, 0.0, rgbf(1, 1, 1)).withMap(c.captureMap())
+        c.backend.fill(c.surf, ipolys, ipaint, st.alpha, st.clip,
+          c.shapeAA, st.compOp, frNonZero)
+      else:
+        var p = Path()
+        for cmd in g.boxPath.commands:
+          case cmd.kind
+          of pcMoveTo:
+            p.moveTo(gx + cmd.p.x, gy + cmd.p.y, st.xform)
+          of pcLineTo:
+            p.lineTo(gx + cmd.p.x, gy + cmd.p.y, st.xform)
+          of pcCubicTo:
+            p.bezierTo(gx + cmd.c1.x, gy + cmd.c1.y,
+              gx + cmd.c2.x, gy + cmd.c2.y, gx + cmd.p2.x,
+              gy + cmd.p2.y, st.xform)
+          of pcClose:
+            p.closePath()
+          of pcWinding:
+            p.appendWinding(cmd.winding)
+        let polys = p.flatten(c.tessTol, DefaultDistTol)
+        if polys.len == 0:
+          continue
+        let paint = if wantColor: solidPaint(color) else: st.fill
+        c.backend.fill(c.surf, polys, paint, st.alpha, st.clip,
+          c.shapeAA, st.compOp, frNonZero)
+
 proc paintLayout(c: Canvas, lay: TextLayout, x, y: float64,
     ha: TextHAlign, va: TextVAlign, strokeMode: bool) =
   var cols: seq[Color] = @[]
@@ -511,11 +568,14 @@ proc paintLayout(c: Canvas, lay: TextLayout, x, y: float64,
   if cols.len == 0:
     c.paintGroup(lay, x, y, ha, va, strokeMode, false,
       rgbf(0, 0, 0))
+    c.paintBoxes(lay, x, y, ha, va, false, rgbf(0, 0, 0))
   else:
     c.paintGroup(lay, x, y, ha, va, strokeMode, false,
       rgbf(0, 0, 0))
+    c.paintBoxes(lay, x, y, ha, va, false, rgbf(0, 0, 0))
     for col in cols:
       c.paintGroup(lay, x, y, ha, va, strokeMode, true, col)
+      c.paintBoxes(lay, x, y, ha, va, true, col)
 
 proc paintGroup(c: Canvas, lay: TextLayout, x, y: float64,
     ha: TextHAlign, va: TextVAlign, strokeMode: bool, wantColor: bool,
@@ -891,9 +951,11 @@ proc widestStrings(font: TextFont, px: float64, lines: seq[WrapLine],
 # --- Rich text spans: shared text, per-range fonts/sizes/colors ---
 
 type
-  SpanPiece = tuple[span: int, text: string, word: int]
+  SpanPiece = tuple[span: int, text: string, word: int,
+    alignSelf: FlexAlign, flexGrow: float64]
     ## A maximal same-span run (`span` -1 = layout style, `word`
-    ## the word index in its line, -1 for gaps).
+    ## the word index in its line, -1 for gaps). Flex item options
+    ## ride from the covering span.
   SpanLine = object
     items*: seq[SpanPiece]
     para*: int
@@ -903,15 +965,20 @@ type
 proc splitSpanPieces(spans: openArray[TextSpan], pos: int,
     text: string, word = -1): seq[SpanPiece] =
   ## Split `text` (starting at byte `pos`) at span boundaries.
+  ## Flex item options ride from each covering span.
   result = @[]
   var cur = -2
   var start = 0
   var i = 0
+  template pieceFor(si: int, s: string): SpanPiece =
+    (si, s, word,
+      if si >= 0: spans[si].alignSelf else: faAuto,
+      if si >= 0: spans[si].flexGrow else: 0.0)
   while i < text.len:
     let si = spanAt(spans, pos + i)
     if si != cur:
       if cur != -2:
-        result.add((cur, text[start ..< i], word))
+        result.add(pieceFor(cur, text[start ..< i]))
       cur = si
       start = i
     # Advance one rune (pieces stay valid UTF-8).
@@ -920,7 +987,7 @@ proc splitSpanPieces(spans: openArray[TextSpan], pos: int,
       inc w
     i += w
   if cur != -2:
-    result.add((cur, text[start ..< i], word))
+    result.add(pieceFor(cur, text[start ..< i]))
 
 proc spanFontSize(spans: openArray[TextSpan], si: int,
     font: TextFont, px: float64): tuple[font: TextFont, size: float64] =
@@ -936,6 +1003,19 @@ proc shapeSpanPiece(font: TextFont, px: float64,
     letterSpacing: float64, features: openArray[Feature],
     cache: ShapeCache,
     fallbacks: openArray[TextFont]): ShapedLine =
+  ## Shape one span piece; box spans (image/path over a U+FFFC
+  ## placeholder) return a single box entry with the fitted advance
+  ## instead of shaping, so measurement, wrap and slot scans treat
+  ## the box as an atomic unit. Real emission happens in
+  ## `assembleSpans`.
+  if si >= 0 and si < spans.len and spans[si].box.kind != sbkNone:
+    let (bw, bh) = fittedBox(spans[si], px)
+    return ShapedLine(
+      glyphs: @[PlacedGlyph(x: 0.0, y: -bh, x0: 0.0, x1: bw,
+        y0: -bh, y1: 0.0, hasInk: bw > 0.0 and bh > 0.0,
+        cluster: 0u32, size: bh, boxKind: spans[si].box.kind,
+        boxW: bw, boxH: bh)],
+      advance: bw)
   let (f, sz) = spanFontSize(spans, si, font, px)
   shapeCached(f, sz, text, letterSpacing, features, cache, fallbacks)
 
@@ -960,8 +1040,13 @@ proc renderSpanGap(font: TextFont, px: float64,
       let (f, sz) = spanFontSize(spans, si, font, px)
       let sa = shapeCached(f, sz, " ", letterSpacing, features,
         cache, fallbacks).advance
-      return @[(si, stopPad(sa, tabW, lineAdv), -1)]
-    return @[(spanAt(spans, runPos), " ", -1)]
+      return @[(si, stopPad(sa, tabW, lineAdv), -1,
+        if si >= 0: spans[si].alignSelf else: faAuto,
+        if si >= 0: spans[si].flexGrow else: 0.0)]
+    let gi = spanAt(spans, runPos)
+    return @[(gi, " ", -1,
+      if gi >= 0: spans[gi].alignSelf else: faAuto,
+      if gi >= 0: spans[gi].flexGrow else: 0.0)]
   result = @[]
   var cur = lineAdv
   for pc in splitSpanPieces(spans, runPos, run):
@@ -978,7 +1063,7 @@ proc renderSpanGap(font: TextFont, px: float64,
         outp.add(pad)
         cur += float64(pad.len) * sa
     if outp != "":
-      result.add((pc.span, outp, -1))
+      result.add((pc.span, outp, -1, pc.alignSelf, pc.flexGrow))
 
 proc pieceAdvance(font: TextFont, px: float64,
     spans: openArray[TextSpan], pc: SpanPiece, letterSpacing: float64,
@@ -1001,17 +1086,18 @@ proc assembleSpanLine(font: TextFont, px: float64,
     spans: openArray[TextSpan], items: openArray[SpanPiece],
     letterSpacing: float64, features: openArray[Feature],
     cache: ShapeCache, fallbacks: openArray[TextFont],
-    justifyExtra = 0.0, glyphExtra = 0.0): ShapedLine =
+    glyphExtra = 0.0, flex = TextRowFlex(),
+    targetW = 0.0): ShapedLine =
   ## Concatenate shaped pieces with pen, line-local clusters, and
   ## span styles (size/color/decor; font stays nil unless a fallback
-  ## shaped the glyph). `justifyExtra` adds fractional pen at each
-  ## word boundary crossed; `glyphExtra` opens a gap before every
-  ## spread slot instead (see `isSpreadSlot`; the two never combine).
-  ## Delegates to `assembleSpans`: mixed-direction lines come out in
-  ## visual order with logical clusters (single LTR lines keep the
-  ## logical path, identical output).
+  ## shaped the glyph). Delegates to `assembleSpans`: mixed-direction
+  ## lines come out in visual order with logical clusters (single LTR
+  ## lines keep the logical path, identical output). `glyphExtra`
+  ## opens each spread slot instead of width distribution (the two
+  ## never combine); `flex`/`targetW` drive the row flex container
+  ## (gap, growth, justification, item alignment).
   assembleSpans(font, px, items, spans, letterSpacing, features,
-    cache, fallbacks, justifyExtra, glyphExtra)
+    cache, fallbacks, glyphExtra, flex, targetW)
 
 proc breakSpanPiece(font: TextFont, px: float64,
     spans: openArray[TextSpan], pcs: openArray[SpanPiece], room: float64,
@@ -1241,13 +1327,14 @@ proc breakSpanPiece(font: TextFont, px: float64,
         for j in 0 ..< pi:
           cand.add(pcs[j])
         cand.add((pcs[pi].span, $rr[0 ..< q] & hyphen,
-          pcs[pi].word))
+          pcs[pi].word, pcs[pi].alignSelf, pcs[pi].flexGrow))
         if piecesAdvance(font, px, spans, cand, letterSpacing,
             features, cache, fallbacks) <= room:
           var tail: seq[SpanPiece] = @[]
           let tailText = $rr[q .. ^1]
           if tailText != "":
-            tail.add((pcs[pi].span, tailText, pcs[pi].word))
+            tail.add((pcs[pi].span, tailText, pcs[pi].word,
+              pcs[pi].alignSelf, pcs[pi].flexGrow))
           for j in pi + 1 ..< pcs.len:
             tail.add(pcs[j])
           return (cand, tail)
@@ -1255,14 +1342,21 @@ proc breakSpanPiece(font: TextFont, px: float64,
     dec pi
   if not emergency:
     return (@[], @pcs)
+  # Box pieces never split: the caller overflows the whole word when
+  # nothing fits ahead of them.
+  if rest[0].span >= 0 and rest[0].span < spans.len and
+      spans[rest[0].span].box.kind != sbkNone:
+    return (kept, rest)
   let (f, sz) = spanFontSize(spans, rest[0].span, font, px)
   let frags = breakPieces(f, sz, rest[0].text, letterSpacing, room,
     hyphen, features, cache, fallbacks)
   for k in 0 ..< frags.len - 1:
-    kept.add((rest[0].span, frags[k], rest[0].word))
+    kept.add((rest[0].span, frags[k], rest[0].word,
+      rest[0].alignSelf, rest[0].flexGrow))
   var tail: seq[SpanPiece] = @[]
   if frags[^1] != "":
-    tail.add((rest[0].span, frags[^1], rest[0].word))
+    tail.add((rest[0].span, frags[^1], rest[0].word,
+      rest[0].alignSelf, rest[0].flexGrow))
   for j in 1 ..< rest.len:
     tail.add(rest[j])
   (kept, tail)
@@ -1276,8 +1370,10 @@ proc spanJustifyExtra(font: TextFont, px: float64,
   ## Spread shares for a line reaching `boxW`: per word boundary
   ## when the line holds two or more words, else per inter-glyph
   ## slot for a single word (see `isSpreadSlot`: cluster-advancing,
-  ## non-glue boundaries, mirroring the plain path). Applied as
-  ## fractional pen at assembly, so justification is exact.
+  ## non-glue boundaries, mirroring the plain path). Only the glyph
+  ## share is used: word spreading moved into `assembleSpans` flex
+  ## distribution (`fjSpaceBetween` reproduces `wordExtra` exactly),
+  ## and the two never combine.
   var ids: seq[int] = @[]
   for pc in items:
     if pc.word >= 0 and pc.word notin ids:
@@ -1340,14 +1436,16 @@ proc spanEllipsizeLine(font: TextFont, px: float64,
       let t = $runes & marker
       if shapeCached(f, sz, t, letterSpacing, features, cache,
           fallbacks).advance <= maxW - rest:
-        kept[^1] = (last.span, t, last.word)
+        kept[^1] = (last.span, t, last.word, last.alignSelf,
+          last.flexGrow)
         done = true
         break
     if done:
       return kept
     if shapeCached(f, sz, marker, letterSpacing, features, cache,
         fallbacks).advance <= maxW - rest:
-      kept[^1] = (last.span, marker, last.word)
+      kept[^1] = (last.span, marker, last.word, last.alignSelf,
+        last.flexGrow)
       return kept
     kept.setLen(kept.len - 1)
 
@@ -1359,6 +1457,15 @@ proc widestSpanLines(font: TextFont, px: float64,
   for ln in lines:
     result = max(result, piecesAdvance(font, px, spans, ln.items,
       letterSpacing, features, cache, fallbacks))
+
+proc flexJustifyFor*(ha: TextHAlign): FlexJustify =
+  ## Box align to row justification (span boxes only): justify maps
+  ## to space-between, the rest to the matching edge or center.
+  case ha
+  of thaLeft: fjStart
+  of thaCenter: fjCenter
+  of thaRight: fjEnd
+  of thaJustify: fjSpaceBetween
 
 proc layoutBoxSpans*(font: TextFont, sizePx: float64, s: string,
     spans: openArray[TextSpan], letterSpacing = 0.0,
@@ -1438,26 +1545,44 @@ proc layoutBoxSpans*(font: TextFont, sizePx: float64, s: string,
   if o.maxLines > 0 and lines.len > o.maxLines:
     lines.setLen(o.maxLines)
     lines[^1].last = true
+  var distributed = false
   for wl in lines:
     let indent = if wl.idx == 0: o.firstLineIndent else: 0.0
     let effW = maxW - indent
     var items = wl.items
-    var extra = 0.0
     var glyphExtra = 0.0
+    var distributeW = 0.0
+    # Row flex: explicit `flex.justify` distributes every line to
+    # the width; inherited from `ha`, only justify spreads and only
+    # on non-last lines (the CSS last-line rule), matching the old
+    # word-extra behavior exactly.
+    let flexExplicit = o.flex.justify != fjInherit
+    var fj = if flexExplicit: o.flex.justify
+      else: flexJustifyFor(o.ha)
+    var fx = o.flex
+    fx.justify = fj
+    var doSpread = false
+    if effW > 0.0:
+      if flexExplicit:
+        doSpread = true
+      elif (not wl.last or wl.idx == 0) and o.ha == thaJustify and
+          fj == fjSpaceBetween:
+        doSpread = true
     if o.overflow == toEllipsis:
       let adv = piecesAdvance(font, px, spans, items, letterSpacing,
         features, cache, fallbacks)
       if adv > effW and effW > 0.0:
         items = spanEllipsizeLine(font, px, spans, items, effW,
           o.ellipsis, letterSpacing, features, cache, fallbacks)
-    elif o.ha == thaJustify and effW > 0.0 and
-        (not wl.last or wl.idx == 0):
+    elif doSpread:
       let jx = spanJustifyExtra(font, px, spans, items, effW,
         letterSpacing, features, cache, fallbacks)
-      extra = jx.wordExtra
       glyphExtra = jx.glyphExtra
+      distributeW = effW
+      distributed = true
     var shaped = assembleSpanLine(font, px, spans, items,
-      letterSpacing, features, cache, fallbacks, extra, glyphExtra)
+      letterSpacing, features, cache, fallbacks, glyphExtra, fx,
+      distributeW)
     if indent != 0.0:
       for j in 0 ..< shaped.glyphs.len:
         shaped.glyphs[j].x += indent
@@ -1466,7 +1591,11 @@ proc layoutBoxSpans*(font: TextFont, sizePx: float64, s: string,
           shaped.glyphs[j].x1 += indent
     lay.lines.add(shaped)
   lay = lay.withScaleX(o.scaleX)
-  if maxW > 0.0 and (o.ha == thaCenter or o.ha == thaRight):
+  if maxW > 0.0 and not distributed and
+      (o.ha == thaCenter or o.ha == thaRight):
+    # Box-relative alignment for lines the assembly did not
+    # distribute (assembly centers/ends in the width itself when it
+    # distributes).
     for i in 0 ..< lay.lines.len:
       let xoff = if o.ha == thaCenter:
           (maxW - lay.lines[i].advance) * 0.5
