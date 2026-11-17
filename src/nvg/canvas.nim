@@ -1007,44 +1007,11 @@ proc assembleSpanLine(font: TextFont, px: float64,
   ## shaped the glyph). `justifyExtra` adds fractional pen at each
   ## word boundary crossed; `glyphExtra` opens a gap before every
   ## spread slot instead (see `isSpreadSlot`; the two never combine).
-  result = ShapedLine(glyphs: @[], advance: 0.0)
-  var concat = ""
-  if glyphExtra != 0.0:
-    for pc in items:
-      concat.add(pc.text)
-  var pen = 0.0
-  var byteOff = 0
-  var curWord = -2
-  for pc in items:
-    if pc.word >= 0 and pc.word != curWord:
-      if curWord != -2:
-        pen += justifyExtra
-      curWord = pc.word
-    let sh = shapeSpanPiece(font, px, spans, pc.span, pc.text,
-      letterSpacing, features, cache, fallbacks)
-    for g in sh.glyphs:
-      var gg = g
-      gg.cluster += uint32(byteOff)
-      if glyphExtra != 0.0 and result.glyphs.len > 0 and
-          isSpreadSlot(concat, result.glyphs[^1], gg):
-        pen += glyphExtra
-      gg.x += pen
-      if gg.hasInk:
-        gg.x0 += pen
-        gg.x1 += pen
-      if pc.span >= 0:
-        let (f, _) = spanFontSize(spans, pc.span, font, px)
-        if f != font and gg.font == nil:
-          gg.font = f
-        if spans[pc.span].size > 0.0:
-          gg.size = spans[pc.span].size
-        gg.hasColor = spans[pc.span].hasColor
-        gg.color = spans[pc.span].color
-        gg.decor = spans[pc.span].decor
-      result.glyphs.add(gg)
-    pen += sh.advance
-    byteOff += pc.text.len
-  result.advance = pen
+  ## Delegates to `assembleSpans`: mixed-direction lines come out in
+  ## visual order with logical clusters (single LTR lines keep the
+  ## logical path, identical output).
+  assembleSpans(font, px, items, spans, letterSpacing, features,
+    cache, fallbacks, justifyExtra, glyphExtra)
 
 proc breakSpanPiece(font: TextFont, px: float64,
     spans: openArray[TextSpan], pcs: openArray[SpanPiece], room: float64,

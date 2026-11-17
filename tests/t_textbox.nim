@@ -719,3 +719,126 @@ test "bidi ink and hit-testing follow the visual line":
   check close(caretAtByte(lay.lines[0], 2), 40.0) # aleph follows it
   check close(caretAtByte(lay.lines[0], 0), 0.0) # A sits first
   check close(caretAtByte(lay.lines[0], 6), 50.0) # past the end
+
+test "spans follow visual order with logical clusters":
+  let font = loadFontBytes(buildTestFont())
+  # "AB" + aleph + bet: 12 + 14 + 10 + 14 = 50. The span covers
+  # B (bytes 1..2); styles ride the visual glyphs.
+  let spans = [TextSpan(first: 1, last: 2, hasColor: true,
+    color: rgbf(1, 0, 0))]
+  let lay = layoutSpans(font, 20.0, "AB\xD7\x90\xD7\x91", spans)
+  let ln = lay.lines[0]
+  check ln.advance == 50.0
+  check ln.glyphs.len == 4
+  check ln.glyphs[0].gid == 1u32
+  check ln.glyphs[0].cluster == 0u32
+  check not ln.glyphs[0].hasColor
+  check ln.glyphs[1].gid == 2u32
+  check ln.glyphs[1].cluster == 1u32
+  check ln.glyphs[1].hasColor
+  check close(ln.glyphs[1].x, 12.0)
+  check ln.glyphs[2].gid == 4u32 # bet before aleph visually
+  check ln.glyphs[2].cluster == 4u32
+  check not ln.glyphs[2].hasColor
+  check close(ln.glyphs[2].x, 26.0)
+  check ln.glyphs[3].gid == 3u32
+  check ln.glyphs[3].cluster == 2u32
+  check close(ln.glyphs[3].x, 40.0)
+
+test "span split inside an RTL run reverses":
+  let font = loadFontBytes(buildTestFont())
+  # Single odd-level run: the span split must still emit visually
+  # (bet first), not in logical piece order.
+  let spans = [TextSpan(first: 0, last: 2, hasColor: true,
+    color: rgbf(1, 0, 0))]
+  let lay = layoutSpans(font, 20.0, "\xD7\x90\xD7\x91", spans)
+  let ln = lay.lines[0]
+  check ln.advance == 24.0
+  check ln.glyphs.len == 2
+  check ln.glyphs[0].gid == 4u32
+  check ln.glyphs[0].cluster == 2u32
+  check not ln.glyphs[0].hasColor
+  check close(ln.glyphs[0].x, 0.0)
+  check ln.glyphs[1].gid == 3u32
+  check ln.glyphs[1].cluster == 0u32
+  check ln.glyphs[1].hasColor
+  check close(ln.glyphs[1].x, 14.0)
+
+test "spans carry size across a direction boundary":
+  let font = loadFontBytes(buildTestFont())
+  # "A" + aleph with the aleph at 30px: 12 + 15 = 27.
+  let spans = [TextSpan(first: 1, last: 3, size: 30.0)]
+  let lay = layoutSpans(font, 20.0, "A\xD7\x90", spans)
+  let ln = lay.lines[0]
+  check ln.advance == 27.0
+  check ln.glyphs.len == 2
+  check ln.glyphs[0].gid == 1u32
+  check ln.glyphs[0].size == 0.0
+  check ln.glyphs[1].gid == 3u32
+  check ln.glyphs[1].cluster == 1u32
+  check ln.glyphs[1].size == 30.0
+  check close(ln.glyphs[1].x, 12.0)
+  # RTL paragraph: the trailing Latin "A" (bytes 2..3) draws first
+  # and keeps its span color.
+  let spansR = [TextSpan(first: 2, last: 3, hasColor: true,
+    color: rgbf(1, 0, 0))]
+  let layR = layoutSpans(font, 20.0, "\xD7\x90A", spansR)
+  check layR.lines[0].advance == 22.0
+  check layR.lines[0].glyphs[0].gid == 1u32
+  check layR.lines[0].glyphs[0].cluster == 2u32
+  check layR.lines[0].glyphs[0].hasColor
+  check layR.lines[0].glyphs[1].gid == 3u32
+  check layR.lines[0].glyphs[1].cluster == 0u32
+  check not layR.lines[0].glyphs[1].hasColor
+
+test "unspanned span layout matches plain visual order":
+  let font = loadFontBytes(buildTestFont())
+  let plain = layoutText(font, 20.0, "AB\xD7\x90\xD7\x91")
+  let lay = layoutSpans(font, 20.0, "AB\xD7\x90\xD7\x91", [])
+  check lay.lines[0].advance == plain.lines[0].advance
+  check lay.lines[0].glyphs.len == plain.lines[0].glyphs.len
+  for i in 0 ..< plain.lines[0].glyphs.len:
+    check lay.lines[0].glyphs[i].gid == plain.lines[0].glyphs[i].gid
+    check lay.lines[0].glyphs[i].cluster ==
+      plain.lines[0].glyphs[i].cluster
+    check close(lay.lines[0].glyphs[i].x, plain.lines[0].glyphs[i].x)
+  let h = hitTest(lay, 30.0, 0.0)
+  check h.byteIndex == 4 # visual bet, logical offset
+
+test "span box lays out mixed lines in visual order":
+  let font = loadFontBytes(buildTestFont())
+  # "B" + space(.notdef 10) + aleph(10) = 34; the span covers the
+  # aleph (bytes 2..4).
+  let spans = [TextSpan(first: 2, last: 4, hasColor: true,
+    color: rgbf(1, 0, 0))]
+  var o = TextBoxOpts(maxW: 200, boxH: 40, va: tvaBaseline)
+  let bl = layoutBoxSpans(font, 20.0, "B \xD7\x90", spans, 0.0, 1.2,
+    0.0, o, [], [])
+  check bl.lay.lines[0].advance == 34.0
+  check bl.lay.lines[0].glyphs.len == 3
+  check bl.lay.lines[0].glyphs[0].gid == 2u32
+  check bl.lay.lines[0].glyphs[1].cluster == 1u32
+  check bl.lay.lines[0].glyphs[2].gid == 3u32
+  check bl.lay.lines[0].glyphs[2].cluster == 2u32
+  check bl.lay.lines[0].glyphs[2].hasColor
+  check close(bl.lay.lines[0].glyphs[2].x, 24.0)
+  let c = testCanvas()
+  discard c.fillSpanBox(font, 20.0, 10, 30, "B \xD7\x90", spans, o)
+  let bPx = c.surface.getPixel(11, 29)
+  check bPx.r < 0.1 and bPx.g < 0.1 and bPx.b < 0.1 # B layout-black
+  let hPx = c.surface.getPixel(35, 29)
+  check hPx.r > 0.9 and hPx.g < 0.1 # aleph span-red ink 34..38
+
+test "span justify spreads a bidi line to the box":
+  let font = loadFontBytes(buildTestFont())
+  # "A" + space(10) + aleph@30(15) = 37 natural; the single gap
+  # takes 5 and the Hebrew chunk rides it.
+  let spans = [TextSpan(first: 2, last: 4, size: 30.0)]
+  var o = TextBoxOpts(maxW: 42, ha: thaJustify)
+  let bl = layoutBoxSpans(font, 20.0, "A \xD7\x90", spans, 0.0, 1.2,
+    0.0, o, [], [])
+  check bl.lay.lines[0].advance == 42.0
+  check bl.lay.lines[0].glyphs.len == 3
+  check bl.lay.lines[0].glyphs[2].size == 30.0
+  check bl.lay.lines[0].glyphs[2].cluster == 2u32
+  check close(bl.lay.lines[0].glyphs[2].x, 27.0)

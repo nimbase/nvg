@@ -29,8 +29,10 @@
 ##   visual order via harfnim's `visualRuns` (bdAuto): each run shapes
 ##   with its explicit direction and clusters map back to logical
 ##   source offsets, so hit-testing reports logical positions.
-##   Rich-span lines still shape in logical order (span x bidi is
-##   deferred). Outside a box justify anchors like left.
+##   Rich-span lines lay out in visual order too (see
+##   `assembleSpans`): each run x span intersection shapes with its
+##   run direction and span style. Outside a box justify anchors like
+##   left.
 ## - Line height is either a font-size multiplier or an absolute px
 ##   value (`lineHeightAbs`); the two are kept distinct, absolute wins.
 ##   Span lines with mixed sizes stack variable per-line boxes: each
@@ -590,6 +592,191 @@ proc shapeVisual*(font: TextFont, sizePx: float64, line: string,
     prevAdv = sh.advance > 0.0
   result.advance = pen
 
+proc assembleSpans*(font: TextFont, px: float64,
+    segs: openArray[tuple[span: int, text: string, word: int]],
+    spans: openArray[TextSpan],
+    letterSpacing: float64, features: openArray[Feature],
+    cache: ShapeCache, fallbacks: openArray[TextFont],
+    justifyExtra = 0.0, glyphExtra = 0.0): ShapedLine =
+  ## Concatenate span-tagged pieces (`segs` in logical order; `span`
+  ## -1 = layout style, `word` -1 = gap) into one shaped line with
+  ## line-local clusters. Single LTR lines take the logical path
+  ## (identical output). Otherwise each `visualRuns` (bdAuto) run
+  ## shapes its logical substring with the run direction (the shaper
+  ## orders RTL runs visually), split further at span boundaries, so
+  ## mixed-direction lines come out in visual order while clusters
+  ## stay logical and glyphs keep their span style. LTR runs emit
+  ## segments forward, RTL runs reverse them; shaping never sees
+  ## visual-order text (that would double-reverse RTL runs and
+  ## strand marks). Odd runs take L4 mirrors via `mirroringFor`,
+  ## X9-removed codes stay excluded (except re-injected U+200C/U+200D
+  ## with single-owner forward expansion), and soft-hyphen lines keep
+  ## the logical path (shy x bidi is deferred). `justifyExtra` adds
+  ## pen at each word boundary crossed in emission order (every visual
+  ## word gap takes one share when words sit wholly in runs);
+  ## `glyphExtra` opens each spread slot the same way, testing both
+  ## orders so reversed RTL pairs still count while marks stay glued.
+  ## No letter spacing opens between segments (existing span
+  ## semantics, unlike `shapeVisual`'s inter-run spacing).
+  var starts = newSeq[int](segs.len + 1)
+  var concat = ""
+  for i, sg in segs:
+    concat.add(sg.text)
+    starts[i + 1] = starts[i] + sg.text.len
+  if concat.len == 0:
+    return ShapedLine(glyphs: @[], advance: 0.0)
+  let vt = visualRuns(concat, bdAuto)
+  let singleLtr = vt.runs.len == 1 and vt.runs[0].level mod 2 == 0 and
+    vt.text == concat
+  if "\u00AD" in concat or singleLtr:
+    result = ShapedLine(glyphs: @[], advance: 0.0)
+    var pen = 0.0
+    var curWord = -2
+    for i, sg in segs:
+      if sg.word >= 0 and sg.word != curWord:
+        if curWord != -2:
+          pen += justifyExtra
+        curWord = sg.word
+      let pf = if sg.span >= 0 and sg.span < spans.len and
+          spans[sg.span].font != nil: spans[sg.span].font else: font
+      let psz = if sg.span >= 0 and sg.span < spans.len and
+          spans[sg.span].size > 0.0: spans[sg.span].size else: px
+      let sh = shapeCached(pf, psz, sg.text, letterSpacing, features,
+        cache, fallbacks)
+      for g in sh.glyphs:
+        var gg = g
+        gg.cluster += uint32(starts[i])
+        if glyphExtra != 0.0 and result.glyphs.len > 0 and
+            isSpreadSlot(concat, result.glyphs[^1], gg):
+          pen += glyphExtra
+        gg.x += pen
+        if gg.hasInk:
+          gg.x0 += pen
+          gg.x1 += pen
+        if sg.span >= 0 and sg.span < spans.len:
+          if pf != font and gg.font == nil:
+            gg.font = pf
+          if spans[sg.span].size > 0.0:
+            gg.size = spans[sg.span].size
+          gg.hasColor = spans[sg.span].hasColor
+          gg.color = spans[sg.span].color
+          gg.decor = spans[sg.span].decor
+        result.glyphs.add(gg)
+      pen += sh.advance
+    result.advance = pen
+    return
+  var covered = newSeq[bool](concat.len)
+  for m in vt.map:
+    if m >= 0 and m < concat.len:
+      covered[m] = true
+  result = ShapedLine(glyphs: @[], advance: 0.0)
+  var pen = 0.0
+  var curWord = -2
+  for rn in vt.runs:
+    var lo = concat.len
+    var hi = -1
+    for b in rn.first ..< rn.last:
+      if b >= 0 and b < vt.map.len:
+        lo = min(lo, vt.map[b])
+        hi = max(hi, vt.map[b])
+    if hi < lo:
+      continue
+    while hi + 3 < concat.len:
+      let j = hi + 1
+      if uint8(concat[j]) == 0xE2u8 and
+          uint8(concat[j + 1]) == 0x80u8 and
+          (uint8(concat[j + 2]) == 0x8Cu8 or
+            uint8(concat[j + 2]) == 0x8Du8):
+        hi += 3
+      else:
+        break
+    let odd = rn.level mod 2 == 1
+    var order: seq[int] = @[]
+    for i in 0 ..< segs.len:
+      let a = max(lo, starts[i])
+      let b = min(hi + 1, starts[i + 1])
+      if a < b:
+        order.add(i)
+    if odd:
+      order.reverse()
+    for si in order:
+      let a = max(lo, starts[si])
+      let b = min(hi + 1, starts[si + 1])
+      if segs[si].word >= 0 and segs[si].word != curWord:
+        if curWord != -2:
+          pen += justifyExtra
+        curWord = segs[si].word
+      var sub = ""
+      var submap: seq[int] = @[]
+      var i = a
+      while i < b:
+        if i < 0 or i >= concat.len:
+          inc i
+          continue
+        if not covered[i]:
+          if i + 2 < b and uint8(concat[i]) == 0xE2u8 and
+              uint8(concat[i + 1]) == 0x80u8 and
+              (uint8(concat[i + 2]) == 0x8Cu8 or
+                uint8(concat[i + 2]) == 0x8Du8):
+            sub.add(concat[i ..< i + 3])
+            for k in 0 ..< 3:
+              submap.add(i + k)
+            i += 3
+          else:
+            inc i
+          continue
+        let b0 = uint8(concat[i])
+        var w = 1
+        if b0 >= 0xF0u8: w = 4
+        elif b0 >= 0xE0u8: w = 3
+        elif b0 >= 0xC2u8: w = 2
+        elif b0 >= 0x80u8 and b0 < 0xC0u8:
+          inc i
+          continue
+        var rep = concat[i ..< min(i + w, b)]
+        if odd:
+          let r = concat.runeAt(i)
+          let m = mirroringFor(uint32(r))
+          if m.isSome:
+            rep = $Rune(m.get)
+        sub.add(rep)
+        for k in 0 ..< rep.len:
+          submap.add(i + min(k, w - 1))
+        i += w
+      if sub.len == 0:
+        continue
+      let gsi = segs[si].span
+      let pf = if gsi >= 0 and gsi < spans.len and
+          spans[gsi].font != nil: spans[gsi].font else: font
+      let psz = if gsi >= 0 and gsi < spans.len and
+          spans[gsi].size > 0.0: spans[gsi].size else: px
+      let sh = shapeCached(pf, psz, sub, letterSpacing, features,
+        cache, fallbacks, rn.dir)
+      for g in sh.glyphs:
+        var gg = g
+        let vc = int(g.cluster)
+        if vc >= 0 and vc < submap.len:
+          gg.cluster = uint32(submap[vc])
+        if glyphExtra != 0.0 and result.glyphs.len > 0 and
+            (isSpreadSlot(concat, result.glyphs[^1], gg) or
+              isSpreadSlot(concat, gg, result.glyphs[^1])):
+          pen += glyphExtra
+        gg.x += pen
+        if gg.hasInk:
+          gg.x0 += pen
+          gg.x1 += pen
+        if gsi >= 0 and gsi < spans.len:
+          if pf != font and gg.font == nil:
+            gg.font = pf
+          if spans[gsi].size > 0.0:
+            gg.size = spans[gsi].size
+          gg.hasColor = spans[gsi].hasColor
+          gg.color = spans[gsi].color
+          gg.decor = spans[gsi].decor
+        result.glyphs.add(gg)
+      pen += sh.advance
+  result.advance = pen
+
 proc lineY*(lay: TextLayout, i: int): float64 =
   ## Baseline y of line `i`, relative to the first baseline.
   ## Prefers `lineYs`; falls back to `i * lineHeightPx`.
@@ -685,8 +872,9 @@ proc layoutSpans*(font: TextFont, sizePx: float64, s: string,
   ## and decorations. Unspanned bytes use the layout font/size/paint.
   ## Ranges index `s` after `\r\n`/`\r` normalization to `\n`.
   ## Clusters stay line-local; glyphs carry their span style. Span
-  ## lines shape in logical order (span x bidi is deferred; see
-  ## `shapeVisual` for the plain path). Lines
+  ## lines lay out in visual order (see `assembleSpans`): each run x
+  ## span intersection shapes with its run direction and span style,
+  ## clusters stay logical. Lines
   ## with larger spans stand taller (see `spanBaselines`); an
   ## absolute line height stays uniform.
   let src = s.replace("\r\n", "\n").replace("\r", "\n")
@@ -698,8 +886,9 @@ proc layoutSpans*(font: TextFont, sizePx: float64, s: string,
   let cache = newShapeCache()
   var lineStart = 0
   for para in splitTextLines(src):
-    var shaped = ShapedLine(glyphs: @[], advance: 0.0)
-    if para.len > 0:
+    if para.len == 0:
+      result.lines.add(ShapedLine(glyphs: @[], advance: 0.0))
+    else:
       var edges: seq[int] = @[0, para.len]
       for sp in spans:
         let a = clamp(sp.first - lineStart, 0, para.len)
@@ -708,40 +897,17 @@ proc layoutSpans*(font: TextFont, sizePx: float64, s: string,
           edges.add(a)
           edges.add(b)
       edges.sort(system.cmp)
-      var pen = 0.0
+      var segs: seq[tuple[span: int, text: string, word: int]] = @[]
       var prev = -1
       for e in edges:
         if e == prev:
           continue
         if prev >= 0:
-          let si = spanAt(spans, lineStart + prev)
-          let sub = para[prev ..< e]
-          let pf = if si >= 0 and spans[si].font != nil:
-              spans[si].font else: font
-          let psz = if si >= 0 and spans[si].size > 0.0:
-              spans[si].size else: px
-          let sh = shapeCached(pf, psz, sub, letterSpacing, features,
-            cache, fallbacks)
-          for g in sh.glyphs:
-            var gg = g
-            gg.x += pen
-            if gg.hasInk:
-              gg.x0 += pen
-              gg.x1 += pen
-            gg.cluster += uint32(prev)
-            if si >= 0:
-              if pf != font and gg.font == nil:
-                gg.font = pf
-              if spans[si].size > 0.0:
-                gg.size = spans[si].size
-              gg.hasColor = spans[si].hasColor
-              gg.color = spans[si].color
-              gg.decor = spans[si].decor
-            shaped.glyphs.add(gg)
-          pen += sh.advance
+          segs.add((spanAt(spans, lineStart + prev),
+            para[prev ..< e], -1))
         prev = e
-      shaped.advance = pen
-    result.lines.add(shaped)
+      result.lines.add(assembleSpans(font, px, segs, spans,
+        letterSpacing, features, cache, fallbacks))
     lineStart += para.len + 1
   result.lineYs = spanBaselines(result.lines, px, lineHeightMul,
     lineHeightAbs)
