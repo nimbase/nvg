@@ -13,10 +13,15 @@
 
 
 ## Features
+- CPU and GPU rendering: a scalar rasterizer, an opt-in JIT backend,
+  and a Metal GPU backend — pixel-identical output on every backend
 - Draw with a simple canvas: shapes, fills, strokes, transparency
 - Smooth edges everywhere through supersampled antialiasing
 - Gradients (linear, radial, box — with as many color stops as you like),
   image patterns, solid colors
+- Mipmapped image sampling, so minified images stay smooth instead of
+  aliasing
+- SVG image loading straight into pattern paints
 - Flexible strokes: round/square caps, miter/bevel/round joins, dashed lines
 - Two fill rules (even-odd, nonzero winding) for holes and overlaps
 - 26 blend modes: Porter-Duff plus the full CSS mix-blend set
@@ -24,6 +29,10 @@
 - Stars, polygons, rounded corners, plus measuring/splitting paths
 - Text rendering: harfnim shaping (kerning, ligatures, Arabic joining,
   RTL) with glyph outlines as fills and strokes, multiline + alignment
+- Flexbox-style text rows: inline images, paths and rectangles that
+  align to the text (baseline, center, top, bottom, stretch), with
+  row justification, gaps and growth — including the footer-icon
+  pattern, no hand-positioning needed
 - An opt-in JIT backend that renders pixel-identical output, faster
 - PNG export with zero dependencies (pure-Nim encoder)
 - Image file loading: PNG, JPEG, BMP, GIF, QOI, PNM, TGA decode into
@@ -64,12 +73,17 @@ destroyJitBackend(c.backend.JitBackend)
 - [x] Mask and layer compositing primitives
 - [x] Stars, polygons, path measurement and splitting
 - [x] JIT backend, pixel-identical to scalar
+- [x] Metal GPU backend (needs hosted-GPU verification)
+- [x] Mipmapped image minification
 - [x] All 26 blend modes on the JIT fast path (separable + non-separable)
 - [x] PNG export without dependencies
 - [x] Text rendering (shaping + glyph outlines, multiline + align)
+- [x] Flex row lines (justify, gap, grow, item alignment)
+- [x] Inline replaced boxes (image/path spans aligned to text ink)
 - [x] Bilinear and multi-stop paints on the JIT fast path
 - [ ] AArch64 kernel execution sign-off
 - [x] Image file loading API
+- [ ] SVG image loading
 
 ### ❤ Contributions & Support
 - 🐛 Found a bug? [Create a new Issue](https://github.com/nimbase/nvg-nim/issues)
