@@ -4,14 +4,23 @@ Each file is a standalone program that renders a PNG into `examples/out/`
 (override with an argument: `nim c -r examples/basic.nim /tmp/shots`).
 
 Run them all (sh):
-  for f in examples/*.nim; do nim c -r "$f"; done
+```
+for f in examples/*.nim; do nim c -r "$f"; done
+```
 The JIT examples define nvgJit via examples/config.nims (others must NOT
 pass it):
-  nim c -r -d:nvgJit examples/jit.nim
+```
+nim c -r -d:nvgJit examples/jit.nim
+```
 The text example needs a font file (or TEXT_FONT set), and forces JIT:
-  nim c -r examples/text.nim -- /path/to/font.ttf
-The gpu example needs a font file too, and forces the Metal backend:
-  nim c -r examples/gpu.nim -- /path/to/font.ttf
+```
+nim c -r examples/text.nim -- /path/to/font.ttf
+```
+
+The gpu example needs a font file too, and forces the Metal backend
+```
+nim c -r examples/gpu.nim -- /path/to/font.ttf
+```
 
 | file            | shows                                              |
 |-----------------|----------------------------------------------------|
