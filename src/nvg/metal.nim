@@ -53,6 +53,12 @@ const
   MSlotShadeMulti* = 11
   MSlotUnsharp* = 12
   MSlotMosaic* = 13
+  MSlotNoiseMono* = 14
+  MSlotNoiseColor* = 15
+  MSlotRipple* = 16
+  MSlotSwirl* = 17
+  MSlotTurb* = 18
+  MSlotWarp* = 19
 
 const solidMsl* = """
 #include <metal_stdlib>
@@ -853,6 +859,242 @@ type SharpParams* = object
   ## Must match MSL `SharpP` layout (4 bytes).
   amount*: cfloat
 
+const grainMsl* = """
+#include <metal_stdlib>
+using namespace metal;
+// Deterministic lattice hash mirroring scalar `hashPixel`: uint32
+// wraparound throughout (MSL unsigned overflow and signed->unsigned
+// conversion both wrap mod 2^32, matching Nim's bit-preserving
+// cast), so both backends compute the same bits. Stateless and
+// position-only: each thread owns its pixel.
+uint hashPixel(int xi, int yi, uint seed, uint salt) {
+  uint h = uint(xi) * 374761393u + uint(yi) * 668265263u +
+      seed * 1442695041u + salt * 2246822519u;
+  h = (h ^ (h >> 13)) * 1274126177u;
+  return h ^ (h >> 16);
+}
+// Uniform map mirroring scalar `noiseDelta`: top 16 hash bits,
+// multiply-shift into [-a, +a] (product fits 32 bits, no wrap).
+int noiseMap(uint h, int a) {
+  return int(((h >> 16) * uint(2 * a + 1)) >> 16) - a;
+}
+struct NoiseP { int amp; uint seed; int mode; };
+kernel void noise_mono(device uchar4 *io [[buffer(0)]],
+                       constant NoiseP &u [[buffer(1)]],
+                       constant uint2 &dims [[buffer(2)]],
+                       uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= dims.x || gid.y >= dims.y) return;
+  int a = u.amp;
+  int d;
+  if (u.mode == 0) {
+    d = noiseMap(hashPixel(int(gid.x), int(gid.y), u.seed, 0u), a);
+  } else {
+    int u0 = noiseMap(hashPixel(int(gid.x), int(gid.y), u.seed, 0u), a) + a;
+    int u1 = noiseMap(hashPixel(int(gid.x), int(gid.y), u.seed, 1u), a) + a;
+    int u2 = noiseMap(hashPixel(int(gid.x), int(gid.y), u.seed, 2u), a) + a;
+    d = int(uint(u0 + u1 + u2 + 1) / 3u) - a;
+  }
+  uint i = gid.y * dims.x + gid.x;
+  uchar4 p = io[i];
+  int3 v = int3(p.r, p.g, p.b) + d;
+  io[i] = uchar4(uchar3(clamp(v, 0, 255)), p.a);
+}
+kernel void noise_color(device uchar4 *io [[buffer(0)]],
+                        constant NoiseP &u [[buffer(1)]],
+                        constant uint2 &dims [[buffer(2)]],
+                        uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= dims.x || gid.y >= dims.y) return;
+  int a = u.amp;
+  int d[3];
+  for (int c = 0; c < 3; c++) {
+    if (u.mode == 0) {
+      d[c] = noiseMap(hashPixel(int(gid.x), int(gid.y), u.seed,
+                                uint(c)), a);
+    } else {
+      int u0 = noiseMap(hashPixel(int(gid.x), int(gid.y), u.seed,
+                                  uint(c * 3)), a) + a;
+      int u1 = noiseMap(hashPixel(int(gid.x), int(gid.y), u.seed,
+                                  uint(c * 3 + 1)), a) + a;
+      int u2 = noiseMap(hashPixel(int(gid.x), int(gid.y), u.seed,
+                                  uint(c * 3 + 2)), a) + a;
+      d[c] = int(uint(u0 + u1 + u2 + 1) / 3u) - a;
+    }
+  }
+  uint i = gid.y * dims.x + gid.x;
+  uchar4 p = io[i];
+  int3 v = int3(p.r, p.g, p.b) + int3(d[0], d[1], d[2]);
+  io[i] = uchar4(uchar3(clamp(v, 0, 255)), p.a);
+}
+""";
+
+type NoiseParams* = object
+  ## Must match MSL `NoiseP` layout (12 bytes).
+  amp*: cint
+  seed*: cuint
+  mode*: cint
+
+const warpMsl* = """
+#include <metal_stdlib>
+using namespace metal;
+// Bilinear sampler mirroring scalar `sampleBilinearClamp`:
+// straight-space taps with clamp edges and the premultiplied
+// transparent guard. CPU uses float64, this uses float32, so warp
+// pairs agree within 1 LSB.
+float4 bilinClamp(device uchar4 *src, uint2 dims, float fx, float fy) {
+  int x0 = int(floor(fx));
+  int y0 = int(floor(fy));
+  float tx = clamp(fx - float(x0), 0.0, 1.0);
+  float ty = clamp(fy - float(y0), 0.0, 1.0);
+  float4 acc = float4(0.0);
+  for (int j = 0; j <= 1; j++) {
+    for (int i = 0; i <= 1; i++) {
+      int xi = clamp(x0 + i, 0, int(dims.x) - 1);
+      int yi = clamp(y0 + j, 0, int(dims.y) - 1);
+      float4 t = float4(src[uint(yi) * dims.x + uint(xi)]) *
+          (1.0 / 255.0);
+      float w = (i == 0 ? 1.0 - tx : tx) *
+                (j == 0 ? 1.0 - ty : ty);
+      acc += float4(t.rgb * t.a, t.a) * w;
+    }
+  }
+  if (acc.a > 1e-6) return float4(acc.rgb / acc.a, acc.a);
+  return float4(0.0);
+}
+struct RippleP { float amp; float period; float phase; float _p; };
+kernel void warp_ripple(device uchar4 *src [[buffer(0)]],
+                        constant RippleP &u [[buffer(1)]],
+                        constant uint2 &dims [[buffer(2)]],
+                        device uchar4 *tmp [[buffer(3)]],
+                        uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= dims.x || gid.y >= dims.y) return;
+  float k = 2.0 * 3.14159265 / u.period;
+  float sx = float(gid.x) + u.amp * sin(k * float(gid.y) + u.phase);
+  float sy = float(gid.y) + u.amp * sin(k * float(gid.x) + u.phase);
+  float4 c = bilinClamp(src, dims, sx, sy);
+  tmp[gid.y * dims.x + gid.x] = uchar4(saturate(c) * 255.0 + 0.5);
+}
+struct SwirlP { float cx; float cy; float radius; float angle; };
+kernel void warp_swirl(device uchar4 *src [[buffer(0)]],
+                       constant SwirlP &u [[buffer(1)]],
+                       constant uint2 &dims [[buffer(2)]],
+                       device uchar4 *tmp [[buffer(3)]],
+                       uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= dims.x || gid.y >= dims.y) return;
+  float dx = float(gid.x) - u.cx;
+  float dy = float(gid.y) - u.cy;
+  float d = sqrt(dx * dx + dy * dy);
+  uint i = gid.y * dims.x + gid.x;
+  if (d >= u.radius) {
+    tmp[i] = src[i];
+    return;
+  }
+  float t = u.angle * (1.0 - d / u.radius);
+  float c = cos(t);
+  float sn = sin(t);
+  float4 col = bilinClamp(src, dims, u.cx + dx * c + dy * sn,
+                          u.cy - dx * sn + dy * c);
+  tmp[i] = uchar4(saturate(col) * 255.0 + 0.5);
+}
+// Hashed value noise mirroring scalar `valueNoise`/`fbm`: lattice
+// bits are exactly representable in float32 (u24 / 2^24), but fBm
+// summation runs float32 here vs float64 on the CPU, so turbulence
+// pairs agree within 2 LSB.
+uint thash(int xi, int yi, uint seed, uint salt) {
+  uint h = uint(xi) * 374761393u + uint(yi) * 668265263u +
+      seed * 1442695041u + salt * 2246822519u;
+  h = (h ^ (h >> 13)) * 1274126177u;
+  return h ^ (h >> 16);
+}
+float latVal(int xi, int yi, uint seed) {
+  return float(thash(xi, yi, seed, 0u) >> 8) / 16777216.0;
+}
+float vfade(float t) {
+  return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+float vnoise(float x, float y, uint seed) {
+  int xi = int(floor(x));
+  int yi = int(floor(y));
+  float xf = x - float(xi);
+  float yf = y - float(yi);
+  float u = vfade(xf);
+  float v = vfade(yf);
+  float a = latVal(xi, yi, seed);
+  float b = latVal(xi + 1, yi, seed);
+  float c = latVal(xi, yi + 1, seed);
+  float d = latVal(xi + 1, yi + 1, seed);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+float fbm(float x, float y, float freq, int oct, uint seed) {
+  float amp = 1.0;
+  float f = freq;
+  float sum = 0.0;
+  float norm = 0.0;
+  for (int o = 0; o < oct; o++) {
+    sum += amp * vnoise(x * f, y * f, seed);
+    norm += amp;
+    amp *= 0.5;
+    f *= 2.0;
+  }
+  return sum / norm;
+}
+struct TurbP { float freq; int oct; uint seed; int _p; };
+kernel void field_turb(device uchar4 *io [[buffer(0)]],
+                       constant TurbP &u [[buffer(1)]],
+                       constant uint2 &dims [[buffer(2)]],
+                       uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= dims.x || gid.y >= dims.y) return;
+  float n = fbm(float(gid.x), float(gid.y), u.freq, u.oct, u.seed);
+  uchar v = uchar(saturate(n) * 255.0 + 0.5);
+  uint i = gid.y * dims.x + gid.x;
+  uchar4 p = io[i];
+  io[i] = uchar4(v, v, v, p.a);
+}
+struct WarpP { float freq; float amp; int oct; uint seed; };
+kernel void warp_domain(device uchar4 *src [[buffer(0)]],
+                        constant WarpP &u [[buffer(1)]],
+                        constant uint2 &dims [[buffer(2)]],
+                        device uchar4 *tmp [[buffer(3)]],
+                        uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= dims.x || gid.y >= dims.y) return;
+  float nx = fbm(float(gid.x), float(gid.y), u.freq, u.oct, u.seed) -
+      0.5;
+  float ny = fbm(float(gid.x), float(gid.y), u.freq, u.oct,
+                 u.seed ^ 0x9E3779B9u) - 0.5;
+  float4 c = bilinClamp(src, dims,
+      float(gid.x) + nx * 2.0 * u.amp,
+      float(gid.y) + ny * 2.0 * u.amp);
+  tmp[gid.y * dims.x + gid.x] = uchar4(saturate(c) * 255.0 + 0.5);
+}
+""";
+
+type RippleParams* = object
+  ## Must match MSL `RippleP` layout (16 bytes).
+  amp*: cfloat
+  period*: cfloat
+  phase*: cfloat
+  pad*: cfloat
+
+type SwirlParams* = object
+  ## Must match MSL `SwirlP` layout (16 bytes).
+  cx*: cfloat
+  cy*: cfloat
+  radius*: cfloat
+  angle*: cfloat
+
+type TurbParams* = object
+  ## Must match MSL `TurbP` layout (16 bytes).
+  freq*: cfloat
+  oct*: cint
+  seed*: cuint
+  pad*: cint
+
+type WarpParams* = object
+  ## Must match MSL `WarpP` layout (16 bytes).
+  freq*: cfloat
+  amp*: cfloat
+  oct*: cint
+  seed*: cuint
+
 const patternBilinearMsl* = """
 #include <metal_stdlib>
 using namespace metal;
@@ -925,6 +1167,11 @@ static:
   doAssert sizeof(BlurParams) == 4
   doAssert sizeof(MosParams) == 4
   doAssert sizeof(SharpParams) == 4
+  doAssert sizeof(NoiseParams) == 12
+  doAssert sizeof(RippleParams) == 16
+  doAssert sizeof(SwirlParams) == 16
+  doAssert sizeof(TurbParams) == 16
+  doAssert sizeof(WarpParams) == 16
 
 when defined(macosx):
   proc nvgmtl_device_count(): cint {.importc.}
@@ -984,6 +1231,12 @@ proc newMetalCtx*(w, h: int): MetalCtx =
         "fill_pattern_bilinear")
       result.buildSlot(MSlotUnsharp, fxMsl, "unsharp")
       result.buildSlot(MSlotMosaic, fxMsl, "mosaic_avg")
+      result.buildSlot(MSlotNoiseMono, grainMsl, "noise_mono")
+      result.buildSlot(MSlotNoiseColor, grainMsl, "noise_color")
+      result.buildSlot(MSlotRipple, warpMsl, "warp_ripple")
+      result.buildSlot(MSlotSwirl, warpMsl, "warp_swirl")
+      result.buildSlot(MSlotTurb, warpMsl, "field_turb")
+      result.buildSlot(MSlotWarp, warpMsl, "warp_domain")
     except IOError:
       nvgmtl_destroy(p)
       result.p = nil
@@ -1171,6 +1424,79 @@ proc mosaic*(ctx: MetalCtx, cell: int) =
     if cell <= 1: return
     var u = MosParams(cell: cint(cell))
     nvgmtl_fill(ctx.p, cint(MSlotMosaic), addr u, cint(sizeof(u)))
+    nvgmtl_copy(ctx.p, 0, 1)
+
+proc monoNoise*(ctx: MetalCtx, amount: float64, seed: uint32 = 0,
+    kind: NoiseKind = nkUniform) =
+  ## Monochrome grain mirroring scalar `monoNoise`: per-pixel integer
+  ## delta from the lattice hash, same channel shift. Integer math,
+  ## so byte-identical to the CPU. Non-positive `amount` is a no-op.
+  when defined(macosx):
+    let a = noiseAmp(amount)
+    if a <= 0: return
+    let mode = if kind == nkUniform: 0 else: 1
+    var u = NoiseParams(amp: cint(a), seed: cuint(seed),
+      mode: cint(mode))
+    nvgmtl_fill(ctx.p, cint(MSlotNoiseMono), addr u, cint(sizeof(u)))
+
+proc colorNoise*(ctx: MetalCtx, amount: float64, seed: uint32 = 0,
+    kind: NoiseKind = nkUniform) =
+  ## Chromatic grain mirroring scalar `colorNoise`: independent hash
+  ## streams per channel. Integer math, so byte-identical to the CPU.
+  ## Non-positive `amount` is a no-op.
+  when defined(macosx):
+    let a = noiseAmp(amount)
+    if a <= 0: return
+    let mode = if kind == nkUniform: 0 else: 1
+    var u = NoiseParams(amp: cint(a), seed: cuint(seed),
+      mode: cint(mode))
+    nvgmtl_fill(ctx.p, cint(MSlotNoiseColor), addr u, cint(sizeof(u)))
+
+proc ripple*(ctx: MetalCtx, amp, period: float64, phase = 0.0) =
+  ## Sine displacement mirroring scalar `ripple`: the kernel reads
+  ## pixels and writes aux, then the caller copies aux back. float32
+  ## trig and sampling, so the pair agrees within 1 LSB.
+  ## Non-positive `amp` or `period` is a no-op.
+  when defined(macosx):
+    if amp <= 0.0 or period <= 0.0: return
+    var u = RippleParams(amp: cfloat(amp), period: cfloat(period),
+      phase: cfloat(phase), pad: 0)
+    nvgmtl_fill(ctx.p, cint(MSlotRipple), addr u, cint(sizeof(u)))
+    nvgmtl_copy(ctx.p, 0, 1)
+
+proc swirl*(ctx: MetalCtx, cx, cy, radius, angle: float64) =
+  ## Rotation warp mirroring scalar `swirl`: reads pixels, writes
+  ## aux, copies back. float32 math, so the pair agrees within
+  ## 1 LSB. Zero `angle` or non-positive `radius` is a no-op.
+  when defined(macosx):
+    if angle == 0.0 or radius <= 0.0: return
+    var u = SwirlParams(cx: cfloat(cx), cy: cfloat(cy),
+      radius: cfloat(radius), angle: cfloat(angle))
+    nvgmtl_fill(ctx.p, cint(MSlotSwirl), addr u, cint(sizeof(u)))
+    nvgmtl_copy(ctx.p, 0, 1)
+
+proc turbulence*(ctx: MetalCtx, scale: float64, octaves = 4,
+    seed: uint32 = 0) =
+  ## fBm field mirroring scalar `turbulence`: in-place RGB write,
+  ## alpha preserved. float32 fBm summation, so the pair agrees
+  ## within 2 LSB. Non-positive `scale` is a no-op.
+  when defined(macosx):
+    if scale <= 0.0: return
+    var u = TurbParams(freq: cfloat(1.0 / scale),
+      oct: cint(clamp(octaves, 1, 8)), seed: cuint(seed), pad: 0)
+    nvgmtl_fill(ctx.p, cint(MSlotTurb), addr u, cint(sizeof(u)))
+
+proc domainWarp*(ctx: MetalCtx, scale, warpAmp: float64,
+    octaves = 4, seed: uint32 = 0) =
+  ## Turbulent displacement mirroring scalar `domainWarp`: reads
+  ## pixels, writes aux, copies back. float32 math, so the pair
+  ## agrees within 2 LSB. Non-positive `scale`/`warpAmp` is a no-op.
+  when defined(macosx):
+    if scale <= 0.0 or warpAmp <= 0.0: return
+    var u = WarpParams(freq: cfloat(1.0 / scale),
+      amp: cfloat(warpAmp), oct: cint(clamp(octaves, 1, 8)),
+      seed: cuint(seed))
+    nvgmtl_fill(ctx.p, cint(MSlotWarp), addr u, cint(sizeof(u)))
     nvgmtl_copy(ctx.p, 0, 1)
 
 proc compBlend*(ctx: MetalCtx, op: CompOp, r, g, b, a,

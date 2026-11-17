@@ -907,3 +907,324 @@ test "compute bilinear pattern matches cpu within 1 lsb":
         check maxDiff <= 1
   else:
     skip()
+
+test "cpu mono noise hand computed":
+  # Amount 0.004 quantizes to A = 1. hashPixel(0, 0, seed 0, salt 0)
+  # is 0 (all terms zero, xorshift of 0 stays 0), so the uniform delta
+  # there is 0 - 1 = -1: flat 100 drops to 99 on every channel.
+  var s = newSurface(3, 3)
+  s.clear(rgb(100, 100, 100))
+  s.monoNoise(0.004, 0)
+  check s.getPixel(0, 0).toRgba8() == (99u8, 99u8, 99u8, 255u8)
+  for y in 0 ..< 3:
+    for x in 0 ..< 3:
+      let (r, g, b, a) = s.getPixel(x, y).toRgba8()
+      check r == g
+      check g == b
+      check a == 255u8
+      check r >= 99u8 and r <= 101u8
+  var w = newSurface(1, 1)
+  w.clear(rgb(255, 255, 255))
+  w.monoNoise(0.004, 0)
+  check w.getPixel(0, 0).toRgba8() == (254u8, 254u8, 254u8, 255u8)
+  var b = newSurface(1, 1)
+  b.clear(rgb(0, 0, 0))
+  b.monoNoise(0.004, 0)
+  check b.getPixel(0, 0).toRgba8() == (0u8, 0u8, 0u8, 255u8)
+  var t = newSurface(2, 2)
+  t.clear(rgbaf(0.5, 0.5, 0.5, 0.5))
+  t.monoNoise(0.2, 7)
+  for y in 0 ..< 2:
+    for x in 0 ..< 2:
+      check t.getPixel(x, y).toRgba8()[3] == 128u8
+  var noop = newSurface(2, 2)
+  noop.clear(rgb(100, 100, 100))
+  noop.monoNoise(0.0, 0)
+  check noop.getPixel(1, 1).toRgba8() == (100u8, 100u8, 100u8, 255u8)
+  var n1 = newSurface(4, 4)
+  n1.clear(rgb(100, 100, 100))
+  n1.monoNoise(0.1, 3)
+  var n2 = newSurface(4, 4)
+  n2.clear(rgb(100, 100, 100))
+  n2.monoNoise(0.1, 3)
+  check n1.pixels == n2.pixels
+  var n3 = newSurface(4, 4)
+  n3.clear(rgb(100, 100, 100))
+  n3.monoNoise(0.1, 4)
+  check n1.pixels != n3.pixels
+  var g = newSurface(4, 4)
+  g.clear(rgb(100, 100, 100))
+  g.monoNoise(0.1, 3, nkGaussian)
+  for y in 0 ..< 4:
+    for x in 0 ..< 4:
+      let (r, gg, bb, a) = g.getPixel(x, y).toRgba8()
+      check r == gg
+      check gg == bb
+      check a == 255u8
+      check abs(int(r) - 100) <= 26
+
+test "cpu color noise decorrelates channels":
+  var s = newSurface(4, 4)
+  s.clear(rgb(100, 100, 100))
+  s.colorNoise(0.1, 3)
+  var differs = false
+  for y in 0 ..< 4:
+    for x in 0 ..< 4:
+      let (r, g, b, a) = s.getPixel(x, y).toRgba8()
+      check a == 255u8
+      check abs(int(r) - 100) <= 26
+      check abs(int(g) - 100) <= 26
+      check abs(int(b) - 100) <= 26
+      if r != g or g != b:
+        differs = true
+  check differs
+  var t = newSurface(2, 2)
+  t.clear(rgbaf(0.5, 0.5, 0.5, 0.5))
+  t.colorNoise(0.2, 7, nkGaussian)
+  for y in 0 ..< 2:
+    for x in 0 ..< 2:
+      check t.getPixel(x, y).toRgba8()[3] == 128u8
+  var noop = newSurface(2, 2)
+  noop.clear(rgb(100, 100, 100))
+  noop.colorNoise(0.0, 0)
+  check noop.getPixel(0, 0).toRgba8() == (100u8, 100u8, 100u8, 255u8)
+
+test "compute noise is byte-identical to cpu":
+  when defined(macosx):
+    if not mtlAvailable():
+      skip()
+    const W = 9
+    const H = 7
+    var s = newSurface(W, H)
+    for y in 0 ..< H:
+      for x in 0 ..< W:
+        s.setPixel(x, y, rgbaf(float64((x * 37 + y * 91) mod 256) / 255.0,
+          float64((x * 53 + y * 29) mod 256) / 255.0,
+          float64((x * 11 + y * 71) mod 256) / 255.0,
+          float64((x * 17 + y * 13) mod 256) / 255.0))
+    var ctx = newMetalCtx(W, H)
+    defer: ctx.close()
+    for kind in [nkUniform, nkGaussian]:
+      for seed in [0u32, 7u32]:
+        var cpu = newSurface(W, H)
+        for i in 0 ..< s.pixels.len:
+          cpu.pixels[i] = s.pixels[i]
+        cpu.monoNoise(0.1, seed, kind)
+        ctx.upload(s.pixels)
+        ctx.monoNoise(0.1, seed, kind)
+        check ctx.readback() == cpu.pixels
+        for i in 0 ..< s.pixels.len:
+          cpu.pixels[i] = s.pixels[i]
+        cpu.colorNoise(0.1, seed, kind)
+        ctx.upload(s.pixels)
+        ctx.colorNoise(0.1, seed, kind)
+        check ctx.readback() == cpu.pixels
+  else:
+    skip()
+
+test "cpu ripple hand computed":
+  # White dot at (2, 2) on 5x5 black, amp 1, period 4, phase 0:
+  # sin(2*pi*[x|y]/4) is 0, 1, 0, -1 down each axis. Pixel (1, 1)
+  # samples (1 + 1, 1 + 1) = (2, 2); (3, 3) samples (3 - 1, 3 - 1)
+  # = (2, 2); (2, 2) samples itself (sin pi ~ 0). All three read
+  # the dot exactly (integer centers, no blending).
+  var s = newSurface(5, 5)
+  s.clear(rgb(0, 0, 0))
+  s.setPixel(2, 2, rgb(255, 255, 255))
+  s.ripple(1.0, 4.0)
+  check s.getPixel(1, 1).toRgba8() == (255u8, 255u8, 255u8, 255u8)
+  check s.getPixel(2, 2).toRgba8() == (255u8, 255u8, 255u8, 255u8)
+  check s.getPixel(3, 3).toRgba8() == (255u8, 255u8, 255u8, 255u8)
+  check s.getPixel(0, 0).toRgba8() == (0u8, 0u8, 0u8, 255u8)
+  check s.getPixel(2, 1).toRgba8() == (0u8, 0u8, 0u8, 255u8)
+  check s.getPixel(4, 4).toRgba8() == (0u8, 0u8, 0u8, 255u8)
+  var noop = newSurface(3, 3)
+  noop.clear(rgb(100, 100, 100))
+  noop.ripple(0.0, 4.0)
+  check noop.getPixel(1, 1).toRgba8() == (100u8, 100u8, 100u8, 255u8)
+  noop.ripple(1.0, 0.0)
+  check noop.getPixel(1, 1).toRgba8() == (100u8, 100u8, 100u8, 255u8)
+
+test "cpu swirl keeps center and outside":
+  var s = newSurface(5, 5)
+  s.clear(rgb(0, 0, 0))
+  s.setPixel(2, 2, rgb(255, 255, 255))
+  s.setPixel(0, 2, rgb(255, 255, 255))
+  s.setPixel(4, 0, rgb(255, 255, 255))
+  s.swirl(2.0, 2.0, 2.0, 1.0)
+  # Center maps to itself; d = 2 boundary and outside are exact
+  # copies; (2, 1) at d = 1 rotates half a radian and lands
+  # between pixels (strict gray).
+  check s.getPixel(2, 2).toRgba8() == (255u8, 255u8, 255u8, 255u8)
+  check s.getPixel(0, 2).toRgba8() == (255u8, 255u8, 255u8, 255u8)
+  check s.getPixel(4, 0).toRgba8() == (255u8, 255u8, 255u8, 255u8)
+  let v = s.getPixel(2, 1).toRgba8()[0]
+  check v > 0u8 and v < 255u8
+  var noop = newSurface(2, 2)
+  noop.clear(rgb(100, 100, 100))
+  noop.swirl(1.0, 1.0, 4.0, 0.0)
+  check noop.getPixel(0, 0).toRgba8() == (100u8, 100u8, 100u8, 255u8)
+  noop.swirl(1.0, 1.0, 0.0, 1.0)
+  check noop.getPixel(0, 0).toRgba8() == (100u8, 100u8, 100u8, 255u8)
+
+test "compute ripple and swirl match cpu within 1 lsb":
+  when defined(macosx):
+    if not mtlAvailable():
+      skip()
+    const W = 9
+    const H = 7
+    var s = newSurface(W, H)
+    for y in 0 ..< H:
+      for x in 0 ..< W:
+        s.setPixel(x, y, rgbaf(float64((x * 37 + y * 91) mod 256) / 255.0,
+          float64((x * 53 + y * 29) mod 256) / 255.0,
+          float64((x * 11 + y * 71) mod 256) / 255.0,
+          float64((x * 17 + y * 13) mod 256) / 255.0))
+    var ctx = newMetalCtx(W, H)
+    defer: ctx.close()
+    for (amp, period, phase) in [(1.5, 4.0, 0.0), (2.0, 6.0, 0.7)]:
+      var cpu = newSurface(W, H)
+      for i in 0 ..< s.pixels.len:
+        cpu.pixels[i] = s.pixels[i]
+      cpu.ripple(amp, period, phase)
+      ctx.upload(s.pixels)
+      ctx.ripple(amp, period, phase)
+      let got = ctx.readback()
+      var maxDiff = 0
+      for i in 0 ..< got.len:
+        let d = abs(int(got[i]) - int(cpu.pixels[i]))
+        if d > maxDiff:
+          maxDiff = d
+      check maxDiff <= 1
+    for (cx, cy, radius, angle) in [(4.0, 3.0, 3.0, 1.0),
+        (2.0, 2.0, 5.0, -0.5)]:
+      var cpu = newSurface(W, H)
+      for i in 0 ..< s.pixels.len:
+        cpu.pixels[i] = s.pixels[i]
+      cpu.swirl(cx, cy, radius, angle)
+      ctx.upload(s.pixels)
+      ctx.swirl(cx, cy, radius, angle)
+      let got = ctx.readback()
+      var maxDiff = 0
+      for i in 0 ..< got.len:
+        let d = abs(int(got[i]) - int(cpu.pixels[i]))
+        if d > maxDiff:
+          maxDiff = d
+      check maxDiff <= 1
+  else:
+    skip()
+
+test "cpu turbulence is deterministic grayscale":
+  var s = newSurface(8, 8)
+  s.clear(rgbaf(0.2, 0.4, 0.6, 0.5))
+  s.turbulence(4.0, 3, 11)
+  for y in 0 ..< 8:
+    for x in 0 ..< 8:
+      let (r, g, b, a) = s.getPixel(x, y).toRgba8()
+      check r == g
+      check g == b
+      check a == 128u8
+  var again = newSurface(8, 8)
+  again.clear(rgbaf(0.2, 0.4, 0.6, 0.5))
+  again.turbulence(4.0, 3, 11)
+  check again.pixels == s.pixels
+  var other = newSurface(8, 8)
+  other.clear(rgbaf(0.2, 0.4, 0.6, 0.5))
+  other.turbulence(4.0, 3, 12)
+  check other.pixels != s.pixels
+  # fBm normalization holds over a sweep.
+  for y in countup(-8, 16, 4):
+    for x in countup(-8, 16, 4):
+      for oct in [1, 4, 8]:
+        let n = fbm(float64(x) + 0.25, float64(y) - 0.5, 0.25,
+          oct, 5)
+        check n >= 0.0 and n <= 1.0
+  var noop = newSurface(2, 2)
+  noop.clear(rgb(100, 100, 100))
+  noop.turbulence(0.0)
+  check noop.getPixel(0, 0).toRgba8() == (100u8, 100u8, 100u8, 255u8)
+
+test "cpu domain warp fixes flat images":
+  var flat = newSurface(8, 8)
+  flat.clear(rgb(100, 150, 200))
+  flat.domainWarp(4.0, 3.0)
+  for y in 0 ..< 8:
+    for x in 0 ..< 8:
+      check flat.getPixel(x, y).toRgba8() ==
+        (100u8, 150u8, 200u8, 255u8)
+  var s = newSurface(16, 16)
+  s.clear(rgb(0, 0, 0))
+  s.setPixel(8, 8, rgb(255, 255, 255))
+  s.domainWarp(4.0, 3.0, 4, 9)
+  # The dot's energy leaves the center: (7,7)/(8,7)/(7,8) go
+  # nonzero while (8,8) samples away from the dot.
+  var moved = false
+  for y in 0 ..< 16:
+    for x in 0 ..< 16:
+      if s.getPixel(x, y).toRgba8()[0] != 0u8:
+        if x != 8 or y != 8:
+          moved = true
+  check moved
+  check s.getPixel(8, 8).toRgba8()[0] == 0u8
+  var a = newSurface(8, 8)
+  a.clear(rgbaf(0.2, 0.4, 0.6, 0.5))
+  a.domainWarp(4.0, 3.0, 4, 9)
+  var b2 = newSurface(8, 8)
+  b2.clear(rgbaf(0.2, 0.4, 0.6, 0.5))
+  b2.domainWarp(4.0, 3.0, 4, 9)
+  check a.pixels == b2.pixels
+  for y in 0 ..< 8:
+    for x in 0 ..< 8:
+      check a.getPixel(x, y).toRgba8()[3] == 128u8
+  var noop = newSurface(2, 2)
+  noop.clear(rgb(100, 100, 100))
+  noop.domainWarp(4.0, 0.0)
+  check noop.getPixel(0, 0).toRgba8() == (100u8, 100u8, 100u8, 255u8)
+  noop.domainWarp(0.0, 3.0)
+  check noop.getPixel(0, 0).toRgba8() == (100u8, 100u8, 100u8, 255u8)
+
+test "compute turbulence and warp match cpu within 2 lsb":
+  when defined(macosx):
+    if not mtlAvailable():
+      skip()
+    const W = 9
+    const H = 7
+    var s = newSurface(W, H)
+    for y in 0 ..< H:
+      for x in 0 ..< W:
+        s.setPixel(x, y, rgbaf(float64((x * 37 + y * 91) mod 256) / 255.0,
+          float64((x * 53 + y * 29) mod 256) / 255.0,
+          float64((x * 11 + y * 71) mod 256) / 255.0,
+          float64((x * 17 + y * 13) mod 256) / 255.0))
+    var ctx = newMetalCtx(W, H)
+    defer: ctx.close()
+    for (scale, oct, seed) in [(4.0, 3, 11u32), (2.5, 5, 3u32)]:
+      var cpu = newSurface(W, H)
+      for i in 0 ..< s.pixels.len:
+        cpu.pixels[i] = s.pixels[i]
+      cpu.turbulence(scale, oct, seed)
+      ctx.upload(s.pixels)
+      ctx.turbulence(scale, oct, seed)
+      let got = ctx.readback()
+      var maxDiff = 0
+      for i in 0 ..< got.len:
+        let d = abs(int(got[i]) - int(cpu.pixels[i]))
+        if d > maxDiff:
+          maxDiff = d
+      check maxDiff <= 2
+    for (scale, amp, seed) in [(4.0, 2.0, 9u32), (8.0, 1.5, 1u32)]:
+      var cpu = newSurface(W, H)
+      for i in 0 ..< s.pixels.len:
+        cpu.pixels[i] = s.pixels[i]
+      cpu.domainWarp(scale, amp, 4, seed)
+      ctx.upload(s.pixels)
+      ctx.domainWarp(scale, amp, 4, seed)
+      let got = ctx.readback()
+      var maxDiff = 0
+      for i in 0 ..< got.len:
+        let d = abs(int(got[i]) - int(cpu.pixels[i]))
+        if d > maxDiff:
+          maxDiff = d
+      check maxDiff <= 2
+  else:
+    skip()

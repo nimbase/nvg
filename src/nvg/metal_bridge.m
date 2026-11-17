@@ -2,7 +2,7 @@
 // work when the host build does not enable ARC.
 // NOTE: Nim only tracks this file's mtime for rebuilds, not the header's;
 // touch this file after changing metal_bridge.h (e.g. NVGMTL_SLOTS).
-// Slot count: keep in sync with MSlot* in nvg/metal.nim (14 slots).
+// Slot count: keep in sync with MSlot* in nvg/metal.nim (20 slots).
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
 #include "metal_bridge.h"

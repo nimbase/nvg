@@ -696,3 +696,262 @@ proc mosaic*(s: Surface, cell: int) =
           s.pixels[i + 1] = g
           s.pixels[i + 2] = b
           s.pixels[i + 3] = a
+
+type NoiseKind* = enum
+  nkUniform
+    ## Uniform integer delta in `[-A, +A]` per pixel (`A` from
+    ## `amount`). Flat histogram, harshest grain.
+  nkGaussian
+    ## Sum of 3 uniform taps, recentered and rescaled to `[-A, +A]`:
+    ## triangular-like, softer grain from the same integer hash
+    ## stream. Still integer-exact, so the Metal mirror stays
+    ## byte-identical.
+
+proc hashPixel*(x, y: int32, seed, salt: uint32): uint32 =
+  ## Deterministic lattice hash (uint32 wraparound throughout, so the
+  ## MSL mirror computes the same bits; negative coords wrap via the
+  ## bit-preserving cast on both sides). One stream per `salt`, so
+  ## mono and per-channel noise stay independent. Stateless and
+  ## position-only: no RNG state, thread-parallel by construction.
+  var h = cast[uint32](x) * 374761393u32 +
+    cast[uint32](y) * 668265263u32 + seed * 1442695041u32 +
+    salt * 2246822519u32
+  h = (h xor (h shr 13)) * 1274126177u32
+  h xor (h shr 16)
+
+proc noiseDelta(h: uint32, a: int): int =
+  ## Uniform integer delta in `[-a, +a]` from the top 16 hash bits.
+  ## Multiply-shift (no modulo bias); the product fits 32 bits
+  ## (`65535 * 511`), so no wrap on either backend.
+  int(((h shr 16) * uint32(2 * a + 1)) shr 16) - a
+
+proc noiseAmp*(amount: float64): int =
+  ## Full-scale fraction to LSB half-range (`0.0..1.0` -> `0..255`).
+  ## Shared with the Metal mirror so both backends quantize `amount`
+  ## identically.
+  if amount <= 0.0: 0 else: min(255, int(amount * 255.0 + 0.5))
+
+proc monoNoise*(s: Surface, amount: float64, seed: uint32 = 0,
+    kind: NoiseKind = nkUniform) =
+  ## Monochrome grain: one hash per pixel, the same integer delta
+  ## added to R, G and B (`dr == dg == db` everywhere), so hues never
+  ## shift. Straight-space add with clamping; alpha passes through
+  ## untouched (like `unsharpMask`). Integer-exact, so the Metal
+  ## mirror is byte-identical. Non-positive `amount` is a no-op.
+  let a = noiseAmp(amount)
+  if a <= 0 or s.w <= 0 or s.h <= 0: return
+  for y in 0 ..< s.h:
+    for x in 0 ..< s.w:
+      let d = case kind
+        of nkUniform:
+          noiseDelta(hashPixel(int32(x), int32(y), seed, 0u32), a)
+        of nkGaussian:
+          let u0 = noiseDelta(hashPixel(int32(x), int32(y), seed,
+            0u32), a) + a
+          let u1 = noiseDelta(hashPixel(int32(x), int32(y), seed,
+            1u32), a) + a
+          let u2 = noiseDelta(hashPixel(int32(x), int32(y), seed,
+            2u32), a) + a
+          # Non-negative division only (MSL `/` truncates like `div`
+          # here), recentered to [-a, +a].
+          int(uint32(u0 + u1 + u2 + 1) div 3u32) - a
+      if d == 0: continue
+      let o = (y * s.w + x) * 4
+      for k in 0 ..< 3:
+        s.pixels[o + k] = uint8(clamp(int(s.pixels[o + k]) + d, 0, 255))
+
+proc colorNoise*(s: Surface, amount: float64, seed: uint32 = 0,
+    kind: NoiseKind = nkUniform) =
+  ## Chromatic grain: independent hash streams per channel (salts
+  ## `c` / `c*3+k`), so channels decorrelate and hues speckle.
+  ## Otherwise identical to `monoNoise` (straight-space clamp, alpha
+  ## untouched, byte-identical Metal mirror). Non-positive `amount`
+  ## is a no-op.
+  let a = noiseAmp(amount)
+  if a <= 0 or s.w <= 0 or s.h <= 0: return
+  for y in 0 ..< s.h:
+    for x in 0 ..< s.w:
+      let o = (y * s.w + x) * 4
+      for c in 0 ..< 3:
+        let d = case kind
+          of nkUniform:
+            noiseDelta(hashPixel(int32(x), int32(y), seed,
+              uint32(c)), a)
+          of nkGaussian:
+            let u0 = noiseDelta(hashPixel(int32(x), int32(y), seed,
+              uint32(c * 3)), a) + a
+            let u1 = noiseDelta(hashPixel(int32(x), int32(y), seed,
+              uint32(c * 3 + 1)), a) + a
+            let u2 = noiseDelta(hashPixel(int32(x), int32(y), seed,
+              uint32(c * 3 + 2)), a) + a
+            int(uint32(u0 + u1 + u2 + 1) div 3u32) - a
+        if d != 0:
+          s.pixels[o + c] = uint8(clamp(int(s.pixels[o + c]) + d,
+            0, 255))
+
+proc sampleBilinearClamp*(px: openArray[uint8], w, h: int, sx,
+    sy: float64): tuple[r, g, b, a: int] =
+  ## Straight-space bilinear sample with clamp (replicate) edges and
+  ## the premultiplied transparent guard (mirrors the Metal pattern
+  ## kernels: accumulate `rgb*a`, divide back out; zero alpha reads
+  ## as transparent black). Integer coords are pixel centers. CPU
+  ## uses float64 while the Metal mirror uses float32, so warp pairs
+  ## agree within 1 LSB.
+  let x0 = int(floor(sx))
+  let y0 = int(floor(sy))
+  let tx = clamp(sx - float64(x0), 0.0, 1.0)
+  let ty = clamp(sy - float64(y0), 0.0, 1.0)
+  var ar, ag, ab, aa = 0.0
+  for j in 0 .. 1:
+    for i in 0 .. 1:
+      let xi = clamp(x0 + i, 0, w - 1)
+      let yi = clamp(y0 + j, 0, h - 1)
+      let o = (yi * w + xi) * 4
+      let al = float64(px[o + 3]) / 255.0
+      let wt = (if i == 0: 1.0 - tx else: tx) *
+        (if j == 0: 1.0 - ty else: ty)
+      ar += float64(px[o]) / 255.0 * al * wt
+      ag += float64(px[o + 1]) / 255.0 * al * wt
+      ab += float64(px[o + 2]) / 255.0 * al * wt
+      aa += al * wt
+  if aa > 1e-6:
+    (int(ar / aa * 255.0 + 0.5), int(ag / aa * 255.0 + 0.5),
+      int(ab / aa * 255.0 + 0.5), int(aa * 255.0 + 0.5))
+  else:
+    (0, 0, 0, 0)
+
+proc ripple*(s: Surface, amp, period: float64, phase = 0.0) =
+  ## Sine-wave displacement along both axes (`amp` in px, `period` in
+  ## px), sampled bilinearly with clamp edges (see
+  ## `sampleBilinearClamp`: 1 LSB vs the Metal mirror). Non-positive
+  ## `amp` or `period` is a no-op.
+  if amp <= 0.0 or period <= 0.0 or s.w <= 0 or s.h <= 0: return
+  var src = newSeq[uint8](s.pixels.len)
+  for i in 0 ..< s.pixels.len:
+    src[i] = s.pixels[i]
+  let k = 2.0 * PI / period
+  for y in 0 ..< s.h:
+    for x in 0 ..< s.w:
+      let sx = float64(x) + amp * sin(k * float64(y) + phase)
+      let sy = float64(y) + amp * sin(k * float64(x) + phase)
+      let (r, g, b, a) = sampleBilinearClamp(src, s.w, s.h, sx, sy)
+      let o = (y * s.w + x) * 4
+      s.pixels[o] = uint8(r)
+      s.pixels[o + 1] = uint8(g)
+      s.pixels[o + 2] = uint8(b)
+      s.pixels[o + 3] = uint8(a)
+
+proc swirl*(s: Surface, cx, cy, radius, angle: float64) =
+  ## Rotate pixels around (`cx`, `cy`) by `angle` radians at the
+  ## center, falling off linearly to zero at `radius`; outside is an
+  ## exact copy. Inverse-mapped and bilinearly sampled with clamp
+  ## edges (1 LSB vs the Metal mirror). Zero `angle` or
+  ## non-positive `radius` is a no-op.
+  if angle == 0.0 or radius <= 0.0 or s.w <= 0 or s.h <= 0: return
+  var src = newSeq[uint8](s.pixels.len)
+  for i in 0 ..< s.pixels.len:
+    src[i] = s.pixels[i]
+  for y in 0 ..< s.h:
+    for x in 0 ..< s.w:
+      let dx = float64(x) - cx
+      let dy = float64(y) - cy
+      let d = sqrt(dx * dx + dy * dy)
+      let o = (y * s.w + x) * 4
+      if d >= radius:
+        continue
+      let t = angle * (1.0 - d / radius)
+      let c = cos(t)
+      let sn = sin(t)
+      let (r, g, b, a) = sampleBilinearClamp(src, s.w, s.h,
+        cx + dx * c + dy * sn, cy - dx * sn + dy * c)
+      s.pixels[o] = uint8(r)
+      s.pixels[o + 1] = uint8(g)
+      s.pixels[o + 2] = uint8(b)
+      s.pixels[o + 3] = uint8(a)
+
+proc latVal(ix, iy: int32, seed: uint32): float64 =
+  ## Hashed lattice value in `[0, 1)`: top 24 hash bits over `2^24`
+  ## (exactly representable in float32, so the Metal mirror computes
+  ## the same lattice bits).
+  float64(hashPixel(ix, iy, seed, 0u32) shr 8) / 16777216.0
+
+proc fade(t: float64): float64 =
+  ## Perlin smootherstep `6t^5 - 15t^4 + 10t^3`.
+  t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+
+proc valueNoise*(x, y: float64, seed: uint32): float64 =
+  ## Gradient-free value noise in `[0, 1]`: bilinear mix of hashed
+  ## lattice corners under smootherstep fade. Negative coords wrap
+  ## through the same bit-preserving cast on both backends.
+  let xi = int32(floor(x))
+  let yi = int32(floor(y))
+  let xf = x - float64(xi)
+  let yf = y - float64(yi)
+  let u = fade(xf)
+  let v = fade(yf)
+  let a = latVal(xi, yi, seed)
+  let b = latVal(xi + 1, yi, seed)
+  let c = latVal(xi, yi + 1, seed)
+  let d = latVal(xi + 1, yi + 1, seed)
+  a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v
+
+proc fbm*(x, y, freq: float64, octaves: int, seed: uint32): float64 =
+  ## Fractal Brownian motion: `octaves` (clamped `1..8`) of doubling
+  ## `valueNoise` with halving amplitude, normalized by total
+  ## amplitude to stay in `[0, 1]`. fBm summation runs float64 on the
+  ## CPU and float32 on Metal, so turbulence pairs agree within
+  ## 2 LSB.
+  let oct = clamp(octaves, 1, 8)
+  var amp = 1.0
+  var f = freq
+  var sum = 0.0
+  var norm = 0.0
+  for o in 0 ..< oct:
+    sum += amp * valueNoise(x * f, y * f, seed)
+    norm += amp
+    amp *= 0.5
+    f *= 2.0
+  sum / norm
+
+proc turbulence*(s: Surface, scale: float64, octaves = 4,
+    seed: uint32 = 0) =
+  ## Full-range grayscale fBm field written to RGB (`0..255`),
+  ## alpha preserved: clouds/marble base for textures and masks.
+  ## `scale` is the base feature size in px (`freq = 1/scale`).
+  ## Non-positive `scale` is a no-op; 2 LSB vs the Metal mirror.
+  if scale <= 0.0 or s.w <= 0 or s.h <= 0: return
+  let freq = 1.0 / scale
+  for y in 0 ..< s.h:
+    for x in 0 ..< s.w:
+      let n = fbm(float64(x), float64(y), freq, octaves, seed)
+      let v = uint8(clamp(int(n * 255.0 + 0.5), 0, 255))
+      let o = (y * s.w + x) * 4
+      s.pixels[o] = v
+      s.pixels[o + 1] = v
+      s.pixels[o + 2] = v
+
+proc domainWarp*(s: Surface, scale, warpAmp: float64,
+    octaves = 4, seed: uint32 = 0) =
+  ## Displace the image's own sampling by a turbulent offset field:
+  ## two fBm components (second salted with the golden ratio word)
+  ## recentered to `[-1, 1]` and scaled by `warpAmp` px, sampled
+  ## bilinearly with clamp edges. Flat images are fixed points.
+  ## Non-positive `scale`/`warpAmp` is a no-op; 2 LSB vs Metal.
+  if scale <= 0.0 or warpAmp <= 0.0 or s.w <= 0 or s.h <= 0: return
+  var src = newSeq[uint8](s.pixels.len)
+  for i in 0 ..< s.pixels.len:
+    src[i] = s.pixels[i]
+  let freq = 1.0 / scale
+  for y in 0 ..< s.h:
+    for x in 0 ..< s.w:
+      let nx = fbm(float64(x), float64(y), freq, octaves, seed) - 0.5
+      let ny = fbm(float64(x), float64(y), freq, octaves,
+        seed xor 0x9E3779B9u32) - 0.5
+      let (r, g, b, a) = sampleBilinearClamp(src, s.w, s.h,
+        float64(x) + nx * 2.0 * warpAmp,
+        float64(y) + ny * 2.0 * warpAmp)
+      let o = (y * s.w + x) * 4
+      s.pixels[o] = uint8(r)
+      s.pixels[o + 1] = uint8(g)
+      s.pixels[o + 2] = uint8(b)
+      s.pixels[o + 3] = uint8(a)
