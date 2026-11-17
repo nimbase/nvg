@@ -12,7 +12,7 @@
 ##        [--grain-soft A,SEED] [--grain-color-soft A,SEED]
 ##        [--ripple AMP,PERIOD[,PHASE]] [--swirl CX,CY,RADIUS,ANGLE]
 ##        [--turbulence SCALE[,OCTAVES,SEED]] [--warp SCALE,AMP[,SEED]]
-##        [--motion DEGREES,LENGTH[,TAPS]]
+##        [--motion DEGREES,LENGTH[,TAPS]] [--palette N]
 ##        [image] [outDir]
 ## Defaults: the tubusan lemons photo, examples/out, and one of each
 ## effect when no effect flag is given.
@@ -33,7 +33,7 @@ proc usage() =
          [--grain-color-soft A,SEED] [--ripple AMP,PERIOD[,PHASE]]
          [--swirl CX,CY,RADIUS,ANGLE] [--turbulence SCALE[,OCT,SEED]]
          [--warp SCALE,AMP[,SEED]] [--motion DEGREES,LENGTH[,TAPS]]
-         [image] [outDir]"""
+         [--palette N] [image] [outDir]"""
   quit(1)
 
 proc isImagePath(p: string): bool =
@@ -93,6 +93,7 @@ proc main() =
   var motionDeg = -1.0
   var motionLen = -1.0
   var motionTaps = 9
+  var paletteN = -1
   var image = DefaultImage
   var outDir = "examples/out"
   var seenEffect = false
@@ -231,6 +232,14 @@ proc main() =
         motionTaps = parseInt(parts[2])
         if motionTaps < 2:
           usage()
+      seenEffect = true
+    elif a == "--palette":
+      inc i
+      if i > paramCount():
+        usage()
+      paletteN = parseInt(paramStr(i))
+      if paletteN < 0:
+        usage()
       seenEffect = true
     elif a.startsWith("--"):
       usage()
@@ -517,6 +526,11 @@ proc main() =
       s.motionBlur(motionDeg, motionLen, motionTaps)
       s.savePng(outDir / name)
       echo "wrote ", outDir / name
+  if paletteN >= 0:
+    for c in base.dominantColors(paletteN):
+      let (r, g, b, _) = c.toRgba8()
+      echo "palette: #" & toHex(int(r), 2) & toHex(int(g), 2) &
+        toHex(int(b), 2)
 
 when isMainModule:
   main()

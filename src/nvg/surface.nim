@@ -5,6 +5,7 @@
 ## fixed-Huffman DEFLATE stream (greedy LZ77, hash chains): no zlib
 ## binding, decodable by any standard inflater, deterministic output.
 
+import std/algorithm
 import std/math
 import ./types
 
@@ -998,3 +999,45 @@ proc motionBlur*(s: Surface, directionDeg, length: float64, taps = 9) =
         s.pixels[o + 1] = 0
         s.pixels[o + 2] = 0
         s.pixels[o + 3] = 0
+
+proc dominantColors*(s: Surface, n: int): seq[Color] =
+  ## N predominant colors of the picture as opaque swatches, most
+  ## frequent first. Quantized RGB histogram (5 bits/channel, 32768
+  ## bins): fully transparent pixels are skipped, every other pixel
+  ## votes with its alpha weight, and each bin reports the
+  ## alpha-weighted average of the exact colors that fell into it.
+  ## Ties break by ascending packed bin key, so the order is
+  ## deterministic. `n <= 0` returns empty; `n` above the unique-bin
+  ## count returns the unique set. CPU-only analysis op (no Metal
+  ## mirror): integer math, O(pixels).
+  if n <= 0 or s.w <= 0 or s.h <= 0: return @[]
+  const bins = 32 * 32 * 32
+  var weights = newSeq[int](bins)
+  var sumR = newSeq[int](bins)
+  var sumG = newSeq[int](bins)
+  var sumB = newSeq[int](bins)
+  var i = 0
+  while i < s.pixels.len:
+    let r = int(s.pixels[i])
+    let g = int(s.pixels[i + 1])
+    let b = int(s.pixels[i + 2])
+    let a = int(s.pixels[i + 3])
+    if a != 0:
+      let key = ((r shr 3) shl 10) or ((g shr 3) shl 5) or (b shr 3)
+      weights[key] += a
+      sumR[key] += r * a
+      sumG[key] += g * a
+      sumB[key] += b * a
+    i += 4
+  var items: seq[(int, int)] = @[]
+  for k in 0 ..< bins:
+    if weights[k] > 0:
+      items.add((-weights[k], k))
+  items.sort()
+  let take = min(n, items.len)
+  result = newSeq[Color](take)
+  for j in 0 ..< take:
+    let k = items[j][1]
+    let w = weights[k]
+    result[j] = rgb(uint8(sumR[k] div w), uint8(sumG[k] div w),
+      uint8(sumB[k] div w))

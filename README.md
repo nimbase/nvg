@@ -24,6 +24,8 @@
 - Photo filters: monochrome and color grain (uniform and soft), plus
   ripple, swirl, motion blur, turbulence fields and domain-warp
   distortion, on both CPU and Metal compute
+- Dominant-color extraction: N predominant colors of any picture as
+  opaque swatches (`dominantColors`, `--palette N` on the effects CLI)
 - SVG image loading straight into pattern paints
 - Flexible strokes: round/square caps, miter/bevel/round joins, dashed lines
 - Two fill rules (even-odd, nonzero winding) for holes and overlaps
@@ -87,7 +89,7 @@ do nim c -r "$f"; done` — three need extra setup (see notes):
 | `jit.nim` | CPU vs JIT backend, pixel-identity check | `nim c -r -d:nvgJit examples/jit.nim` |
 | `gpu.nim` | every backend feature in one scene, plus blur | Metal backend, needs a font (same `--` form) |
 | `kaleidoscope.nim` | mirrored photo wedges | CPU by default, Metal with `-d:nvgMetal` |
-| `effects.nim` | photo effects CLI: mosaic, blur, gauss, sharpen, mono/color grain (uniform + soft), ripple, swirl, motion blur, turbulence, domain warp | defaults to `tests/data/pexels-tubusan-5773749.jpg`; `--backend metal` needs `-d:nvgMetal` |
+| `effects.nim` | photo effects CLI: mosaic, blur, gauss, sharpen, mono/color grain (uniform + soft), ripple, swirl, motion blur, turbulence, domain warp; `--palette N` prints dominant colors | defaults to `tests/data/pexels-tubusan-5773749.jpg`; `--backend metal` needs `-d:nvgMetal` |
 | `filters.nim` | the same filters on a synthetic scene | no photo needed; two motion-blur angles (25°, 115°) |
 
 ## Roadmap
@@ -113,6 +115,7 @@ Full scope and acceptance criteria live in [ROADMAP.md](ROADMAP.md).
 - [x] Image file loading API
 - [x] Photo filters (mono/color grain, ripple, swirl, motion blur,
   turbulence, domain warp) on CPU + Metal compute
+- [x] Dominant-color extraction (`dominantColors`, `--palette N`)
 - [ ] SVG image loading
 
 ### ❤ Contributions & Support

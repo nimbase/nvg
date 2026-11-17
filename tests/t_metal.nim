@@ -1315,3 +1315,61 @@ test "compute motion blur matches cpu within 1 lsb":
       check maxDiff <= 1
   else:
     skip()
+
+test "cpu dominant colors hand computed":
+  # 3 red + 1 blue: red wins on weight, blue second.
+  var s = newSurface(4, 1)
+  s.setPixel(0, 0, rgb(255, 0, 0))
+  s.setPixel(1, 0, rgb(255, 0, 0))
+  s.setPixel(2, 0, rgb(255, 0, 0))
+  s.setPixel(3, 0, rgb(0, 0, 255))
+  let pal = s.dominantColors(2)
+  check pal.len == 2
+  check pal[0].toRgba8() == (255u8, 0u8, 0u8, 255u8)
+  check pal[1].toRgba8() == (0u8, 0u8, 255u8, 255u8)
+  # Tie (1 red, 1 blue, equal opaque weight) breaks by ascending
+  # packed bin key: blue key 31 < red key 31744.
+  var tie = newSurface(2, 1)
+  tie.setPixel(0, 0, rgb(255, 0, 0))
+  tie.setPixel(1, 0, rgb(0, 0, 255))
+  let tp = tie.dominantColors(2)
+  check tp.len == 2
+  check tp[0].toRgba8() == (0u8, 0u8, 255u8, 255u8)
+  check tp[1].toRgba8() == (255u8, 0u8, 0u8, 255u8)
+  # Fully transparent pixels are ignored.
+  var tr = newSurface(4, 1)
+  tr.setPixel(0, 0, rgb(255, 0, 0))
+  tr.setPixel(1, 0, rgb(255, 0, 0))
+  tr.setPixel(2, 0, rgbaf(0, 1, 0, 0))
+  tr.setPixel(3, 0, rgbaf(0, 0, 1, 0))
+  let rp = tr.dominantColors(3)
+  check rp.len == 1
+  check rp[0].toRgba8() == (255u8, 0u8, 0u8, 255u8)
+  # Alpha weighting: one opaque red (weight 255) loses to two
+  # half-transparent blues (2 * 128 = 256).
+  var aw = newSurface(3, 1)
+  aw.setPixel(0, 0, rgb(255, 0, 0))
+  aw.setPixel(1, 0, rgbaf(0, 0, 1, 128.0 / 255.0))
+  aw.setPixel(2, 0, rgbaf(0, 0, 1, 128.0 / 255.0))
+  let ap = aw.dominantColors(2)
+  check ap.len == 2
+  check ap[0].toRgba8() == (0u8, 0u8, 255u8, 255u8)
+  check ap[1].toRgba8() == (255u8, 0u8, 0u8, 255u8)
+  # Nearby shades share a bin (250 and 255 both quantize to 31)
+  # and report the average: (250 + 255) div 2 = 252.
+  var q = newSurface(2, 1)
+  q.setPixel(0, 0, rgb(250, 0, 0))
+  q.setPixel(1, 0, rgb(255, 0, 0))
+  let qp = q.dominantColors(5)
+  check qp.len == 1
+  check qp[0].toRgba8() == (252u8, 0u8, 0u8, 255u8)
+  # n clamping: zero/negative empty, oversize returns unique set,
+  # flat image returns one color.
+  check s.dominantColors(0).len == 0
+  check s.dominantColors(-3).len == 0
+  check s.dominantColors(9).len == 2
+  var flat = newSurface(3, 2)
+  flat.clear(rgb(100, 150, 200))
+  let fp = flat.dominantColors(4)
+  check fp.len == 1
+  check fp[0].toRgba8() == (100u8, 150u8, 200u8, 255u8)

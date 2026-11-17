@@ -18,17 +18,17 @@ and the vertical-origin TODO (`src/harfnim/shape.nim:124`).
   where behavior changes.
 - Acceptance: unit tests per fix; nvg serial suite stays 20/20.
 
-### 2. Dominant-color extraction (`dominantColors`)
+### 2. Dominant-color extraction (`dominantColors`) — shipped
 New backend-agnostic `Surface` proc returning the N predominant colors of
 a picture, e.g. `proc dominantColors*(s: Surface, n: int): seq[Color]`.
-- Proposed algorithm (deterministic, no floats needed): quantized RGB
-  histogram (4-5 bits/channel), skip fully transparent pixels, weight by
-  alpha, sort by count then packed RGB for tie-breaks, return bin
-  centroids as opaque colors.
+- Algorithm (deterministic, no floats needed): quantized RGB
+  histogram (5 bits/channel, 32768 bins), skip fully transparent pixels,
+  weight by alpha, sort by count then packed bin key for tie-breaks,
+  return bin centroids as opaque colors.
 - Edge cases: `n <= 0` returns empty; `n` larger than the unique count
   returns the unique set; flat images return one color.
 - Acceptance: hand-computed tests (two-color split, tie-break order,
-  transparency ignored, `n` clamping); optional `--palette N` flag on
+  transparency ignored, `n` clamping); `--palette N` flag on
   `examples/effects.nim` printing hex swatches.
 - No GPU mirror needed (analysis op, not a pixel op); CPU-only.
 
