@@ -1,5 +1,5 @@
 <p align="center">
-  Pure-Nim antialiased 2D Vector Graphics (NanoVG-inspired)<br>
+  Pure-Nim 2D Vector Graphics (NanoVG-inspired)<br>
 </p>
 
 <p align="center">
