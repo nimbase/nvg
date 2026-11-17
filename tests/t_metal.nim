@@ -1228,3 +1228,90 @@ test "compute turbulence and warp match cpu within 2 lsb":
       check maxDiff <= 2
   else:
     skip()
+
+test "cpu motion blur hand computed":
+  # White dot at (2, 2) on 5x5 transparent black, 0 degrees (right),
+  # taps 3, length 2: samples at x - 1, x, x + 1. Pixels (1, 2),
+  # (2, 2), (3, 2) each average one white tap: full white at alpha
+  # 255 / 3 = 85 (premultiplied hue preservation, like boxBlur).
+  # (0, 2) samples only clamped black and stays transparent.
+  var s = newSurface(5, 5)
+  s.clear(rgbaf(0, 0, 0, 0))
+  s.setPixel(2, 2, rgb(255, 255, 255))
+  s.motionBlur(0.0, 2.0, 3)
+  check s.getPixel(1, 2).toRgba8() == (255u8, 255u8, 255u8, 85u8)
+  check s.getPixel(2, 2).toRgba8() == (255u8, 255u8, 255u8, 85u8)
+  check s.getPixel(3, 2).toRgba8() == (255u8, 255u8, 255u8, 85u8)
+  check s.getPixel(0, 2).toRgba8() == (0u8, 0u8, 0u8, 0u8)
+  check s.getPixel(2, 0).toRgba8() == (0u8, 0u8, 0u8, 0u8)
+  # 90 degrees runs down columns instead of across rows.
+  var v = newSurface(5, 5)
+  v.clear(rgbaf(0, 0, 0, 0))
+  v.setPixel(2, 2, rgb(255, 255, 255))
+  v.motionBlur(90.0, 2.0, 3)
+  check v.getPixel(2, 1).toRgba8() == (255u8, 255u8, 255u8, 85u8)
+  check v.getPixel(2, 2).toRgba8() == (255u8, 255u8, 255u8, 85u8)
+  check v.getPixel(2, 3).toRgba8() == (255u8, 255u8, 255u8, 85u8)
+  check v.getPixel(2, 0).toRgba8() == (0u8, 0u8, 0u8, 0u8)
+  check v.getPixel(1, 2).toRgba8() == (0u8, 0u8, 0u8, 0u8)
+  # Full circle: 360/180/720 coincide with 0, -90/270/450 with 90.
+  proc dotBlur(deg: float64): Surface =
+    result = newSurface(5, 5)
+    result.clear(rgbaf(0, 0, 0, 0))
+    result.setPixel(2, 2, rgb(255, 255, 255))
+    result.motionBlur(deg, 2.0, 3)
+  check dotBlur(360.0).pixels == s.pixels
+  check dotBlur(180.0).pixels == s.pixels
+  check dotBlur(720.0).pixels == s.pixels
+  check dotBlur(-90.0).pixels == v.pixels
+  check dotBlur(270.0).pixels == v.pixels
+  check dotBlur(450.0).pixels == v.pixels
+  # Translucent dot keeps its hue at averaged alpha.
+  var t = newSurface(5, 5)
+  t.clear(rgbaf(0, 0, 0, 0))
+  t.setPixel(2, 2, rgbaf(1, 1, 1, 128.0 / 255.0))
+  t.motionBlur(0.0, 2.0, 3)
+  check t.getPixel(2, 2).toRgba8() == (255u8, 255u8, 255u8, 43u8)
+  check t.getPixel(0, 2).toRgba8() == (0u8, 0u8, 0u8, 0u8)
+  # Flat opaque images are fixed points; degenerate params no-op.
+  var flat = newSurface(4, 4)
+  flat.clear(rgb(100, 150, 200))
+  flat.motionBlur(35.0, 5.0, 7)
+  check flat.getPixel(1, 1).toRgba8() == (100u8, 150u8, 200u8, 255u8)
+  flat.motionBlur(35.0, 0.0, 7)
+  check flat.getPixel(1, 1).toRgba8() == (100u8, 150u8, 200u8, 255u8)
+  flat.motionBlur(35.0, 5.0, 1)
+  check flat.getPixel(1, 1).toRgba8() == (100u8, 150u8, 200u8, 255u8)
+
+test "compute motion blur matches cpu within 1 lsb":
+  when defined(macosx):
+    if not mtlAvailable():
+      skip()
+    const W = 9
+    const H = 7
+    var s = newSurface(W, H)
+    for y in 0 ..< H:
+      for x in 0 ..< W:
+        s.setPixel(x, y, rgbaf(float64((x * 37 + y * 91) mod 256) / 255.0,
+          float64((x * 53 + y * 29) mod 256) / 255.0,
+          float64((x * 11 + y * 71) mod 256) / 255.0,
+          float64((x * 17 + y * 13) mod 256) / 255.0))
+    var ctx = newMetalCtx(W, H)
+    defer: ctx.close()
+    for (deg, length, taps) in [(35.0, 5.0, 7), (120.0, 3.0, 5),
+        (270.0, 4.0, 9)]:
+      var cpu = newSurface(W, H)
+      for i in 0 ..< s.pixels.len:
+        cpu.pixels[i] = s.pixels[i]
+      cpu.motionBlur(deg, length, taps)
+      ctx.upload(s.pixels)
+      ctx.motionBlur(deg, length, taps)
+      let got = ctx.readback()
+      var maxDiff = 0
+      for i in 0 ..< got.len:
+        let d = abs(int(got[i]) - int(cpu.pixels[i]))
+        if d > maxDiff:
+          maxDiff = d
+      check maxDiff <= 1
+  else:
+    skip()

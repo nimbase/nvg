@@ -22,8 +22,8 @@
 - Mipmapped image sampling, so minified images stay smooth instead of
   aliasing
 - Photo filters: monochrome and color grain (uniform and soft), plus
-  ripple, swirl, turbulence fields and domain-warp distortion, on
-  both CPU and Metal compute
+  ripple, swirl, motion blur, turbulence fields and domain-warp
+  distortion, on both CPU and Metal compute
 - SVG image loading straight into pattern paints
 - Flexible strokes: round/square caps, miter/bevel/round joins, dashed lines
 - Two fill rules (even-odd, nonzero winding) for holes and overlaps
@@ -86,8 +86,8 @@ destroyJitBackend(c.backend.JitBackend)
 - [x] Bilinear and multi-stop paints on the JIT fast path
 - [ ] AArch64 kernel execution sign-off
 - [x] Image file loading API
-- [x] Photo filters (mono/color grain, ripple, swirl, turbulence,
-  domain warp) on CPU + Metal compute
+- [x] Photo filters (mono/color grain, ripple, swirl, motion blur,
+  turbulence, domain warp) on CPU + Metal compute
 - [ ] SVG image loading
 
 ### ❤ Contributions & Support

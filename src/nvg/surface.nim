@@ -955,3 +955,46 @@ proc domainWarp*(s: Surface, scale, warpAmp: float64,
       s.pixels[o + 1] = uint8(g)
       s.pixels[o + 2] = uint8(b)
       s.pixels[o + 3] = uint8(a)
+
+proc motionBlur*(s: Surface, directionDeg, length: float64, taps = 9) =
+  ## Directional blur: `taps` bilinear samples evenly spaced along the
+  ## segment of `length` px centered at each pixel, oriented at
+  ## `directionDeg` degrees (0 = right, 90 = down, increasing
+  ## visually clockwise on the y-down canvas). The full 360 circle
+  ## works: any value is fine (normalized with modulo, so 360 == 0
+  ## and -90 == 270). Premultiplied average with the transparent
+  ## guard (hue-preserving like `boxBlur`); clamp edges. CPU uses
+  ## float64 while the Metal mirror uses float32, so the pair agrees
+  ## within 1 LSB. Non-positive `length` or `taps < 2` is a no-op.
+  if length <= 0.0 or taps < 2 or s.w <= 0 or s.h <= 0: return
+  var src = newSeq[uint8](s.pixels.len)
+  for i in 0 ..< s.pixels.len:
+    src[i] = s.pixels[i]
+  let th = directionDeg * PI / 180.0
+  let dx = cos(th)
+  let dy = sin(th)
+  let step = length / float64(taps - 1)
+  let mid = float64(taps - 1) * 0.5
+  let n = float64(taps)
+  for y in 0 ..< s.h:
+    for x in 0 ..< s.w:
+      var ar, ag, ab, aa = 0.0
+      for i in 0 ..< taps:
+        let t = (float64(i) - mid) * step
+        let (r, g, b, a) = sampleBilinearClamp(src, s.w, s.h,
+          float64(x) + dx * t, float64(y) + dy * t)
+        ar += float64(r) * float64(a)
+        ag += float64(g) * float64(a)
+        ab += float64(b) * float64(a)
+        aa += float64(a)
+      let o = (y * s.w + x) * 4
+      if aa > 1e-6:
+        s.pixels[o] = uint8(int(ar / aa + 0.5))
+        s.pixels[o + 1] = uint8(int(ag / aa + 0.5))
+        s.pixels[o + 2] = uint8(int(ab / aa + 0.5))
+        s.pixels[o + 3] = uint8(int(aa / n + 0.5))
+      else:
+        s.pixels[o] = 0
+        s.pixels[o + 1] = 0
+        s.pixels[o + 2] = 0
+        s.pixels[o + 3] = 0

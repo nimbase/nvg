@@ -59,6 +59,7 @@ const
   MSlotSwirl* = 17
   MSlotTurb* = 18
   MSlotWarp* = 19
+  MSlotMotion* = 20
 
 const solidMsl* = """
 #include <metal_stdlib>
@@ -1065,6 +1066,38 @@ kernel void warp_domain(device uchar4 *src [[buffer(0)]],
       float(gid.y) + ny * 2.0 * u.amp);
   tmp[gid.y * dims.x + gid.x] = uchar4(saturate(c) * 255.0 + 0.5);
 }
+// Directional blur mirroring scalar `motionBlur`: `taps` bilinear
+// samples along the segment, premultiplied average with the
+// transparent guard. Degrees in, full 360 circle, same modulo
+// normalization as the CPU (any value works). float32 math, so the
+// pair agrees within 1 LSB.
+struct MotionP { float degrees; float length; int taps; int _p; };
+kernel void motion_blur(device uchar4 *src [[buffer(0)]],
+                        constant MotionP &u [[buffer(1)]],
+                        constant uint2 &dims [[buffer(2)]],
+                        device uchar4 *tmp [[buffer(3)]],
+                        uint2 gid [[thread_position_in_grid]]) {
+  if (gid.x >= dims.x || gid.y >= dims.y) return;
+  float th = u.degrees * 3.14159265 / 180.0;
+  float dx = cos(th);
+  float dy = sin(th);
+  float step = u.length / float(u.taps - 1);
+  float mid = float(u.taps - 1) * 0.5;
+  float n = float(u.taps);
+  float3 accC = float3(0.0);
+  float accA = 0.0;
+  for (int i = 0; i < u.taps; i++) {
+    float t = (float(i) - mid) * step;
+    float4 c = bilinClamp(src, dims, float(gid.x) + dx * t,
+                          float(gid.y) + dy * t);
+    accC += c.rgb * c.a;
+    accA += c.a;
+  }
+  float4 o;
+  if (accA > 1e-6) o = float4(accC / accA, accA / n);
+  else o = float4(0.0);
+  tmp[gid.y * dims.x + gid.x] = uchar4(saturate(o) * 255.0 + 0.5);
+}
 """;
 
 type RippleParams* = object
@@ -1094,6 +1127,13 @@ type WarpParams* = object
   amp*: cfloat
   oct*: cint
   seed*: cuint
+
+type MotionParams* = object
+  ## Must match MSL `MotionP` layout (16 bytes).
+  degrees*: cfloat
+  length*: cfloat
+  taps*: cint
+  pad*: cint
 
 const patternBilinearMsl* = """
 #include <metal_stdlib>
@@ -1172,6 +1212,7 @@ static:
   doAssert sizeof(SwirlParams) == 16
   doAssert sizeof(TurbParams) == 16
   doAssert sizeof(WarpParams) == 16
+  doAssert sizeof(MotionParams) == 16
 
 when defined(macosx):
   proc nvgmtl_device_count(): cint {.importc.}
@@ -1237,6 +1278,7 @@ proc newMetalCtx*(w, h: int): MetalCtx =
       result.buildSlot(MSlotSwirl, warpMsl, "warp_swirl")
       result.buildSlot(MSlotTurb, warpMsl, "field_turb")
       result.buildSlot(MSlotWarp, warpMsl, "warp_domain")
+      result.buildSlot(MSlotMotion, warpMsl, "motion_blur")
     except IOError:
       nvgmtl_destroy(p)
       result.p = nil
@@ -1497,6 +1539,19 @@ proc domainWarp*(ctx: MetalCtx, scale, warpAmp: float64,
       amp: cfloat(warpAmp), oct: cint(clamp(octaves, 1, 8)),
       seed: cuint(seed))
     nvgmtl_fill(ctx.p, cint(MSlotWarp), addr u, cint(sizeof(u)))
+    nvgmtl_copy(ctx.p, 0, 1)
+
+proc motionBlur*(ctx: MetalCtx, directionDeg, length: float64,
+    taps = 9) =
+  ## Directional blur mirroring scalar `motionBlur`: reads pixels,
+  ## writes aux, copies back. Degrees in, full 360 circle. float32
+  ## math, so the pair agrees within 1 LSB. Non-positive `length`
+  ## or `taps < 2` is a no-op.
+  when defined(macosx):
+    if length <= 0.0 or taps < 2: return
+    var u = MotionParams(degrees: cfloat(directionDeg),
+      length: cfloat(length), taps: cint(taps), pad: 0)
+    nvgmtl_fill(ctx.p, cint(MSlotMotion), addr u, cint(sizeof(u)))
     nvgmtl_copy(ctx.p, 0, 1)
 
 proc compBlend*(ctx: MetalCtx, op: CompOp, r, g, b, a,

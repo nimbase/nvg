@@ -12,7 +12,7 @@ extern "C" {
 #endif
 
 // Pipeline slots (index into the context's pipeline table).
-#define NVGMTL_SLOTS 20
+#define NVGMTL_SLOTS 21
 
 // Buffer slots: 0 = pixels (RGBA8 bytes), 1 = aux (float32 coverage
 // or byte scratch), 2 = spare (e.g. unsharp original).

@@ -12,6 +12,7 @@
 ##        [--grain-soft A,SEED] [--grain-color-soft A,SEED]
 ##        [--ripple AMP,PERIOD[,PHASE]] [--swirl CX,CY,RADIUS,ANGLE]
 ##        [--turbulence SCALE[,OCTAVES,SEED]] [--warp SCALE,AMP[,SEED]]
+##        [--motion DEGREES,LENGTH[,TAPS]]
 ##        [image] [outDir]
 ## Defaults: the tubusan lemons photo, examples/out, and one of each
 ## effect when no effect flag is given.
@@ -31,7 +32,8 @@ proc usage() =
          [--grain-color A,SEED] [--grain-soft A,SEED]
          [--grain-color-soft A,SEED] [--ripple AMP,PERIOD[,PHASE]]
          [--swirl CX,CY,RADIUS,ANGLE] [--turbulence SCALE[,OCT,SEED]]
-         [--warp SCALE,AMP[,SEED]] [image] [outDir]"""
+         [--warp SCALE,AMP[,SEED]] [--motion DEGREES,LENGTH[,TAPS]]
+         [image] [outDir]"""
   quit(1)
 
 proc isImagePath(p: string): bool =
@@ -88,6 +90,9 @@ proc main() =
   var warpScale = -1.0
   var warpAmp = -1.0
   var warpSeed = 0u32
+  var motionDeg = -1.0
+  var motionLen = -1.0
+  var motionTaps = 9
   var image = DefaultImage
   var outDir = "examples/out"
   var seenEffect = false
@@ -213,6 +218,20 @@ proc main() =
           usage()
         warpSeed = uint32(ws)
       seenEffect = true
+    elif a == "--motion":
+      inc i
+      if i > paramCount():
+        usage()
+      let parts = paramStr(i).split(',')
+      if parts.len < 2 or parts.len > 3:
+        usage()
+      motionDeg = parseFloat(parts[0])
+      motionLen = parseFloat(parts[1])
+      if parts.len == 3:
+        motionTaps = parseInt(parts[2])
+        if motionTaps < 2:
+          usage()
+      seenEffect = true
     elif a.startsWith("--"):
       usage()
     else:
@@ -244,6 +263,8 @@ proc main() =
     turbScale = 64.0
     warpScale = 32.0
     warpAmp = 6.0
+    motionDeg = 25.0
+    motionLen = 12.0
   createDir(outDir)
   let base = loadSurface(image)
   echo "image: ", base.w, "x", base.h
@@ -477,6 +498,23 @@ proc main() =
     else:
       let s = fresh()
       s.domainWarp(warpScale, warpAmp, 4, warpSeed)
+      s.savePng(outDir / name)
+      echo "wrote ", outDir / name
+  if motionLen > 0.0:
+    let name = "fx_motion_d" & numRepr(motionDeg) & "_l" &
+      numRepr(motionLen) & ".png"
+    when defined(nvgMetal):
+      if useMetal:
+        discard gpuFx(proc(ctx: MetalCtx) = ctx.motionBlur(motionDeg,
+          motionLen, motionTaps), name)
+      else:
+        let s = fresh()
+        s.motionBlur(motionDeg, motionLen, motionTaps)
+        s.savePng(outDir / name)
+        echo "wrote ", outDir / name
+    else:
+      let s = fresh()
+      s.motionBlur(motionDeg, motionLen, motionTaps)
       s.savePng(outDir / name)
       echo "wrote ", outDir / name
 
