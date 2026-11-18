@@ -27,7 +27,7 @@
 ## (finite colors only, as elsewhere).
 
 import dynasm
-import ./types
+import ../types
 
 proc emitBlendTailX64Static*(op: static CompOp, a: var Assembler) =
   ## Emit the blend tail for one static `op` into `a`. One instantiation

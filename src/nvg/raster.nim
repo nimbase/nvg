@@ -20,7 +20,7 @@ import ./types
 import ./path
 import ./paint
 import ./surface
-import ./jitctx
+import ./backends/jitctx
 
 export types
 

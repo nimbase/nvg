@@ -29,10 +29,10 @@ when defined(macosx):
   {.compile: "metal_bridge.m".}
   {.passL: "-framework Metal -framework Foundation".}
 
-import ./types
-import ./images
-import ./paint
-import ./surface
+import ../types
+import ../images
+import ../paint
+import ../surface
 
 type MetalCtx* = ref object
   p: pointer

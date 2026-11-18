@@ -22,7 +22,7 @@ import std/strutils
 import std/math
 import nvg
 when defined(nvgMetal):
-  import nvg/metal
+  import nvg/backends/metal
 
 const DefaultImage = "tests/data/pexels-tubusan-5773749.jpg"
 

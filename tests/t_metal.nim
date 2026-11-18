@@ -1,6 +1,6 @@
 import std/unittest
 import nvg
-import nvg/metal
+import nvg/backends/metal
 import nvg/surface
 
 test "metal device enumerates with a name":

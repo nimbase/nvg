@@ -13,7 +13,7 @@
 
 import std/os
 import nvg
-import nvg/metal
+import nvg/backends/metal
 
 when not defined(nvgMetal):
   {.error: "gpu example forces the Metal backend: rebuild with -d:nvgMetal".}

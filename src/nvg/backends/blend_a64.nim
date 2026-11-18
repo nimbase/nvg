@@ -14,7 +14,7 @@
 ## and the Bout triple at `[sp+56/64/72]`.
 
 import dynasm
-import ./types
+import ../types
 
 proc emitBlendTailAarch64Static*(op: static CompOp, a: var Assembler) =
   ## Emit the blend tail for one static `op` into `a`. One instantiation

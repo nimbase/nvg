@@ -38,7 +38,7 @@ distribution plus an inter-line gap.
 - Acceptance: hand-computed layout tests; serial suite stays green.
 - Explicitly deferred to item 7: `order`, `flex-shrink`, wrapping.
 
-### 4. Metal `close` lifetime (`src/nvg/metal.nim:26`)
+### 4. Metal `close` lifetime (`src/nvg/backends/metal.nim:26`)
 Today `close` must be called manually (`defer` in tests); there is no
 `=destroy` hook yet.
 - Acceptance: deterministic cleanup, double-close safe, no leak in tests.

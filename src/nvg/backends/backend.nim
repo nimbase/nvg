@@ -4,12 +4,12 @@
 ## `raster.nim`). A future GPU renderer implements the same `fill`/`stroke`
 ## signatures on a new `Backend` subtype so `canvas.nim` does not change.
 
-import ./types
-import ./transform
-import ./path
-import ./paint
-import ./surface
-import ./raster
+import ../types
+import ../transform
+import ../path
+import ../paint
+import ../surface
+import ../raster
 when defined(nvgJit):
   import ./jit
 when defined(nvgMetal):

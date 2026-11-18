@@ -2,7 +2,7 @@ import std/unittest
 import std/random
 import dynasm
 import nvg
-import nvg/jit
+import nvg/backends/jit
 
 # JitBackend must be pixel-identical to CpuBackend on every path, and
 # the row kernel must match blendPixel sample-for-sample.

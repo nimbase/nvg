@@ -14,7 +14,7 @@ import std/os
 import std/math
 import nvg
 when defined(nvgMetal):
-  import nvg/metal
+  import nvg/backends/metal
 
 const
   W = 800

@@ -17,7 +17,7 @@ import ./path
 import ./paint
 import ./surface
 import ./dash
-import ./backend
+import ./backends/backend
 import ./text
 import ./loadimage
 

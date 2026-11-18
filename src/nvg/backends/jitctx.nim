@@ -5,8 +5,8 @@
 ## the x64/AArch64 kernels address fields by numeric displacement (see the
 ## layout notes on each object); keep field order stable.
 import std/math
-import ./types
-import ./paint
+import ../types
+import ../paint
 
 export types
 
