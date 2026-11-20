@@ -7,6 +7,7 @@ testresults/
 !/tests/bench
 !/tests/*.nim
 !/tests/*.nims
+!/tests/fixtures/
 # Build outputs and local tool state (never commit)
 bin/
 bench/
