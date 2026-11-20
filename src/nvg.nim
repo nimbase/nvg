@@ -22,6 +22,8 @@ when defined(nvgJit):
 import ./nvg/backends/backend
 import ./nvg/canvas
 import ./nvg/svg
+import ./nvg/lottie
+import ./nvg/textpath
 
 export types
 export transform
@@ -35,6 +37,8 @@ export pathmeasure
 export layer
 export text
 export svg
+export lottie
+export textpath
 export jitctx
 when defined(nvgJit):
   export jit

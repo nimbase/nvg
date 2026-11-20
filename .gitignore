@@ -13,4 +13,9 @@ bench/
 clue.lock
 plans/
 /examples/out/
+/examples/lottie_cat
+/examples/lottie_cat_gif
+/examples/lottie_loop
+/examples/lottie_loop_gif
+/examples/text_outline
 

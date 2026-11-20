@@ -1589,6 +1589,87 @@ proc appendLayoutSpan*(p: var Path, xf: Xform, lay: TextLayout, x, y: float64,
         of closePath:
           p.closePath()
 
+proc appendBoxes*(p: var Path, xf: Xform, lay: TextLayout, x, y: float64,
+    ha: TextHAlign, va: TextVAlign, wantColor: bool, color: Color) =
+  ## Inline-box geometry for outline capture: path boxes replay their
+  ## stored path translated to the placed offset; image boxes (which
+  ## have no vector form) contribute their placed rect. Same anchor
+  ## math and color-group filter as `appendLayoutSpan`, so capture
+  ## stays pixel-consistent with the canvas box paint path.
+  let dy = valignShift(lay, ha, va)
+  for i, line in lay.lines:
+    let ox = x + linePenX(line.advance, ha)
+    let oy = y + dy + lay.lineY(i)
+    for g in line.glyphs:
+      if g.boxKind == sbkNone:
+        continue
+      if g.hasColor != wantColor:
+        continue
+      if wantColor and not sameColor(g.color, color):
+        continue
+      let gx = ox + g.x
+      let gy = oy + g.y
+      if g.boxKind == sbkPath:
+        for cmd in g.boxPath.commands:
+          case cmd.kind
+          of pcMoveTo:
+            p.moveTo(gx + cmd.p.x, gy + cmd.p.y, xf)
+          of pcLineTo:
+            p.lineTo(gx + cmd.p.x, gy + cmd.p.y, xf)
+          of pcCubicTo:
+            p.bezierTo(gx + cmd.c1.x, gy + cmd.c1.y,
+              gx + cmd.c2.x, gy + cmd.c2.y, gx + cmd.p2.x,
+              gy + cmd.p2.y, xf)
+          of pcClose:
+            p.closePath()
+          of pcWinding:
+            p.appendWinding(cmd.winding)
+      else:
+        p.rect(gx, gy, g.boxW, g.boxH, xf)
+
+proc appendDeco*(p: var Path, xf: Xform, lay: TextLayout, x, y: float64,
+    decor: TextDecor) =
+  ## Underline/strikethrough rules as rect geometry: the same per-line
+  ## run math as the canvas decor paint, minus paint/clip. Lines must
+  ## be box-positioned (draw with `thaLeft`), matching the paint path.
+  if decor == tdNone or lay.lines.len == 0:
+    return
+  for i, line in lay.lines:
+    let base = y + lay.lineY(i)
+    var gi = 0
+    while gi < line.glyphs.len:
+      let eff = if line.glyphs[gi].decor != tdNone:
+          line.glyphs[gi].decor else: decor
+      if eff == tdNone:
+        inc gi
+        continue
+      var x0 = Inf
+      var x1 = -Inf
+      var desc = 0.0
+      var gsize = lay.sizePx
+      while gi < line.glyphs.len:
+        let e2 = if line.glyphs[gi].decor != tdNone:
+            line.glyphs[gi].decor else: decor
+        if e2 != eff:
+          break
+        let g = line.glyphs[gi]
+        if g.hasInk:
+          x0 = min(x0, g.x0)
+          x1 = max(x1, g.x1)
+          desc = max(desc, g.y1)
+        if g.size > 0.0:
+          gsize = max(gsize, g.size)
+        inc gi
+      if x1 <= x0:
+        continue
+      let t = max(1.0, gsize / 16.0)
+      if eff == tdUnderline or eff == tdUnderStrike:
+        let uy = base + desc + max(1.0, gsize * 0.06)
+        p.rect(x + x0, uy, x1 - x0, t, xf)
+      if eff == tdStrike or eff == tdUnderStrike:
+        let sy = base - gsize * 0.28 - t * 0.5
+        p.rect(x + x0, sy, x1 - x0, t, xf)
+
 proc appendLayout*(p: var Path, xf: Xform, lay: TextLayout, x, y: float64,
     ha: TextHAlign, va: TextVAlign) =
   ## Emit the laid-out glyph outlines as path verbs (transform captured

@@ -19,6 +19,7 @@ import ./surface
 import ./dash
 import ./backends/backend
 import ./text
+import ./textpath
 import ./loadimage
 
 export types
@@ -26,6 +27,7 @@ export transform except apply
 export paint
 export surface except blendPixel
 export text
+export textpath
 export loadimage
 
 type
@@ -2202,6 +2204,119 @@ proc measureSpanBox*(c: Canvas, font: TextFont, size: float64, x, y: float64,
   let bl = layoutBoxSpans(font, size, s, spans, letterSpacing,
     lineHeightMul, lineHeightPx, o, features, fallbacks)
   measureLayout(bl.lay, thaLeft)
+
+# --- Text outlines: capture layout as vector geometry ---
+
+proc textOutlines*(c: Canvas, x, y: float64, s: string,
+    features: openArray[Feature] = []): TextOutlines =
+  ## Capture stateful text as outlines under the current transform
+  ## (same layout as `fillText`). See `captureOutlines`.
+  let st = c.states[^1]
+  let lay = layoutText(c.lookupFont(st.fontFace), st.fontSize, s,
+    st.letterSpacing, st.lineHeightMul, features, st.lineHeightAbs,
+    c.fallbackFonts())
+  captureOutlines(lay, x, y, st.textHAlign, st.textVAlign, st.xform)
+
+proc textOutlines*(c: Canvas, font: TextFont, size: float64, x, y: float64,
+    s: string, ha = thaLeft, va = tvaBaseline, letterSpacing = 0.0,
+    lineHeightMul = 1.2, lineHeightPx = 0.0,
+    features: openArray[Feature] = [],
+    fallbacks: openArray[TextFont] = []): TextOutlines =
+  ## Stateless overload of `textOutlines` (identity transform).
+  let lay = layoutText(font, size, s, letterSpacing, lineHeightMul,
+    features, lineHeightPx, fallbacks)
+  captureOutlines(lay, x, y, ha, va, identity())
+
+proc spansOutlines*(c: Canvas, x, y: float64, s: string,
+    spans: openArray[TextSpan], ha = thaLeft, va = tvaBaseline,
+    features: openArray[Feature] = []): TextOutlines =
+  ## Capture span-styled text as outlines (same layout as `fillSpans`).
+  let st = c.states[^1]
+  let lay = layoutSpans(c.lookupFont(st.fontFace), st.fontSize, s,
+    spans, st.letterSpacing, st.lineHeightMul, features,
+    st.lineHeightAbs, c.fallbackFonts())
+  captureOutlines(lay, x, y, ha, va, st.xform)
+
+proc spansOutlines*(c: Canvas, font: TextFont, size: float64, x, y: float64,
+    s: string, spans: openArray[TextSpan], ha = thaLeft,
+    va = tvaBaseline, letterSpacing = 0.0, lineHeightMul = 1.2,
+    lineHeightPx = 0.0, features: openArray[Feature] = [],
+    fallbacks: openArray[TextFont] = []): TextOutlines =
+  ## Stateless overload of `spansOutlines` (identity transform).
+  let lay = layoutSpans(font, size, s, spans, letterSpacing,
+    lineHeightMul, features, lineHeightPx, fallbacks)
+  captureOutlines(lay, x, y, ha, va, identity())
+
+proc textBoxOutlines*(c: Canvas, x, y, w, h: float64, s: string,
+    ha = thaLeft, va = tvaTop, wrap = true, overflow = toVisible,
+    fit = tfNone, scaleX = 1.0,
+    features: openArray[Feature] = []): TextOutlines =
+  ## Capture box text as outlines (same layout as `fillTextBox`).
+  ## Clipping is paint-only and never captured.
+  let st = c.states[^1]
+  let bl = layoutBox(c.lookupFont(st.fontFace), st.fontSize, s,
+    st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, w, h, ha, va,
+    wrap, overflow, fit, scaleX, features, c.fallbackFonts())
+  captureOutlines(bl.lay, x, y + bl.shift, thaLeft, tvaBaseline,
+    st.xform)
+
+proc textBoxOutlines*(c: Canvas, font: TextFont, size: float64, x, y, w,
+    h: float64, s: string, ha = thaLeft, va = tvaTop, wrap = true,
+    overflow = toVisible, fit = tfNone, scaleX = 1.0,
+    letterSpacing = 0.0, lineHeightMul = 1.2, lineHeightPx = 0.0,
+    features: openArray[Feature] = [],
+    fallbacks: openArray[TextFont] = []): TextOutlines =
+  ## Stateless overload of `textBoxOutlines` (identity transform).
+  let bl = layoutBox(font, size, s, letterSpacing, lineHeightMul,
+    lineHeightPx, w, h, ha, va, wrap, overflow, fit, scaleX, features,
+    fallbacks)
+  captureOutlines(bl.lay, x, y + bl.shift, thaLeft, tvaBaseline,
+    identity())
+
+proc textBoxOutlines*(c: Canvas, x, y: float64, s: string,
+    o: TextBoxOpts,
+    features: openArray[Feature] = []): TextOutlines =
+  ## `TextBoxOpts` overload of `textBoxOutlines`, including decor rules.
+  let st = c.states[^1]
+  let bl = layoutBoxOpts(c.lookupFont(st.fontFace), st.fontSize, s,
+    st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, o, features,
+    c.fallbackFonts())
+  captureOutlines(bl.lay, x, y + bl.shift, thaLeft, tvaBaseline,
+    st.xform, o.decor)
+
+proc textBoxOutlines*(c: Canvas, font: TextFont, size: float64, x, y: float64,
+    s: string, o: TextBoxOpts, letterSpacing = 0.0,
+    lineHeightMul = 1.2, lineHeightPx = 0.0,
+    features: openArray[Feature] = [],
+    fallbacks: openArray[TextFont] = []): TextOutlines =
+  ## Stateless `TextBoxOpts` overload of `textBoxOutlines`.
+  let bl = layoutBoxOpts(font, size, s, letterSpacing, lineHeightMul,
+    lineHeightPx, o, features, fallbacks)
+  captureOutlines(bl.lay, x, y + bl.shift, thaLeft, tvaBaseline,
+    identity(), o.decor)
+
+proc spanBoxOutlines*(c: Canvas, x, y: float64, s: string,
+    spans: openArray[TextSpan], o: TextBoxOpts,
+    features: openArray[Feature] = []): TextOutlines =
+  ## Capture span box text as outlines (same layout as `fillSpanBox`),
+  ## including decor rules.
+  let st = c.states[^1]
+  let bl = layoutBoxSpans(c.lookupFont(st.fontFace), st.fontSize, s,
+    spans, st.letterSpacing, st.lineHeightMul, st.lineHeightAbs, o,
+    features, c.fallbackFonts())
+  captureOutlines(bl.lay, x, y + bl.shift, thaLeft, tvaBaseline,
+    st.xform, o.decor)
+
+proc spanBoxOutlines*(c: Canvas, font: TextFont, size: float64, x, y: float64,
+    s: string, spans: openArray[TextSpan], o: TextBoxOpts,
+    letterSpacing = 0.0, lineHeightMul = 1.2, lineHeightPx = 0.0,
+    features: openArray[Feature] = [],
+    fallbacks: openArray[TextFont] = []): TextOutlines =
+  ## Stateless overload of `spanBoxOutlines`.
+  let bl = layoutBoxSpans(font, size, s, spans, letterSpacing,
+    lineHeightMul, lineHeightPx, o, features, fallbacks)
+  captureOutlines(bl.lay, x, y + bl.shift, thaLeft, tvaBaseline,
+    identity(), o.decor)
 
 proc flattened(c: Canvas): seq[SubPoly] =
   path.flatten(c.path, c.tessTol, DefaultDistTol)
